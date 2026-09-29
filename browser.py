@@ -3936,28 +3936,31 @@ html, body { margin: 0; background: #f3f4f6; }
 .hdr { display: flex; align-items: flex-start; justify-content: space-between; gap: 28px; margin-bottom: 16px; padding: 18px 20px;
   background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06); }
 .hdr .main { min-width: 0; flex: 1 1 auto; }
-.verdict { display: inline-flex; align-items: center; gap: 7px; padding: 3px 11px 3px 9px; border-radius: 999px; font-size: 11px; line-height: 16px;
-  font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; background: #fee2e2; color: #dc2626; }
-.verdict::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.verdict { display: inline-flex; align-items: center; gap: 8px; padding: 4px 13px 4px 11px; border-radius: 999px; font-size: 12.5px; line-height: 18px;
+  font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; background: #fee2e2; color: #e11d48; }
+.verdict::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: currentColor; }
 .verdict.nearly { background: #dbeafe; color: #2563eb; } .verdict.identical { background: #dcfce7; color: #16a34a; }
-.title { margin: 10px 0 4px; color: #0f172a; font-size: 22px; line-height: 28px; font-weight: 700; letter-spacing: -0.015em; }
-.route { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; color: #6b7280; font-size: 12.5px; line-height: 18px; }
+.title { margin: 12px 0 6px; color: #0f172a; font-size: 28px; line-height: 34px; font-weight: 700; letter-spacing: -0.015em; }
+.route { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; color: #6b7280; font-size: 14.5px; line-height: 20px; }
 .route b { color: #374151; font-weight: 500; } .route .arrow { color: #9ca3af; }
 .note { margin-top: 12px; padding: 7px 11px; border-left: 3px solid #f59e0b; border-radius: 0 8px 8px 0; background: #fffbeb;
   color: #92400e; font-size: 12.5px; line-height: 18px; max-width: 720px; }
 .counts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
-.count { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px 3px 8px; border: 1px solid #e5e7eb; border-radius: 999px;
-  background: #f9fafb; color: #374151; font-size: 12px; line-height: 16px; }
+.count { display: inline-flex; align-items: center; gap: 7px; padding: 5px 13px 5px 11px; border: 1px solid #e5e7eb; border-radius: 999px;
+  background: #fff; color: #1f2937; font-size: 14px; line-height: 18px; }
 .count b { color: #0f172a; font-weight: 700; font-variant-numeric: tabular-nums; }
-.count .swatch { margin: 0; border-radius: 50%; }
+.count .swatch { width: 11px; height: 11px; margin: 0; border-radius: 50%; }
+.count.k-color b, .count.k-size b { color: #d97706; } .count.k-content b, .count.k-edges b { color: #db2777; }
+.count.k-missing b, .count.s-different b { color: #dc2626; } .count.k-extra b, .count.s-missing b { color: #9333ea; }
+.count.k-moved b { color: #0284c7; } .count.s-lacking b { color: #d97706; } .count.ok b { color: #16a34a; } .count.nearly b { color: #2563eb; }
 .swatch.ok { background: #22c55e; } .swatch.nearly { background: #3b82f6; }
 .stats { display: flex; gap: 10px; flex: 0 0 auto; }
-.stat { min-width: 124px; padding: 11px 14px 12px; background: #fff; border: 1px solid #e5e7eb; border-radius: 11px; }
-.stat .l { color: #4b5563; font-size: 10.5px; line-height: 14px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; }
-.stat .v { margin-top: 3px; color: #0f172a; font-size: 24px; line-height: 28px; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
-.stat .v small { margin-left: 2px; color: #6b7280; font-size: 13px; font-weight: 500; letter-spacing: 0; }
-.stat .n { margin-top: 2px; color: #6b7280; font-size: 11px; line-height: 14px; }
-.meter { position: relative; height: 5px; margin-top: 8px; border-radius: 3px; background: #e5e7eb; }
+.stat { min-width: 150px; padding: 13px 16px 14px; background: #fff; border: 1px solid #e5e7eb; border-radius: 11px; }
+.stat .l { color: #4b5563; font-size: 12px; line-height: 16px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; }
+.stat .v { margin-top: 4px; color: #0f172a; font-size: 30px; line-height: 36px; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.stat .v small { margin-left: 2px; color: #374151; font-size: 16px; font-weight: 500; letter-spacing: 0; }
+.stat .n { margin-top: 4px; color: #6b7280; font-size: 12.5px; line-height: 16px; }
+.meter { position: relative; height: 7px; margin-top: 10px; border-radius: 3px; background: #e5e7eb; }
 .meter span { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: #ef4444; }
 .meter.nearly span { background: #3b82f6; } .meter.identical span { background: #22c55e; }
 .meter em { position: absolute; top: -3px; width: 2px; height: 11px; margin-left: -1px; border-radius: 1px; background: #374151; }
@@ -3971,11 +3974,11 @@ html, body { margin: 0; background: #f3f4f6; }
 .cols { display: flex; align-items: flex-start; gap: 16px; }
 figure { display: flex; flex-direction: column; gap: 12px; margin: 0; padding: 14px; background: #fff; border: 1px solid #e5e7eb;
   border-radius: 14px; box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06); }
-figcaption { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; min-height: 22px; color: #6b7280; font-size: 12px; word-break: break-word; }
-.tag { padding: 2px 9px; border-radius: 999px; font-size: 11px; line-height: 16px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+figcaption { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; min-height: 24px; color: #6b7280; font-size: 14px; word-break: break-word; }
+.tag { padding: 3px 11px; border-radius: 999px; font-size: 12.5px; line-height: 18px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
   background: #f3f4f6; color: #374151; }
 .tag.design { background: #dbeafe; color: #1d4ed8; }
-.tag.diff { background: #fce7f3; color: #be185d; }
+.tag.diff { background: #ffe4e6; color: #e11d48; }
 .chip { display: inline-flex; align-items: center; color: #4b5563; }
 .frame { align-self: start; }
 .frame { position: relative; }
@@ -3989,10 +3992,17 @@ canvas { display: block; border: 1px solid #e5e7eb; border-radius: 8px; backgrou
 .box.k-size i { background: #f59e0b; } .box.k-missing i { background: #ef4444; } .box.k-extra i { background: #a855f7; }
 .box.k-moved i { background: #0ea5e9; } .box.k-color i { background: #eab308; color: #111; } .box.k-edges i { background: #9ca3af; }
 .box.low i { top: auto; bottom: -16px; border-radius: 0 3px 3px 3px; }
+/* The "What differs" view: bold markers over the page, a badge on each one's top-left corner. */
+.markers .box { border-width: 2px; border-radius: 3px; }
+.markers .box i { left: -10px; top: -11px; min-width: 14px; height: 20px; padding: 0 4px; border-radius: 4px;
+  font: 700 13px/20px -apple-system, "Segoe UI", system-ui, sans-serif; box-shadow: 0 1px 3px rgba(15, 23, 42, 0.25); }
+.markers .box.low i { top: -11px; bottom: auto; left: -10px; border-radius: 4px; }
+.markers .box.k-content { border-color: #f43f5e; } .markers .box.k-content i { background: #f43f5e; }
+.markers .box.k-color i { background: #f5b400; color: #111; }
 .swatch { display: inline-block; width: 9px; height: 9px; margin: 0 5px 0 0; border-radius: 3px; background: #ff2d8c; }
 .swatch.k-size { background: #f59e0b; } .swatch.k-missing { background: #ef4444; } .swatch.k-extra { background: #a855f7; }
 .swatch.k-moved { background: #0ea5e9; } .swatch.k-color { background: #eab308; }
-.swatch.aa { background: #e6d796; }
+.swatch.aa { background: #c7cbe0; }
 .box.s-different { border-color: #ef4444; } .box.s-missing { border-color: #a855f7; border-style: dashed; }
 .box.s-lacking { border-color: #f59e0b; border-style: dashed; }
 .box.s-different i { background: #ef4444; } .box.s-missing i { background: #a855f7; } .box.s-lacking i { background: #f59e0b; color: #111; }
@@ -4190,7 +4200,7 @@ const boardHeader = (h) => {
   if (h.counts && h.counts.length) {
     const counts = el("div", "counts");
     for (const [cls, value, label] of h.counts) {
-      const c = el("span", "count");
+      const c = el("span", "count " + cls);
       c.append(el("span", "swatch " + cls));
       if (value !== null) c.append(el("b", "", String(value)));
       c.append(label);
@@ -4781,13 +4791,14 @@ window.renderCompare = async function (o) {
     x.drawImage(src, 0, 0, src.width || src.naturalWidth, src.height || src.naturalHeight, 0, 0, c.width, c.height);
     return c;
   };
+  const marked = areas.filter((a) => !a.minor);
   const framed = (canvas, numbered) => {
     const wrap = document.createElement("div");
-    wrap.className = "frame";
+    wrap.className = "frame" + (numbered ? " markers" : "");
     wrap.appendChild(canvas);
-    for (const a of areas) {
+    for (const a of numbered ? marked : areas) {
       const box = document.createElement("div");
-      box.className = "box k-" + a.kind + (a.minor ? " minor" : "") + (a.y * k < 18 ? " low" : "");
+      box.className = "box k-" + a.kind + (a.minor ? " minor" : "") + (a.y * k < 14 || a.x * k < 14 ? " low" : "");
       box.style.left = (1 + a.x * k - 2) + "px";
       box.style.top = (1 + a.y * k - 2) + "px";
       box.style.width = (a.width * k + 4) + "px";
@@ -4826,8 +4837,9 @@ window.renderCompare = async function (o) {
   cols.className = "cols";
   cols.append(
     figure("Design", refCaption, view(refCanvas, refW, refH)),
-    figure("Your page", o.pageLabel + " · " + PW + "×" + PH, framed(view(cur, PW, PH), false)),
-    figure("What differs", "numbered as in the results \u00b7 dashed: minor", framed(view(diff, CW, CH), true))
+    figure("Your page", o.pageLabel + " · " + PW + "×" + PH, view(cur, PW, PH)),
+    figure("What differs", marked.length ? "numbered markers show the " + marked.length + (marked.length === 1 ? " difference" : " differences") :
+      "no difference stands out", framed(view(cur, CW, CH), true))
   );
   board.appendChild(cols);
   const box = board.getBoundingClientRect();
@@ -6280,7 +6292,7 @@ def _compare_options(reference: _Reference, page_png: bytes, page_label: str, *,
         "smoothDeltaE": COMPARE_SMOOTH_DELTA_E,
         "ssimNoise": COMPARE_SSIM_NOISE,
         "ssimRadius": COMPARE_SSIM_RADIUS,
-        "columnWidth": 560,
+        "columnWidth": 600,
         "maxHeight": 1600,
         "mode": mode,
         "region": region,
