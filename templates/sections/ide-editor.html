@@ -1,0 +1,296 @@
+<div id="ide-editor-section" class="section-card" style="display: none;">
+    <div id="ide-editor-inner" style="display:flex;flex-direction:column;height:100%;overflow:hidden;padding:0;min-height:0;">
+       <div id="ide-top-bar" class="theme-transition" style="display:flex;align-items:stretch;">
+          <div id="ide-project-tabs" class="ide-project-tabs theme-transition" hidden></div>
+       </div>
+       <div id="ide-main-row" class="theme-transition" style="display:flex;flex:1;height:100%;gap:0;position:relative;min-height:0;overflow:hidden;">
+
+          <div id="ide-sidebar" class="theme-transition" style="width:380px;display:flex;flex-direction:column;flex-shrink:0;">
+              <div id="ide-panel-content" class="theme-transition" style="flex:1;overflow:auto;position:relative;min-height:0;">
+                <div id="ide-context-menu" class="ide-context-menu" style="display:none;"></div>
+
+                <div id="ide-explorer-panel" class="ide-panel" style="display:block;padding:8px 0;overflow-x:auto;overflow-y:auto;max-width:100%;">
+                   <div id="ide-file-tree" style="font-size:13px;width:max-content;min-width:100%;white-space:nowrap;">
+                      <div id="ide-explorer-empty" class="theme-transition">
+                         <div class="ide-explorer-empty-title">No folder open</div>
+                         <div class="ide-explorer-empty-sub">Browse files and let the agent work in a folder.</div>
+                         <button type="button" class="ide-explorer-empty-btn" onclick="openLiveCodeProjectBrowser(); return false;">Open folder</button>
+                         <button type="button" class="ide-explorer-empty-link" onclick="openLiveCodeCloneDialog(); return false;">Clone a repository</button>
+                      </div>
+                   </div>
+                </div>
+
+                <div id="ide-recent-panel" class="ide-panel theme-transition" style="display:none;padding:8px;">
+                   <div style="font-size:12px;font-weight:600;margin-bottom:8px;padding:4px 4px 0;" class="theme-transition">Recent Projects</div>
+                   <div id="ide-recent-projects-list" style="font-size:12px;"></div>
+                   <button type="button" class="btn btn-ghost theme-transition" style="width:100%;margin-top:8px;font-size:12px;padding:6px;" onclick="openLiveCodeProjectBrowser(); return false;">Open Folder…</button>
+                </div>
+             </div>
+          </div>
+
+          <div id="ide-sidebar-divider" class="section-resize-handle"></div>
+
+          <div id="ide-center-column" class="theme-transition" style="flex:1;display:flex;min-width:0;overflow:hidden;">
+             <div id="ide-main-container" class="theme-transition" style="flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0;">
+                <div id="ide-open-files-list" class="theme-transition" style="display:none;align-items:center;border-bottom:1px solid;overflow-x:auto;overflow-y:hidden;flex-shrink:0;min-height:32px;max-height:32px;gap:2px;padding:2px 4px;"></div>
+
+                <div id="ide-editor-container" class="theme-transition" style="flex:1;min-height:0;position:relative;">
+                   <div id="ide-editor-placeholder" class="livecode-editor-placeholder theme-transition" style="position:absolute;top:0;left:0;right:0;bottom:0;">
+                      <div id="ide-editor-placeholder-no-project" class="livecode-welcome theme-transition">
+                         <div class="livecode-welcome-inner">
+                            <div class="livecode-welcome-brand">
+                               <img class="livecode-welcome-logo" src="/livecode/assets/livecode-logo.png" alt="" width="40" height="40" draggable="false">
+                               <span class="livecode-welcome-name">LiveCode</span>
+                            </div>
+                            <div class="livecode-welcome-meta">
+                               <span>Agent workspace</span><span class="livecode-welcome-sep" aria-hidden="true">·</span><button type="button" class="livecode-welcome-link lc-btn" onclick="openLiveCodeSettings(); return false;">Settings</button>
+                            </div>
+                            <div class="livecode-welcome-cards">
+                               <button type="button" class="livecode-welcome-card lc-btn" onclick="openLiveCodeProjectBrowser(); return false;">
+                                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4.2l1.8 2h9a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z"></path></svg>
+                                  <span>Open project</span>
+                               </button>
+                               <button type="button" class="livecode-welcome-card lc-btn" onclick="openLiveCodeCloneDialog(); return false;">
+                                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5v10"></path><path d="m8 10 4 4 4-4"></path><path d="M4.5 15.5v2A2 2 0 0 0 6.5 19.5h11a2 2 0 0 0 2-2v-2"></path></svg>
+                                  <span>Clone repo</span>
+                               </button>
+                               <button type="button" class="livecode-welcome-card lc-btn" onclick="openLiveCodeNewProjectDialog(); return false;">
+                                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5.5v13"></path><path d="M5.5 12h13"></path></svg>
+                                  <span>New project</span>
+                               </button>
+                            </div>
+                            <div id="livecode-welcome-recent" class="livecode-welcome-recent" hidden>
+                               <div class="livecode-welcome-recent-head">Recent projects</div>
+                               <div id="livecode-welcome-recent-list" class="livecode-welcome-recent-list"></div>
+                            </div>
+                         </div>
+                      </div>
+                      <div id="ide-editor-placeholder-no-file" class="livecode-empty-editor theme-transition" style="display:none;">
+                         <img class="livecode-empty-editor-logo" src="/livecode/assets/livecode-logo.png" alt="" width="88" height="88" draggable="false">
+                         <div class="livecode-empty-editor-title">No File Open</div>
+                         <div class="livecode-empty-editor-subtitle">Use the agent, explorer, or terminal without opening a file.</div>
+                         <div class="livecode-empty-editor-steps">
+                            <div class="livecode-empty-editor-step"><span class="livecode-empty-editor-step-num">1</span><span><strong>Agent</strong> — Chat to search, read, or edit code.</span></div>
+                            <div class="livecode-empty-editor-step"><span class="livecode-empty-editor-step-num">2</span><span><strong>Explorer</strong> — Open a file from the sidebar.</span></div>
+                            <div class="livecode-empty-editor-step"><span class="livecode-empty-editor-step-num">3</span><span><strong>Terminal</strong> — Run tests, scripts, or shell commands.</span></div>
+                         </div>
+                      </div>
+                   </div>
+                   <div id="ide-settings-view" class="livecode-settings-view theme-transition" style="display:none;" role="region" aria-label="LiveCode settings"></div>
+                   <div id="ide-browser-view" class="browser-tab-container theme-transition" style="display:none;" role="region" aria-label="Browser"></div>
+                   <div id="ide-plan-view" class="ide-plan-view theme-transition" style="display:none;">
+                      <div id="ide-plan-header" class="ide-plan-header theme-transition">
+                         <div id="ide-plan-breadcrumb" class="ide-plan-breadcrumb">
+                            <span id="ide-plan-breadcrumb-root" class="ide-plan-breadcrumb-root">Plans</span>
+                            <span class="ide-plan-breadcrumb-sep" aria-hidden="true">/</span>
+                            <span id="ide-plan-name" class="ide-plan-breadcrumb-name"></span>
+                         </div>
+                         <div class="ide-plan-actions">
+                            <span id="ide-plan-status" class="ide-plan-status" style="display:none;" role="status"></span>
+                            <button type="button" id="ide-plan-build" class="livecode-btn is-yellow" onclick="buildLiveCodePlan(); return false;" title="Approve this plan and start building">Build<span class="livecode-kbd">⌘⏎</span></button>
+                            <button type="button" id="ide-plan-menu-btn" class="ide-plan-menu-btn theme-transition" onclick="toggleLiveCodePlanMenu(event); return false;" title="More" aria-haspopup="menu" aria-expanded="false">
+                               <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.6"></circle><circle cx="12" cy="12" r="1.6"></circle><circle cx="19" cy="12" r="1.6"></circle></svg>
+                            </button>
+                         </div>
+                      </div>
+                      <div id="ide-plan-menu" class="ide-plan-menu theme-transition" style="display:none;" role="menu" aria-label="Markdown view options"></div>
+                      <div id="ide-plan-body" class="ide-plan-body"></div>
+                   </div>
+                   <div id="ide-monaco" style="position:absolute;top:0;left:0;right:0;bottom:0;display:none;"></div>
+                   <textarea id="ide-code-editor" style="position:absolute;top:0;left:0;right:0;bottom:0;width:100%;height:100%;border:none;outline:none;resize:none;font-family:monospace;font-size:14px;padding:10px;background:transparent;color:inherit;display:none;" readonly></textarea>
+                </div>
+
+                <div id="ide-terminal-divider" class="theme-transition" style="height:1px;opacity:0.3;cursor:row-resize;flex-shrink:0;position:relative;display:none;">
+                   <div id="ide-terminal-divider-handle" class="theme-transition" style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);height:3px;width:30px;border-radius:10px;opacity:0.5;transition:all 0.2s;"></div>
+                </div>
+
+                <div id="ide-terminal-panel" class="theme-transition" style="height:150px;display:none;flex-direction:column;flex-shrink:0;">
+                   <div id="ide-terminal-tabs" class="ide-terminal-tabs theme-transition" style="display:flex;align-items:center;height:32px;flex-shrink:0;overflow-x:auto;overflow-y:hidden;">
+                      <div id="ide-terminal-tabs-list" style="display:flex;align-items:center;flex:0 0 auto;min-width:0;height:100%;"></div>
+                      <button type="button" id="ide-terminal-tab-add" class="ide-terminal-tab-action theme-transition" title="New terminal" aria-label="New terminal">
+                         <svg class="ui-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                      </button>
+                   </div>
+                   <div id="ide-terminal-container" style="flex:1;overflow:hidden;box-sizing:border-box !important;position:relative;padding:5px !important;"></div>
+                </div>
+             </div>
+
+             <div id="ide-agent-divider" class="wb-pane-divider wb-pane-divider--subtle" style="display:block;"></div>
+
+             <div id="livecode-agent-panel" class="mongodb-chat-pane theme-transition" style="width:420px;display:flex;flex-shrink:0;min-width:280px;max-width:70%;">
+                <div id="livecode-chat-panel" style="flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0;">
+                   <div id="livecode-chat-tabs" class="livecode-chat-tabs theme-transition">
+                      <div id="livecode-chat-tabs-list" class="livecode-chat-tabs-list"></div>
+                      <div class="livecode-chat-tabs-actions">
+                         <button type="button" id="livecode-chat-tab-add" class="livecode-chat-tab-action theme-transition" title="New chat" aria-label="New chat">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                         </button>
+                         <button type="button" id="livecode-chat-session-history" class="livecode-chat-tab-action theme-transition" title="Chat history" aria-label="Chat history" aria-haspopup="true" aria-expanded="false">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                         </button>
+                      </div>
+                   </div>
+                   <div id="livecode-chat-session-menu" class="livecode-chat-session-menu theme-transition" style="display:none;" role="menu" aria-label="Chat sessions">
+                      <div id="livecode-chat-session-menu-list" class="livecode-chat-session-menu-list"></div>
+                   </div>
+                   <div id="livecode-project-menu" class="livecode-chat-session-menu theme-transition" style="display:none;" role="menu" aria-label="Recent projects">
+                      <div id="livecode-project-menu-list" class="livecode-chat-session-menu-list"></div>
+                   </div>
+                   <div id="livecode-chat-main" class="theme-transition" style="flex:1;display:flex;flex-direction:column;position:relative;overflow:hidden;min-height:0;">
+                      <div id="livecode-chat-container" style="display:flex;flex:1;flex-direction:column;overflow:hidden;min-height:0;">
+                         <div id="livecode-chat-messages" class="chat-output" data-chat="sidebar"></div>
+                         <input type="file" id="livecode-attach-file-input" style="display:none;" accept=".txt,.md,.markdown,.csv,.tsv,.json,.log,.py,.js,.jsx,.ts,.tsx,.java,.go,.rb,.php,.c,.cpp,.h,.hpp,.cs,.html,.htm,.css,.scss,.xml,.yaml,.yml,.sql,.sh,.ini,.conf,.toml,.env,.png,.jpg,.jpeg,.gif,.webp,.bmp,.pdf,.docx,image/*,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple />
+                         <div id="livecode-chat-pill-wrapper" class="theme-transition">
+                            <div id="livecode-composer-stack" class="livecode-composer-stack theme-transition" hidden>
+                               <div id="livecode-changes-bar" class="livecode-changes-bar theme-transition" hidden>
+                                  <div class="livecode-changes-row">
+                                     <button type="button" class="livecode-changes-toggle" data-changes-action="toggle" aria-expanded="false" aria-controls="livecode-changes-list">
+                                        <svg class="livecode-changes-chevron" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6.4 4.9 9.6 8 6.4 11.1"></polyline></svg>
+                                        <span class="livecode-changes-count">0 Files</span>
+                                     </button>
+                                     <span class="livecode-changes-actions">
+                                        <button type="button" class="livecode-changes-btn" data-changes-action="stop" title="Stop the agent" hidden>Stop</button>
+                                        <button type="button" class="livecode-changes-btn" data-changes-action="undo" title="Revert every file the agent changed in this chat">Undo All</button>
+                                        <button type="button" class="livecode-changes-btn" data-changes-action="keep" title="Accept the agent's changes">Keep All</button>
+                                        <button type="button" class="livecode-changes-btn is-primary" data-changes-action="review" title="Open the changed files">Review</button>
+                                     </span>
+                                  </div>
+                                  <div id="livecode-changes-list" class="livecode-changes-list" hidden></div>
+                               </div>
+                               <div id="livecode-queue-bar" class="livecode-queue-bar" hidden></div>
+                            </div>
+                            <div id="livecode-questions-bar" class="livecode-questions-bar theme-transition" tabindex="-1" role="group" aria-label="Questions" hidden></div>
+                            <div class="chatbot-composer theme-transition" data-sidebar-section="livecode" id="livecode-chat-composer">
+                               <div class="chatbot-composer-body">
+                                  <div id="livecode-image-thumbnails" class="livecode-image-thumbnails theme-transition" style="display:none;" aria-hidden="true"></div>
+                                  <div id="livecode-drag-ghost-pill" class="livecode-drag-ghost-pill theme-transition" style="display:none;" aria-hidden="true"></div>
+                                  <div id="livecode-chat-input" class="chatbot-pill-input chatbot-composer-input livecode-composer-editable is-empty theme-transition" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="Plan, Build, / for skills, @ for context"></div>
+                                  <div id="livecode-mention-menu" class="livecode-mention-menu" style="display:none;" role="listbox" aria-label="Files and folders"></div>
+                                  <div id="livecode-slash-menu" class="livecode-mention-menu" style="display:none;" role="listbox" aria-label="Skills"></div>
+                                  <div id="livecode-mcp-panel" class="livecode-mcp-panel livecode-mcp-popover theme-transition" style="display:none;" role="dialog" aria-label="MCP servers">
+                                     <div class="livecode-mcp-pop-header">
+                                        <div class="livecode-mcp-pop-title">MCP Servers</div>
+                                        <div class="livecode-mcp-pop-actions">
+                                           <button type="button" class="livecode-mcp-icon-btn lc-btn" onclick="refreshLiveCodeMcpConnections(); return false;" title="Reconnect and reload tools" aria-label="Reconnect MCP servers"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.9-3.9L4 8.5"></path><path d="M4 4v4.5h4.5"></path><path d="M4 13a8 8 0 0 0 14.9 3.9l1.1-1.4"></path><path d="M20 20v-4.5h-4.5"></path></svg></button>
+                                           <button type="button" class="livecode-mcp-icon-btn lc-btn" onclick="openLiveCodeSettings('mcp'); return false;" title="Manage MCP servers" aria-label="Manage MCP servers"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="M11.567 9.8895C12.2495 8.90124 12.114 7.5637 11.247 6.7325C10.3679 5.88806 9.02339 5.75928 7.99998 6.4215C7.57983 6.69308 7.25013 7.0837 7.05298 7.5435C6.85867 7.99881 6.80774 8.50252 6.90698 8.9875C7.00665 9.47472 7.25054 9.92071 7.60698 10.2675C7.97021 10.6186 8.42786 10.8563 8.92398 10.9515C9.42353 11.049 9.94062 11.0001 10.413 10.8105C10.8798 10.6237 11.2812 10.3033 11.567 9.8895Z"></path><path fill-rule="evenodd" clip-rule="evenodd" d="M12.433 17.8895C11.7504 16.9012 11.886 15.5637 12.753 14.7325C13.6321 13.8881 14.9766 13.7593 16 14.4215C16.4202 14.6931 16.7498 15.0837 16.947 15.5435C17.1413 15.9988 17.1922 16.5025 17.093 16.9875C16.9933 17.4747 16.7494 17.9207 16.393 18.2675C16.0298 18.6186 15.5721 18.8563 15.076 18.9515C14.5773 19.0481 14.0614 18.9988 13.59 18.8095C13.1222 18.6234 12.7197 18.3034 12.433 17.8895V17.8895Z"></path><path d="M12 7.75049C11.5858 7.75049 11.25 8.08627 11.25 8.50049C11.25 8.9147 11.5858 9.25049 12 9.25049V7.75049ZM19 9.25049C19.4142 9.25049 19.75 8.9147 19.75 8.50049C19.75 8.08627 19.4142 7.75049 19 7.75049V9.25049ZM6.857 9.25049C7.27121 9.25049 7.607 8.9147 7.607 8.50049C7.607 8.08627 7.27121 7.75049 6.857 7.75049V9.25049ZM5 7.75049C4.58579 7.75049 4.25 8.08627 4.25 8.50049C4.25 8.9147 4.58579 9.25049 5 9.25049V7.75049ZM12 17.2505C12.4142 17.2505 12.75 16.9147 12.75 16.5005C12.75 16.0863 12.4142 15.7505 12 15.7505V17.2505ZM5 15.7505C4.58579 15.7505 4.25 16.0863 4.25 16.5005C4.25 16.9147 4.58579 17.2505 5 17.2505V15.7505ZM17.143 15.7505C16.7288 15.7505 16.393 16.0863 16.393 16.5005C16.393 16.9147 16.7288 17.2505 17.143 17.2505V15.7505ZM19 17.2505C19.4142 17.2505 19.75 16.9147 19.75 16.5005C19.75 16.0863 19.4142 15.7505 19 15.7505V17.2505ZM12 9.25049H19V7.75049H12V9.25049ZM6.857 7.75049H5V9.25049H6.857V7.75049ZM12 15.7505H5V17.2505H12V15.7505ZM17.143 17.2505H19V15.7505H17.143V17.2505Z" fill="currentColor" stroke="none"></path></svg></button>
+                                        </div>
+                                     </div>
+                                     <input type="search" id="livecode-mcp-filter" class="livecode-mcp-filter theme-transition" placeholder="Search servers and tools" oninput="if(window._livecodeRenderMcpServers) window._livecodeRenderMcpServers();" aria-label="Search MCP servers">
+                                     <div id="livecode-mcp-list" class="livecode-mcp-list"></div>
+                                     <button type="button" class="livecode-mcp-pop-add lc-btn" onclick="openLiveCodeMcpAddDialog(); return false;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg><span>Add MCP server</span></button>
+                                  </div>
+                               </div>
+                               <div class="chatbot-composer-toolbar">
+                                  <div class="chatbot-composer-toolbar-row">
+                                     <div class="chatbot-composer-toolbar-left">
+                                        <div class="chatbot-composer-tool-btn chatbot-composer-mode-wrap theme-transition"
+                                             id="livecode-chat-mode-trigger"
+                                             data-livecode-mode-trigger
+                                             data-mode="agent"
+                                             role="button" tabindex="0" aria-haspopup="listbox" aria-expanded="false">
+                                           <svg class="chatbot-composer-mode-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="M6.75 9C5.1393 9 3.75 10.1979 3.75 12C3.75 13.8021 5.1393 15 6.75 15C8.93215 15 9.96658 13.7213 11.0909 12.0197C9.9648 10.2963 8.94769 9 6.75 9ZM11.9886 10.6591C10.9022 9.07118 9.47531 7.5 6.75 7.5C4.37993 7.5 2.25 9.30208 2.25 12C2.25 14.6979 4.37993 16.5 6.75 16.5C9.45251 16.5 10.8909 14.9553 11.9845 13.3798C12.4189 14.0069 12.9091 14.6294 13.5048 15.1451C14.4451 15.9593 15.6342 16.5 17.25 16.5C19.6201 16.5 21.75 14.6979 21.75 12C21.75 9.30208 19.6201 7.5 17.25 7.5C14.5253 7.5 13.0855 9.07015 11.9886 10.6591ZM12.8809 12.023C13.3905 12.8006 13.8793 13.4853 14.4866 14.0111C15.1705 14.6032 16.0158 15 17.25 15C18.8607 15 20.25 13.8021 20.25 12C20.25 10.1979 18.8607 9 17.25 9C15.0496 9 14.0162 10.3002 12.8809 12.023Z" fill="currentColor"></path></svg>
+                                           <span class="chatbot-composer-mode-label" data-livecode-mode-label>Agent</span>
+                                           <svg class="chatbot-composer-model-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                                        </div>
+                                        <div class="chatbot-composer-tool-btn chatbot-composer-model-wrap theme-transition" data-chatbot-model-trigger role="button" tabindex="0" aria-haspopup="listbox" aria-expanded="false">
+                                           <span class="chatbot-composer-model-label" data-chatbot-model-label></span>
+                                           <svg class="chatbot-composer-model-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                                           <input type="hidden" data-chatbot-model-select value="">
+                                        </div>
+                                        <button type="button" id="livecode-chat-background-status" class="chatbot-composer-tool-btn livecode-chat-background-status theme-transition" style="display:none;" title="Chats running in the background" aria-label="Chats running in the background">Background <span class="livecode-chat-background-badge">0</span></button>
+                                        <div id="livecode-permission-toolbar-actions" class="livecode-permission-toolbar-actions" style="display:none" aria-live="polite">
+                                           <button type="button" id="livecode-permission-toolbar-approve" class="chatbot-composer-tool-btn theme-transition">Approve</button>
+                                           <button type="button" id="livecode-permission-toolbar-deny" class="chatbot-composer-tool-btn theme-transition">Deny</button>
+                                        </div>
+                                     </div>
+                                     <div class="chatbot-composer-toolbar-right">
+                                        <button type="button" id="livecode-mcp-toggle" class="chatbot-composer-tool-btn livecode-mcp-toggle theme-transition" onclick="toggleLiveCodeMcpPanel(); return false;" aria-haspopup="dialog" aria-expanded="false" aria-controls="livecode-mcp-panel" title="MCP servers" aria-label="MCP servers"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 1.75v3M10 1.75v3"></path><path d="M4.25 4.75h7.5v2.5a3.75 3.75 0 0 1-7.5 0z"></path><path d="M8 11v3.25"></path></svg></button>
+                                        <span id="livecode-context-ring" class="chatbot-composer-spinner theme-transition" role="img" aria-label="Context used" title="Context used"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9" stroke-opacity="0.22"></circle><circle class="livecode-ctx-arc" cx="12" cy="12" r="9" transform="rotate(-90 12 12)" stroke-dasharray="56.549" stroke-dashoffset="56.549" fill="none"></circle></svg></span>
+                                        <button type="button" class="chatbot-composer-tool-btn chatbot-composer-attach-icon-btn theme-transition" title="Attach files" aria-label="Attach files" onclick="window.triggerLivecodeFileAttach(); return false;">
+                                           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
+                                        </button>
+                                        <button type="button" class="chatbot-composer-stop-btn theme-transition" onclick="stopLiveCodeAgent(); return false;" title="Stop" aria-label="Stop"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="5.5" y="5.5" width="13" height="13" rx="2.5" fill="currentColor"></rect></svg></button>
+                                        <button type="button" class="chatbot-composer-send-btn theme-transition" onclick="_livecodeInitChatInput(document.getElementById('livecode-chat-input')); return false;" title="Send" aria-label="Send">
+                                           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
+                                        </button>
+                                     </div>
+                                  </div>
+                               </div>
+                            </div>
+                         </div>
+                      </div>
+                   </div>
+                </div>
+             </div>
+          </div>
+       </div>
+       <div id="ide-hscroll" class="ide-hscroll" hidden aria-hidden="true"><div class="ide-hscroll-thumb"></div></div>
+    </div>
+ </div>
+
+ <div class="livecode-lightbox" id="livecodeImageViewerModal" onclick="if(event.target===this)closeLivecodeImageViewer();" style="display:none;">
+    <figure class="livecode-lightbox-frame" onclick="event.stopPropagation();">
+       <div class="livecode-lightbox-imgwrap">
+          <img id="livecode-image-viewer-img" class="livecode-lightbox-img" src="" alt="Image preview" />
+       </div>
+       <figcaption class="livecode-lightbox-caption">
+          <span id="livecode-image-viewer-title" class="livecode-lightbox-name"></span>
+          <span id="livecode-image-viewer-info" class="livecode-lightbox-size"></span>
+          <button type="button" class="livecode-lightbox-close" onclick="closeLivecodeImageViewer(); return false;" title="Close (Esc)" aria-label="Close">
+             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+          </button>
+       </figcaption>
+    </figure>
+ </div>
+
+ <div class="mongodb-modal" id="livecodeProjectBrowserModal" onclick="if(event.target===this)closeLiveCodeProjectBrowser();">
+    <div class="mongodb-modal-content livecode-finder-modal theme-transition" onclick="event.stopPropagation();">
+       <div class="livecode-finder-toolbar theme-transition">
+          <div class="livecode-finder-nav">
+             <button type="button" id="livecode-finder-back" class="livecode-finder-nav-btn theme-transition" title="Back" disabled onclick="livecodeBrowserGoBack(); return false;" aria-label="Back">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+             </button>
+             <button type="button" id="livecode-finder-forward" class="livecode-finder-nav-btn theme-transition" title="Forward" disabled onclick="livecodeBrowserGoForward(); return false;" aria-label="Forward">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+             </button>
+          </div>
+          <div id="livecode-finder-breadcrumb" class="livecode-finder-breadcrumb theme-transition" aria-label="Current path"></div>
+          <div class="livecode-finder-search-wrap theme-transition">
+             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+             <input type="search" id="livecode-finder-search" class="livecode-finder-search theme-transition" placeholder="Search" autocomplete="off" oninput="livecodeBrowserFilterList(this.value);" />
+          </div>
+       </div>
+       <div class="livecode-finder-body">
+          <aside class="livecode-finder-sidebar theme-transition" aria-label="Locations">
+             <div class="livecode-finder-sidebar-label">Locations</div>
+             <button type="button" class="livecode-finder-sidebar-item theme-transition" data-finder-path="~" onclick="livecodeBrowserNavigate('~'); return false;">Home</button>
+             <button type="button" class="livecode-finder-sidebar-item theme-transition" data-finder-path="~/Downloads" onclick="livecodeBrowserNavigate('~/Downloads'); return false;">Downloads</button>
+             <button type="button" class="livecode-finder-sidebar-item theme-transition" data-finder-path="~/Desktop" onclick="livecodeBrowserNavigate('~/Desktop'); return false;">Desktop</button>
+             <div id="livecode-finder-favorites" class="livecode-finder-fav-list"></div>
+          </aside>
+          <div class="livecode-finder-table-wrap theme-transition">
+             <table class="livecode-finder-table">
+                <thead>
+                   <tr>
+                      <th class="livecode-finder-col-name livecode-finder-sort" data-sort-key="name" aria-sort="ascending" onclick="livecodeBrowserSortBy('name'); return false;"><span class="livecode-finder-sort-label">Name<span class="livecode-finder-sort-arrow"></span></span></th>
+                      <th class="livecode-finder-col-size livecode-finder-sort" data-sort-key="size" aria-sort="none" onclick="livecodeBrowserSortBy('size'); return false;"><span class="livecode-finder-sort-label">Size<span class="livecode-finder-sort-arrow"></span></span></th>
+                      <th class="livecode-finder-col-kind livecode-finder-sort" data-sort-key="kind" aria-sort="none" onclick="livecodeBrowserSortBy('kind'); return false;"><span class="livecode-finder-sort-label">Kind<span class="livecode-finder-sort-arrow"></span></span></th>
+                      <th class="livecode-finder-col-date livecode-finder-sort" data-sort-key="mtime" aria-sort="none" onclick="livecodeBrowserSortBy('mtime'); return false;"><span class="livecode-finder-sort-label">Date Added<span class="livecode-finder-sort-arrow"></span></span></th>
+                   </tr>
+                </thead>
+                <tbody id="livecode-browser-list"></tbody>
+             </table>
+          </div>
+       </div>
+       <div class="livecode-finder-footer theme-transition">
+          <label class="livecode-finder-hidden-toggle theme-transition" title="Show dotfiles and hidden folders">
+             <input type="checkbox" id="livecode-finder-show-hidden" onchange="livecodeBrowserToggleHidden(this.checked); return true;" />
+             <span>Show hidden files</span>
+          </label>
+          <div class="livecode-finder-footer-actions">
+             <button type="button" onclick="closeLiveCodeProjectBrowser();return false;" class="mongodb-btn ghost">Cancel</button>
+             <button type="button" id="livecodeBrowserSelectBtn" onclick="selectLiveCodeProjectFromBrowser();return false;" class="mongodb-btn ghost livecode-finder-open-btn" disabled>Open</button>
+          </div>
+       </div>
+    </div>
+ </div>

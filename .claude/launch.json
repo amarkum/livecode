@@ -1,0 +1,18 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "livecode",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["server.py"],
+      "port": 5077
+    },
+    {
+      "name": "livecode-alt",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["server.py"],
+      "env": { "LIVECODE_PORT": "5078" },
+      "port": 5078
+    }
+  ]
+}
