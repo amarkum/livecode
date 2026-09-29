@@ -8515,6 +8515,10 @@ function _livecodeParseActivityParts(tool, args, message) {
   if (t === "kill_command") {
     return { verb: "Stopped", detail: "background command", meta: "", kind: "other" };
   }
+  if (t === "restart_command") {
+    const what = String(a.command || "").trim();
+    return { verb: "Restarted", detail: what ? what.slice(0, 72) : "dev server", meta: "", kind: "shell" };
+  }
   if (t === "run_command" || msg.startsWith("Running")) {
     const rawCmd = String(a.command || msg.replace(/^Running\s*`?/i, "").replace(/`?\s*$/, ""));
     const cmd = typeof window.livecodeCommandHeaderLabel === "function" ? window.livecodeCommandHeaderLabel(rawCmd) : rawCmd.slice(0, 72);
@@ -12187,7 +12191,7 @@ function handleLiveCodeProgress(data) {
         const stepsContainer = _livecodeEnsureAgentStepsRow(output);
         _livecodeClearTransientEditFailure(args.file_path, stepsContainer);
       }
-      if (tool === "browser") _livecodeBrowserAgentActivity(false);
+      if (tool === "browser") _livecodeBrowserAgentActivity(false, args);
       const parts = _livecodeParseActivityParts(tool, args, message);
       _livecodeAppendActivityParts(parts, true, output);
     } else if (progressType === "tool_result") {
@@ -16555,12 +16559,30 @@ function _livecodeBrowserComputeDiff() {
 }
 
 
-function _livecodeBrowserAgentActivity(done) {
+// Whether a browser action of the agent's shows the user a page: opening one, or bringing a tab forward.
+function _livecodeBrowserActionShowsPage(args) {
+  const a = args || {};
+  const action = String(a.action || "").toLowerCase();
+  if (action === "navigate" || action === "switch_tab") return true;
+  if (action === "new_tab") return !a.background;
+  if (action === "batch" && Array.isArray(a.actions)) return a.actions.some(_livecodeBrowserActionShowsPage);
+  return false;
+}
+
+function _livecodeBrowserAgentActivity(done, args) {
   _livecodeBrowser.agentUntil = Date.now() + (done ? 4000 : 20000);
   if (!done) _livecodeBrowser.tookControl = false;
   if (!_livecodeBrowserTabInfo() && livecodeProjectPath) {
     window.openLiveCodeBrowser();
     return;
+  }
+  // The agent opening a page is what the user asked to see ("go to …", "open localhost:3000"): bring
+  // the Browser tab forward when another file is in front of it.
+  if (!done && _livecodeBrowserActionShowsPage(args) && _livecodeBrowserTabInfo()) {
+    const view = _livecodeBrowserView();
+    if (!view || view.style.display === "none") {
+      try { switchToFile(LIVECODE_BROWSER_TAB_KEY); } catch (e) {}
+    }
   }
   if (_livecodeBrowserVisible()) {
     _livecodeBrowserRender();
@@ -17578,6 +17600,7 @@ function _livecodeSettingsAgentHtml() {
     : "Import cookies from your own browser so pages open signed in. They stay in this project’s browser profile.",
     (attached ? "" : _livecodeSettingsButton("Manage…", "browser-cookies") + " ") + _livecodeSettingsButton("Open browser", "open-browser"));
   html += _livecodeSettingsMatchRowHtml();
+  html += _livecodeSettingsCompareContentRowHtml();
   html += _livecodeSettingsDesignGateRowHtml();
   html += _livecodeSettingsBrowserViewRowsHtml();
   html += _livecodeSettingsAutomationRowHtml();
@@ -17696,6 +17719,7 @@ const _LIVECODE_BROWSER_SETTING_DEFAULTS = {
   default_design_accuracy: 90,
   min_design_accuracy: 50,
   design_gate: true,
+  compare_content: "layout",
   agent_tabs: true,
   view_quality: "sharp",
   default_viewport: "fit",
@@ -17724,6 +17748,12 @@ function _livecodeBrowserSegmentRowHtml(key, title, desc, options) {
       '" data-value="' + o.value + '" role="radio" aria-checked="' + on + '">' + o.label + "</button>";
   }).join("");
   return _livecodeSettingsRowHtml(title, desc, '<div class="lc-segmented" role="radiogroup" aria-label="' + _livecodeEscapeHtml(title) + '">' + seg + "</div>");
+}
+
+function _livecodeSettingsCompareContentRowHtml() {
+  return _livecodeBrowserSegmentRowHtml("compare_content", "Compare",
+    "Layout measures each element’s place, size, colours and type and ignores what it shows, so a design’s sample names, numbers and pictures never count against your app’s real data. Exact also holds other text, images and pixels against the page.",
+    [{ value: "layout", label: "Layout" }, { value: "exact", label: "Exact" }]);
 }
 
 function _livecodeSettingsDesignGateRowHtml() {

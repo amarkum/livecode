@@ -1662,6 +1662,100 @@ def _goto(session: _Session, page: Any, target: str, timeout_ms: int) -> int | N
     raise RuntimeError(f"Timeout {timeout_ms}ms exceeded.")
 
 
+def _local_server_hint(netloc: str) -> str:
+    return (f" Nothing answers on {netloc}: the dev server is not running or has stopped. If you started it with "
+            "run_command (background: true), check command_status for its error and restart it with restart_command "
+            "{command_id}; otherwise start it (run_command with background: true, e.g. npm run dev), wait until it "
+            "prints its URL, then open that URL.")
+
+
+_STALE_PAGE_NOTE = ("If the page still shows the old code after this, the dev server did not pick up the change: "
+                    "restart it with restart_command {command_id} (it frees the port and starts it again), wait for "
+                    "its URL, then reload.")
+
+
+def _do_reload(session: _Session, page: Any, args: dict[str, Any]) -> dict[str, Any]:
+    hard = _flag(args.get("hard"), "hard") if args.get("hard") not in (None, "") else False
+    timeout_ms = _timeout_ms(args, NAV_TIMEOUT_MS)
+    before = page.url
+    cleared = False
+    cdp = None
+    if hard:
+        # Chrome's cache and the page's service worker are what keep serving old code: clear both,
+        # and load with the cache off, so the page comes from the server this time.
+        try:
+            cdp = page.context.new_cdp_session(page)
+            cdp.send("Network.enable")
+            cdp.send("Network.clearBrowserCache")
+            try:
+                cdp.send("ServiceWorker.enable")
+                cdp.send("ServiceWorker.stopAllWorkers")
+            except Exception:
+                pass
+            cdp.send("Network.setCacheDisabled", {"cacheDisabled": True})
+            cleared = True
+        except Exception:
+            cleared = False
+    try:
+        page.reload(wait_until="domcontentloaded", timeout=timeout_ms)
+    except Exception as exc:
+        message = _first_line(exc)
+        if "net::" in message or "Timeout" in message:
+            parsed = urlparse(before)
+            hint = _local_server_hint(parsed.netloc) if _is_local_host(parsed.hostname or "") and "Timeout" not in message else ""
+            raise BrowserError(f"Could not reload {before}: {message}{hint}") from exc
+        raise
+    finally:
+        if cdp is not None:
+            try:
+                if cleared:
+                    cdp.send("Network.setCacheDisabled", {"cacheDisabled": False})
+            except Exception:
+                pass
+            try:
+                cdp.detach()
+            except Exception:
+                pass
+    session.touch()
+    out: dict[str, Any] = {"url": page.url, "title": _title(page)}
+    parsed = urlparse(page.url)
+    if hard:
+        out["hard"] = True
+        out["note"] = ("The cache was cleared and the page loaded again from the server. " if cleared else
+                       "The page was reloaded (the cache could not be cleared in this browser). ") + _STALE_PAGE_NOTE
+    elif _is_local_host(parsed.hostname or ""):
+        out["note"] = "If your change does not show, reload {hard: true} (clears the cache) before anything else; " + _STALE_PAGE_NOTE
+    _flag_error_page(out, page)
+    return out
+
+
+_ERROR_PAGE_JS = r"""
+() => {
+  const text = (document.body && document.body.innerText || "").slice(0, 4000);
+  const title = document.title || "";
+  const pats = [/This site can[’']t be reached/i, /ERR_CONNECTION_REFUSED/i, /Cannot GET \//i, /502 Bad Gateway/i, /503 Service Unavailable/i,
+    /ECONNREFUSED/i, /Failed to compile/i, /Internal Server Error/i, /Module not found/i, /Compiled with problems/i, /Application error/i];
+  const hit = pats.find((p) => p.test(text) || p.test(title));
+  if (!hit) return null;
+  return { text: text.replace(/\s+/g, " ").trim().slice(0, 300), blank: false };
+}
+"""
+
+
+def _flag_error_page(out: dict[str, Any], page: Any) -> None:
+    try:
+        found = page.evaluate(_ERROR_PAGE_JS)
+    except Exception:
+        found = None
+    if not found:
+        return
+    parsed = urlparse(page.url)
+    out["error_page"] = found.get("text") or ""
+    out["warning"] = ("The page shows an error rather than the app: " + (found.get("text") or "")[:200] +
+                      (" This is a local app: read command_status of its dev server (build errors show there), fix them, and if "
+                       "the server itself is down or stuck, restart_command {command_id}." if _is_local_host(parsed.hostname or "") else ""))
+
+
 def _do_navigate(session: _Session, page: Any, url: str, timeout_ms: int = NAV_TIMEOUT_MS) -> dict[str, Any]:
     target = normalize_url(url)
     status = None
@@ -1676,9 +1770,9 @@ def _do_navigate(session: _Session, page: Any, url: str, timeout_ms: int = NAV_T
             hint = ""
             if "Timeout" in message and _stop_loading(page):
                 hint = " Loading was stopped, so the tab still shows the page it showed before."
-            if "ERR_CONNECTION_REFUSED" in message and _is_local_host(parsed.hostname or ""):
-                hint = (f" Nothing is listening on {parsed.netloc}: start the dev server first (run_command with "
-                        "background: true, e.g. npm run dev), wait until it prints its URL, then open that URL.")
+            if _is_local_host(parsed.hostname or "") and ("ERR_CONNECTION_REFUSED" in message or "ERR_EMPTY_RESPONSE" in message
+                                                          or "ERR_CONNECTION_RESET" in message):
+                hint = _local_server_hint(parsed.netloc)
             raise BrowserError(f"Could not open {target}: {message}{hint}") from exc
         raise
     still_loading = not _wait_load(page, "domcontentloaded", min(timeout_ms, NAV_DOM_WAIT_MS))
@@ -1699,6 +1793,8 @@ def _do_navigate(session: _Session, page: Any, url: str, timeout_ms: int = NAV_T
                               "Do not retry in a loop; check the snapshot, and if it is blocked tell the user (attaching their own Chrome in Settings usually helps).")
         elif status >= 400:
             out["warning"] = f"The page answered HTTP {status}."
+    if _is_local_host(urlparse(page.url).hostname or ""):
+        _flag_error_page(out, page)
     return out
 
 
@@ -1882,9 +1978,7 @@ def _do_action(session: _Session, action: str, args: dict[str, Any], reference: 
         session.touch()
         return {"url": page.url, "title": _title(page)}
     if action == "reload":
-        page.reload(wait_until="domcontentloaded")
-        session.touch()
-        return {"url": page.url, "title": _title(page)}
+        return _do_reload(session, page, args)
     if action == "snapshot":
         text, count = _take_snapshot(session, page, query=str(args.get("query") or ""), selector=str(args.get("selector") or ""),
                                      max_chars=int(args.get("max_chars") or 0))
@@ -5241,14 +5335,24 @@ const measureText = (S, e, off, near, findings, cont) => {
     out.resized = true;
   };
   let ry = 1;
+  // Other words in the design (sample data: a name, a price, a date, a count) are content, not
+  // layout: in layout mode they are noted on the element and not held against it.
+  const otherWords = () => {
+    if (S.layout) out.content = true;
+    else findings.push({ kind: "text", text: "its text looks different in the design: other words, font or weight" });
+    out.same = false; out.resized = true;
+  };
   if (lp !== ld) {
-    findings.push({ kind: "wrap", text: "the design sets it on " + ld + " line" + (ld === 1 ? "" : "s") + " (" + lp + " here): width, font size or letter spacing", page: lp, design: ld });
-    out.resized = true;
+    // Other words wrap differently: only the same words on another number of lines is a layout finding.
+    if (S.layout && inkSimilarity(P, firstLine(pInk), D, firstLine(dInk), true) < SAME_WORDS) otherWords();
+    else {
+      findings.push({ kind: "wrap", text: "the design sets it on " + ld + " line" + (ld === 1 ? "" : "s") + " (" + lp + " here): width, font size or letter spacing", page: lp, design: ld });
+      out.resized = true;
+    }
   } else if (lp === 1) {
     if (S.o.debug) out.sims = [inkSimilarity(P, pInk, D, dInk, false), inkSimilarity(P, pInk, D, dInk, true)];
     if (inkSimilarity(P, pInk, D, dInk, true) < SAME_WORDS) {
-      findings.push({ kind: "text", text: "its text looks different in the design: other words, font or weight" });
-      out.same = false; out.resized = true;
+      otherWords();
     } else {
       // The same words: the height of their ink gives the type's size, the width beyond it the spacing.
       const r = dInk.sy / pInk.sy;
@@ -5271,8 +5375,7 @@ const measureText = (S, e, off, near, findings, cont) => {
     const type = (ink) => median(ink.lines.map((l) => l[1] - l[0] + 1));
     const pp = pitch(pInk), pd = pitch(dInk), gp = type(pInk), gd = type(dInk);
     if (inkSimilarity(P, firstLine(pInk), D, firstLine(dInk), true) < SAME_WORDS) {
-      findings.push({ kind: "text", text: "its text looks different in the design: other words, font or weight" });
-      out.same = false; out.resized = true;
+      otherWords();
     } else if (gp && gd && Math.abs(gd - gp) >= tol(S, 1.5, 0.5) && Math.abs(gd / gp - 1) >= tol(S, 0.06, 0.02) && size) { ry = gd / gp; fontSize(ry); }
     if (pp && pd && Math.abs(pd - pp) >= tol(S, 1.5, 0.75)) {
       const now = st.line_height || pp, want = Math.round(now * pd / pp);
@@ -5371,6 +5474,16 @@ const measureElement = (S, e) => {
       n++; if (bgB && dE94(B.X, p * 3, bgB, 0) > o.flatDeltaE) busy++;
     }
     const outside = B.P[((by0 + by1 >> 1) * B.w + (bx0 + bx1 >> 1)) * 4 + 3] < 128;
+    if (S.layout && e.flags.image && !outside && n && busy / n >= 0.03) {
+      // An image or icon that the design fills with something else (a photo, an avatar, a chart:
+      // sample content) is there; what it shows is not the layout's concern.
+      rec.found = true;
+      rec.content = true;
+      rec.status = "matches";
+      rec.findings = [];
+      delete rec.match;
+      return rec;
+    }
     rec.found = false;
     rec.status = "missing";
     rec.findings = [{ kind: "missing", text: outside ? "not in the design: the design ends before it" :
@@ -5498,16 +5611,21 @@ const measureElement = (S, e) => {
   // Pixels decide for images, icons and boxes (a real area of them: more than a stray edge); text
   // has its own measures (and renders differently anyway).
   const differing = pm.content * (1 - pm.match / 100) * pm.step * pm.step;
-  if (!findings.length && !e.flags.text && pm.content >= 30 && pm.match < 80 && differing >= Math.max(40, tol(S, 0.03, 0.005) * ownCount)) {
-    findings.push({ kind: "content", text: "looks different in the design: other content, icon or image" });
+  const otherContent = !e.flags.text && pm.content >= 30 && pm.match < 80 && differing >= Math.max(40, tol(S, 0.03, 0.005) * ownCount);
+  if (text && text.content) rec.content = true;
+  if (otherContent) {
+    // In layout mode what an image, icon or box shows is sample content: noted, not a finding.
+    if (S.layout) rec.content = true;
+    else if (!findings.length) findings.push({ kind: "content", text: "looks different in the design: other content, icon or image" });
   }
-  // Near 100% accuracy what is only nearly the same is not enough: its pixels must match too.
+  // Near 100% accuracy what is only nearly the same is not enough: its pixels must match too
+  // (unless the element shows other content, which layout mode leaves alone).
   const exact = 100 - 6 * S.tol;
-  if (!findings.length && S.tol < 0.5 && pm.content >= 1 && pm.match < exact) {
+  if (!findings.length && S.tol < 0.5 && pm.content >= 1 && pm.match < exact && !(S.layout && rec.content)) {
     findings.push({ kind: "pixels", text: r1(pm.match) + "% of its pixels match the design; " + r1(S.o.accuracy) + "% accuracy needs " + (exact >= 100 ? "all of them" : r1(exact) + "%"), match: r1(pm.match) });
   }
   rec.findings = findings;
-  rec.status = findings.length ? "different" : pm.match < 97 ? "nearly" : "matches";
+  rec.status = findings.length ? "different" : (S.layout && rec.content) || pm.match >= 97 ? "matches" : "nearly";
   if (rec.status === "different") rec.mask = pm.mask;
   return rec;
 };
@@ -5536,6 +5654,9 @@ window.elementsBegin = async function (o) {
   const beyond = new Set(items.filter((e) => e.box.y + e.box.height > H || e.box.x + e.box.width > W).map((e) => e.i));
   window.__el = { o: o, g: g, base: base, items: items, kids: kids, near: near, results: new Array(items.length), next: 0, wide: 0, beyond: beyond,
                   jpeg: /^data:image\/jpe?g/i.test(String(o.ref || "")), tol: Number.isFinite(o.tolerance) ? o.tolerance : 1,
+                  // Layout mode measures where each element sits, its size, colours and type, and
+                  // leaves what it shows (other words, numbers, images: sample data) alone.
+                  layout: o.content !== "exact",
                   prior: { dx: 0, dy: 0 }, pctx: ctxOf(g.pageCanvas), dctx: ctxOf(g.refCanvas), pp: pyramid(g.pageCanvas), dp: pyramid(g.refCanvas),
                   backdrop: [backdrop(g.pageCanvas), backdrop(g.refCanvas)] };
   return { count: items.length };
@@ -5607,8 +5728,8 @@ window.elementsFinish = function () {
   }
   const bad = res.filter((r) => r.status === "different" || r.status === "missing").sort((p, q) => (p.box.y - q.box.y) || (p.box.x - q.box.x));
   bad.forEach((r, k) => { r.n = k + 1; });
-  const counts = { compared: res.length, matches: 0, nearly: 0, different: 0, missing: 0 };
-  for (const r of res) counts[r.status]++;
+  const counts = { compared: res.length, matches: 0, nearly: 0, different: 0, missing: 0, content: 0 };
+  for (const r of res) { counts[r.status]++; if (r.content) counts.content++; }
   // Parts of the design the page lacks: what the whole comparison found missing where no element is.
   const lacking = [];
   for (const a of S.base.differences || []) {
@@ -5633,6 +5754,7 @@ window.elementsFinish = function () {
     const out = { n: r.n, element: r.name, selector: r.selector, status: r.status, box: r.box,
                   findings: (r.findings || []).map((f) => f.text) };
     if (r.match !== undefined) out.match = r.match;
+    if (r.content) out.other_content = true;
     if (r.status !== "missing") out.design_box = { x: r1(r.box.x + d.dx), y: r1(r.box.y + d.dy), width: r1(r.box.width + (geo ? geo.dw : 0)), height: r1(r.box.height + (geo ? geo.dh : 0)) };
     for (const f of r.findings || []) {
       if (f.kind === "moved") out.moved = { dx: f.dx, dy: f.dy };
@@ -5658,6 +5780,7 @@ window.elementsFinish = function () {
   const good = counts.matches + counts.nearly, toFix = bad.length + lacking.length + (background ? 1 : 0);
   const tally = [["ok", counts.matches, "match"]];
   if (counts.nearly) tally.push(["nearly", counts.nearly, "nearly match"]);
+  if (counts.content) tally.push(["ok", counts.content, "show other content (not compared)"]);
   if (counts.different) tally.push(["s-different", counts.different, "differ"]);
   if (counts.missing) tally.push(["s-missing", counts.missing, "on the page, not in the design"]);
   if (lacking.length) tally.push(["s-lacking", lacking.length, "in the design, not on the page"]);
@@ -5788,6 +5911,11 @@ BROWSER_SETTINGS_PATH = os.path.expanduser("~/.livecode/browser.json")
 DEFAULT_MATCH_THRESHOLD = 85.0
 DEFAULT_DESIGN_ACCURACY = 90.0
 MIN_DESIGN_ACCURACY = 50.0
+# What an element compare holds against the page: "layout" measures each element's place, size,
+# colours and type and leaves what it shows alone (a design's sample names, numbers and pictures
+# rarely match a running app's); "exact" counts other words, images and pixels as differences too.
+COMPARE_CONTENTS = ("layout", "exact")
+DEFAULT_COMPARE_CONTENT = "layout"
 
 
 _settings_cache: tuple[str, tuple[int, int], dict[str, Any]] | None = None
@@ -5874,6 +6002,22 @@ def design_gate_enabled() -> bool:
     return _saved_flag("design_gate", True)
 
 
+def compare_content() -> str:
+    return _saved_choice("compare_content", COMPARE_CONTENTS, DEFAULT_COMPARE_CONTENT)
+
+
+def _compare_content_arg(args: dict[str, Any]) -> str:
+    """The content mode for one compare: the call's content argument, else the saved setting."""
+    word = str(args.get("content") or "").strip().lower()
+    if not word:
+        return compare_content()
+    if word in ("exact", "strict", "all", "pixels"):
+        return "exact"
+    if word in ("layout", "structure", "elements", "ignore"):
+        return "layout"
+    raise BrowserError(f"content is one of: {', '.join(COMPARE_CONTENTS)}.")
+
+
 def agent_tabs_enabled() -> bool:
     return _saved_flag("agent_tabs", True)
 
@@ -5896,11 +6040,13 @@ def browser_settings() -> dict[str, Any]:
         **accuracy_settings(),
         "reduce_automation_signals": automation_signals_reduced(),
         "design_gate": design_gate_enabled(),
+        "compare_content": compare_content(),
         "agent_tabs": agent_tabs_enabled(),
         "view_quality": view_quality(),
         "default_viewport": default_viewport(),
         "allowed": {
             "design_accuracy": [MIN_DESIGN_ACCURACY, 100.0],
+            "compare_content": list(COMPARE_CONTENTS),
             "view_quality": list(VIEW_QUALITIES),
             "default_viewport": list(DEFAULT_VIEWPORTS),
         },
@@ -5918,6 +6064,8 @@ def save_browser_settings(data: dict[str, Any]) -> dict[str, Any]:
         updates["design_accuracy"] = _accuracy_from_threshold(data.get("match_threshold"))
     if "design_gate" in data:
         updates["design_gate"] = _flag(data.get("design_gate"), "design_gate")
+    if "compare_content" in data:
+        updates["compare_content"] = _choice(data.get("compare_content"), COMPARE_CONTENTS, "compare_content")
     if "agent_tabs" in data:
         updates["agent_tabs"] = _flag(data.get("agent_tabs"), "agent_tabs")
     if "view_quality" in data:
@@ -6119,8 +6267,9 @@ def _data_url(data: bytes, mime: str) -> str:
 def _compare_options(reference: _Reference, page_png: bytes, page_label: str, *, mode: str = "view",
                      region: dict[str, int] | None = None, layout_width: int = 0, ref_crop: dict[str, float] | None = None,
                      ref_scale: float = 0.0, auto_region: bool = True, target_kind: str = "element",
-                     text_target: bool = False, snap: bool = False) -> dict[str, Any]:
+                     text_target: bool = False, snap: bool = False, content: str = DEFAULT_COMPARE_CONTENT) -> dict[str, Any]:
     return {
+        "content": content,
         "ref": _data_url(reference.data, reference.mime),
         "page": _data_url(page_png, _sniff_image_mime(page_png) or "image/png"),
         "refLabel": reference.label,
@@ -6179,11 +6328,11 @@ def _render_elements(reference: _Reference, page_png: bytes, page_label: str, el
 def _render_comparison(reference: _Reference, page_png: bytes, page_label: str, *, mode: str = "view",
                        region: dict[str, int] | None = None, layout_width: int = 0, ref_crop: dict[str, float] | None = None,
                        ref_scale: float = 0.0, auto_region: bool = True, target_kind: str = "element",
-                       text_target: bool = False, snap: bool = False,
+                       text_target: bool = False, snap: bool = False, content: str = DEFAULT_COMPARE_CONTENT,
                        name_areas: Callable[[dict[str, Any]], list[str]] | None = None) -> tuple[bytes, dict[str, Any]]:
     options = _compare_options(reference, page_png, page_label, mode=mode, region=region, layout_width=layout_width,
                                ref_crop=ref_crop, ref_scale=ref_scale, auto_region=auto_region, target_kind=target_kind,
-                               text_target=text_target, snap=snap)
+                               text_target=text_target, snap=snap, content=content)
     with _compare_page() as tools:
         try:
             stats = _in_background(tools, "evaluate", "o => window.renderCompare(o)", options)
@@ -6356,13 +6505,25 @@ def _do_compare(session: _Session, page: Any, args: dict[str, Any], reference: _
         "auto_region": not chosen, "target_kind": "region" if not _has_element_target(args) else "element",
         "text_target": mode == "element" and (bool(geo.get("textOnly")) or bool(reference.layer and reference.layer.get("type") == "TEXT")),
         "snap": (chosen or reference.cut) and (mode == "page" or (mode == "view" and rect["y"] == 0)),
+        "content": _compare_content_arg(args),
     }
-    by_element = args.get("elements") not in (None, False, "", 0, "0", "false", "no")
+    # Element by element is the default: each element is measured on its own (place, size, colours,
+    # type), so sample data that differs between the page and the design does not drown the layout.
+    # elements: false asks for the plain pixel comparison of the two images.
+    wants_elements = args.get("elements")
+    by_element = wants_elements not in (False, 0, "0", "false", "no") if wants_elements not in (None, "") else True
+    found: dict[str, Any] = {}
+    items: list[dict[str, Any]] = []
+    no_elements = ""
     if by_element:
         found = _page_elements(page, args, rect)
         items = found.get("elements") or []
         if not items:
-            raise BrowserError(f"Nothing to compare element by element in the {target}: no visible text, images, controls or boxes.")
+            no_elements = f"Nothing to compare element by element in the {target}: no visible text, images, controls or boxes."
+            if wants_elements not in (None, ""):
+                raise BrowserError(no_elements)
+            by_element = False
+    if by_element:
         data, stats = _render_elements(reference, page_png, page_label, _relative_to(items, rect), **geometry)
     else:
         data, stats = _render_comparison(reference, page_png, page_label, name_areas=lambda st: _name_areas(page, reference, rect, st),
@@ -6377,9 +6538,11 @@ def _do_compare(session: _Session, page: Any, args: dict[str, Any], reference: _
         "region": rect,
         **live,
         "accuracy": design_accuracy(),
+        "content": geometry["content"],
     }
     if by_element:
-        out.update(_elements_result(reference, target, rect, stats, total=int(found.get("total") or len(items))))
+        out.update(_elements_result(reference, target, rect, stats, total=int(found.get("total") or len(items)),
+                                    content=geometry["content"]))
     else:
         for key in ("similarity", "structure", "diff_pct", "verdict", "page_size", "reference_size", "reference_scale", "offset",
                     "size_diff", "shifts", "differences", "threshold"):
@@ -6397,6 +6560,8 @@ def _do_compare(session: _Session, page: Any, args: dict[str, Any], reference: _
     notes = [note for note in (stats.get("notes") or []) if note and note != stats.get("size_diff")]
     if by_element:
         notes = [note for note in notes if not note.startswith(("Area ", "Areas ", "No one area"))]
+    elif no_elements:
+        notes.insert(0, no_elements + " The two images were compared pixel by pixel instead.")
     if reference.note:
         notes.insert(0, reference.note)
     if notes:
@@ -6438,7 +6603,8 @@ def _relative_to(items: list[dict[str, Any]], rect: dict[str, int]) -> list[dict
     return out
 
 
-def _elements_result(reference: _Reference, target: str, rect: dict[str, int], stats: dict[str, Any], *, total: int) -> dict[str, Any]:
+def _elements_result(reference: _Reference, target: str, rect: dict[str, int], stats: dict[str, Any], *, total: int,
+                     content: str = DEFAULT_COMPARE_CONTENT) -> dict[str, Any]:
     counts = stats.get("counts") or {}
     region = stats.get("reference_region") or {}
     drawn_w = float((stats.get("reference_size") or [0])[0] or 0)
@@ -6465,6 +6631,10 @@ def _elements_result(reference: _Reference, target: str, rect: dict[str, int], s
         parts.append(f"{counts['different']} differ")
     if counts.get("missing"):
         parts.append(f"{counts['missing']} {'is' if counts['missing'] == 1 else 'are'} not in the design")
+    other = int(counts.get("content") or 0)
+    if other and content == "layout":
+        parts.append(f"{other} show{'s' if other == 1 else ''} other content than the design (words, numbers or images: sample data), "
+                     "which layout mode does not count")
     beyond = int(stats.get("beyond") or 0)
     summary = f"Compared {compared} element{'s' if compared != 1 else ''} with the design"
     if total > compared + beyond:
@@ -6484,6 +6654,11 @@ def _elements_result(reference: _Reference, target: str, rect: dict[str, int], s
         "compare": "elements", "verdict": stats.get("verdict"), "similarity": stats.get("similarity"), "structure": stats.get("structure"),
         "elements_compared": compared, "summary": summary, "elements": listed,
     }
+    if content == "layout":
+        out["content"] = ("layout: each element's place, size, colours and type are compared; what it shows (its words, numbers, "
+                          "images) is not. Pass content: \"exact\" to compare the content too.")
+    else:
+        out["content"] = "exact: other words, images and pixels count as differences too."
     for key in ("page_size", "reference_size", "reference_scale", "shifts"):
         if stats.get(key) not in (None, "", [], 0):
             out[key] = stats[key]
@@ -7038,11 +7213,12 @@ def action_label(args: dict[str, Any] | None) -> str:
 
 _RESULT_KEYS = ("status", "warning", "clicked", "typed_into", "submitted", "pressed", "opened_tab", "closed_tab", "waited_s",
                 "scroll_y", "scroll_max_y", "snapshot", "elements", "result", "truncated", "dialog", "hovered", "dragged",
-                "uploaded", "selected", "checked", "zoom", "note", "changed")
+                "uploaded", "selected", "checked", "zoom", "note", "changed", "hard", "error_page")
 _SHOT_RESULT_KEYS = ("region", "target", "source", "mode", "reference", "similarity", "structure", "diff_pct", "verdict", "page_size",
                      "reference_size", "reference_scale", "reference_region", "reference_image_size", "offset", "size_diff",
                      "shifts", "differences", "notes", "coords", "reference_tab", "opened_tab", "tab_id", "threshold", "marks",
-                     "compare", "summary", "elements_compared", "elements", "missing_on_page", "background", "progress", "accuracy")
+                     "compare", "summary", "elements_compared", "elements", "missing_on_page", "background", "progress", "accuracy",
+                     "content")
 
 
 FAIL_STREAK_SHOT = 2

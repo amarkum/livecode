@@ -237,7 +237,40 @@ _BROWSER_INTENT_RE = re.compile(
 )
 
 def user_requests_browser(question: str) -> bool:
-    return bool(_BROWSER_INTENT_RE.search(question or ""))
+    return bool(_BROWSER_INTENT_RE.search(question or "")) or bool(user_requests_site_visit(question))
+
+# A site the user names: a URL, a local dev server, or a bare domain (github.com, my-app.vercel.app).
+_SITE_PATTERN = (
+    r"(?P<site>https?://[^\s<>\"']+|(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d{2,5})?(?:/[^\s<>\"']*)?|"
+    r"(?<![\w./-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"(?:com|org|net|io|dev|app|ai|co|in|me|us|uk|de|fr|es|it|nl|ca|au|edu|gov|xyz|info|site|tech|cloud|store|shop|page|to|tv|ly|so|sh)"
+    r"(?![\w-])(?:/[^\s<>\"']*)?)"
+)
+_VISIT_VERB = (
+    r"\b(?:go(?:\s+over)?\s+to|goto|visit|open(?:\s+up)?|navigate\s+to|head\s+(?:over\s+)?to|browse\s+(?:to\s+)?|"
+    r"check(?:\s+out)?|pull\s+up|load|look\s+at|show\s+me|take\s+me\s+to|test|try|preview|launch|hit|surf\s+to|"
+    r"log\s*in\s+to|sign\s+in\s+to)\b"
+)
+_VISIT_RE = re.compile(
+    _VISIT_VERB + r"\s+(?:the\s+|this\s+|my\s+|our\s+|that\s+)?(?:(?:web)?site|web\s*page|page|website|app|url|link|dashboard|home\s*page|server)?"
+    r"\s*(?:at\s+|on\s+|of\s+|:\s*)?" + _SITE_PATTERN,
+    re.IGNORECASE,
+)
+_ANY_SITE_RE = re.compile(_SITE_PATTERN, re.IGNORECASE)
+_ANY_VISIT_VERB_RE = re.compile(_VISIT_VERB + r"|\b(?:see|view|read|screenshot|browse|browser|in the browser)\b", re.IGNORECASE)
+
+def user_requests_site_visit(question: str) -> str:
+    """The site the user asked to open ("go to github.com", "open localhost:3000", "visit https://…"),
+    or "" when the message does not ask for one. A URL with any browsing verb in the message counts too."""
+    text = question or ""
+    match = _VISIT_RE.search(text)
+    if match:
+        return match.group("site").rstrip(".,;:!?)")
+    for found in _ANY_SITE_RE.finditer(text):
+        site = found.group("site")
+        if (site.lower().startswith(("http://", "https://", "localhost", "127.", "0.0.0.0")) and _ANY_VISIT_VERB_RE.search(text)):
+            return site.rstrip(".,;:!?)")
+    return ""
 
 _DESIGN_INTENT_RE = re.compile(
     r"\b(?:figma|canva|sketch (?:app|file|design)|penpot|adobe xd|zeplin|framer|invision|uizard|balsamiq)\b|"

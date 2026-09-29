@@ -526,6 +526,31 @@ LIVECODE_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "restart_command",
+            "description": (
+                "Restart a dev server or watcher: stop the background command (and whatever is still "
+                "listening on its port, so a leftover process cannot keep the port), start it again with the "
+                "same command, and return the new command_id with its first output. Use it when a code change "
+                "does not show after reloading the page (a hard reload included), when the page stops loading, "
+                "or when command_status shows the server exited or is stuck. Without command_id, pass command "
+                "to start a server that was started outside LiveCode after freeing its port. wait_seconds and "
+                "until wait for it to come up (e.g. until: \"localhost:\\d+\")."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command_id": {"type": "string", "description": "The background command to restart (its command_id from run_command)"},
+                    "command": {"type": "string", "description": "Without command_id: the command to start (a dev server), after freeing its port"},
+                    "port": {"type": "integer", "description": "The port it listens on, when the command or its output does not show it; whatever listens there is stopped first"},
+                    "wait_seconds": {"type": "integer", "description": "Wait up to this long for it to come up, 0-120 (default 0)"},
+                    "until": {"type": "string", "description": "Optional regex; stop waiting once the output matches (e.g. its URL)"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "attempt_completion",
             "description": (
                 "Finish the turn with your final summary for the user: what changed, how it was "
@@ -937,21 +962,24 @@ BROWSER_TOOL = {
             "- inspect {ref | selector | text}: an element's box and computed styles (font, colours, padding, radius, "
             "layout, shadow) with an outline of what is inside it; without a target, the page outlined the way a "
             "design tool lists layers. Boxes are page coordinates: CSS px from the page's top-left\n"
-            "- compare {reference?, elements?, full_page? | ref | selector | text | x, y, width, height, reference_region?, "
-            "reference_scale?}: the view, the page or one element beside the design, with a difference map: "
-            "similarity (the share of the design's content that matches), structure (how alike the shapes and layout "
-            "are, 0-100: it stays high when only colours differ), a verdict (identical, nearly identical, different), the "
-            "differing areas with the page element at each and their kind: missing (in the design, not on the page), "
-            "extra (on the page only), moved (the design's content moved.dx, moved.dy px away), color (the same shape in "
-            "another colour: design_color, page_color, delta_e), content (other text or shapes), size (past the other "
-            "image's edge) or edges (only outlines differ; minor ones are anti-aliasing or sub-pixel rendering), an element's size and "
-            "position difference, and bands of the page that sit higher or lower than the design. elements: true compares "
-            "element by element instead: every element of the page (or of the selector) is cropped with its place in the "
-            "design, lined up on its own and measured, and each one that differs says what to change: where it sits "
-            "(px, against its parent), its size, background and text colour, font size, letter spacing, line height or "
-            "wrapping, corner radius, shadow, or that it is not in the design; missing_on_page lists parts of the design "
-            "the page lacks, and progress what changed since the last such compare. Fix them top to bottom (a size change "
-            "moves what follows it). The board numbers them on the design and the page, with a close-up of each. "
+            "- compare {reference?, content?, elements?, full_page? | ref | selector | text | x, y, width, height, reference_region?, "
+            "reference_scale?}: the view, the page or one element against the design, element by element: every element "
+            "of the page (or of the selector) is cropped with its place in the design, lined up on its own and measured, "
+            "and each one that differs says what to change: where it sits (px, against its parent), its size, background "
+            "and text colour, font size, letter spacing, line height or wrapping, corner radius, shadow, or that it is not "
+            "in the design; missing_on_page lists parts of the design the page lacks, and progress what changed since the "
+            "last compare. What an element shows is judged by content: layout (the default) ignores other words, numbers "
+            "and images (a design's sample data never matches a running app's: a card's name, price or photo) and counts "
+            "them separately; content: \"exact\" holds other text, images and pixels against the page too. Fix findings top "
+            "to bottom (a size change moves what follows it). The board numbers them on the design and the page, with a "
+            "close-up of each. elements: false compares the two images pixel by pixel instead (for screenshots and "
+            "images rather than a page): similarity (the share of the design's content that matches), structure (how alike "
+            "the shapes and layout are, 0-100: it stays high when only colours differ), a verdict (identical, nearly "
+            "identical, different), the differing areas with the page element at each and their kind: missing (in the "
+            "design, not on the page), extra (on the page only), moved (the design's content moved.dx, moved.dy px away), "
+            "color (the same shape in another colour: design_color, page_color, delta_e), content (other text or shapes), "
+            "size (past the other image's edge) or edges (only outlines differ; minor ones are anti-aliasing or sub-pixel "
+            "rendering), and bands of the page that sit higher or lower than the design. "
             "reference: attachment:N (the Nth image the user attached: a screenshot from Figma, Canva or "
             "any design tool), tab:<id> (a tab showing the design, captured now), a design link (a page opens in a "
             "background tab and is captured; an image is downloaded), shot:<id> (an earlier screenshot or crop), "
@@ -974,7 +1002,9 @@ BROWSER_TOOL = {
             "Results also flag new console errors and downloads\n"
             "- batch {actions: [{action, ...}, ...]}: up to 8 actions in one call, in order, stopping at the first failure; "
             "use it for known sequences (open, type, submit) to save round trips. Any action also takes timeout (seconds)\n"
-            "- back, forward, reload\n"
+            "- back, forward, reload {hard?}: hard clears the cache and reloads from the server, for a page that keeps "
+            "showing old code after a change. If a hard reload still shows the old code, or the page will not load "
+            "(connection refused, a blank or error page), the dev server needs a restart: restart_command\n"
             "Forms that submit, send, buy, apply or post something: fill in only what the user told you or what the page "
             "pre-filled from their own profile; do not answer personal, legal or screening questions (work authorization, "
             "salary, availability, demographics, willingness to relocate) on their behalf, list them and ask; and ask for a "
@@ -1018,7 +1048,8 @@ BROWSER_TOOL = {
                 "reference_scale": {"type": "number", "description": "compare/crop: the design image's scale (2 for a 2x export or a retina screenshot) when it is not 1"},
                 "script": {"type": "string", "description": "javascript_exec: the code to run in the page"},
                 "full_page": {"type": "boolean", "description": "screenshot/compare: the whole page instead of the view; crop/compare region: x and y are page coordinates"},
-                "elements": {"type": "boolean", "description": "compare: element by element, each element cropped and measured against its place in the design"},
+                "elements": {"type": "boolean", "description": "compare: element by element (the default), each element cropped and measured against its place in the design; false compares the two images pixel by pixel instead"},
+                "content": {"type": "string", "enum": ["layout", "exact"], "description": "compare: layout (the default, or the user's setting) measures each element's place, size, colours and type and ignores what it shows (other words, numbers or images: a design's sample data); exact counts other text, images and pixels as differences too"},
                 "seconds": {"type": "number", "description": "wait: how long, at most 30"},
                 "tab_id": {"type": "string", "description": "the tab to act on, from tabs (default: the current tab); switch_tab/close_tab: the tab"},
                 "query": {"type": "string", "description": "snapshot: keep only elements and text lines containing this word"},
@@ -1040,6 +1071,7 @@ BROWSER_TOOL = {
                 "status": {"type": "string", "description": "network: failed, errors, or a status code such as 404"},
                 "type": {"type": "string", "description": "network: resource type such as xhr, fetch, document, script"},
                 "clear": {"type": "boolean", "description": "console/network/find: clear the entries or highlights"},
+                "hard": {"type": "boolean", "description": "reload: clear the cache first and reload from the server (a page that still shows old code)"},
                 "timeout": {"type": "number", "description": "seconds to wait for this action (1-120) instead of the default"},
                 "confirm": {"type": "boolean", "description": "click/type: set true only when the user clearly asked for exactly this final step (a Submit, Send, Post, Pay or Apply button is held back otherwise)"},
                 "change": {"type": "boolean", "description": "wait: wait until the page's content changes (seconds is the limit, default 8)"},
@@ -1229,7 +1261,7 @@ READ_ONLY_TOOL_NAMES = frozenset({
 
 LIVECODE_MODES = ("agent", "plan", "ask")
 
-MUTATING_TOOL_NAMES = frozenset({"write_file", "edit_file", "multi_edit", "run_command", "kill_command"})
+MUTATING_TOOL_NAMES = frozenset({"write_file", "edit_file", "multi_edit", "run_command", "kill_command", "restart_command"})
 FILE_EDIT_TOOL_NAMES = frozenset({"write_file", "edit_file", "multi_edit"})
 
 PLAN_MODE_REJECTION = (
@@ -1394,7 +1426,7 @@ def compact_tool_result_for_llm(tool_name: str, result: dict) -> dict:
         if len(content) > READ_RESULT_MAX_CHARS:
             out["content"] = content[:READ_RESULT_MAX_CHARS] + "\n... [truncated]"
             out["truncated"] = True
-    elif tool_name in ("run_command", "command_status", "kill_command"):
+    elif tool_name in ("run_command", "command_status", "kill_command", "restart_command"):
         output = out.get("output") or ""
         if len(output) > COMMAND_RESULT_MAX_CHARS:
             out["output"] = head_tail_text(output, COMMAND_RESULT_MAX_CHARS)
@@ -2644,6 +2676,33 @@ def dispatch_tool(
         except (TypeError, ValueError):
             wait_s = 0.0
         return wait_for(str(args.get("command_id") or "").strip(), wait_s, str(args.get("until") or ""))
+    if name == "restart_command":
+        from livecode.bg_commands import restart as restart_background
+
+        selected = _selected_workspace_root(project_path, {"file_path": "", "workspace": args.get("workspace")}, active_workspace)
+        if selected.get("error"):
+            return {"error": selected.get("error"), "error_kind": "invalid_input"}
+        try:
+            wait_s = float(args.get("wait_seconds") or 0)
+        except (TypeError, ValueError):
+            wait_s = 0.0
+        try:
+            port = int(args.get("port") or 0)
+        except (TypeError, ValueError):
+            return {"error": "port is a number.", "error_kind": "invalid_input"}
+        command = str(args.get("command") or "").strip()
+        if command:
+            command = inject_livecode_commit_coauthor(command)
+        return restart_background(
+            str(args.get("command_id") or "").strip(),
+            command=command,
+            cwd=selected["root"],
+            env=_subprocess_env(),
+            session_id=session_id,
+            port=port,
+            wait_seconds=wait_s,
+            until=str(args.get("until") or ""),
+        )
     if name == "kill_command":
         from livecode.bg_commands import kill as kill_background
 
@@ -3136,6 +3195,9 @@ def human_tool_label(name: str, args: dict) -> str:
         return f"Running `{cmd}`"
     if name == "command_status":
         return f"Checked `{str(args.get('command_id', ''))[:24]}`"
+    if name == "restart_command":
+        target = str(args.get("command_id") or args.get("command") or "")[:40]
+        return f"Restarted `{target}`" if target else "Restarted the server"
     if name == "kill_command":
         return f"Stopped `{str(args.get('command_id', ''))[:24]}`"
     if name == "find_symbol":

@@ -99,6 +99,7 @@ from livecode.routing import (
     user_requests_browser,
     user_requests_design_work,
     user_requests_mcp_or_tool_use,
+    user_requests_site_visit,
     user_requests_web_lookup,
     wants_structured_json,
 )
@@ -945,9 +946,9 @@ def _tool_summary(tool_name: str, result: dict) -> tuple[str, bool]:
         if result.get("background"):
             return ("Running in background" if result.get("running") else f"Exit {result.get('exit_code', '?')}"), False
         return f"Exit {result.get('exit_code', '?')}", False
-    if tool_name in ("command_status", "kill_command"):
+    if tool_name in ("command_status", "kill_command", "restart_command"):
         if result.get("running"):
-            return "Still running", False
+            return ("Restarted, running" if tool_name == "restart_command" else "Still running"), False
         return f"Exit {result.get('exit_code', '?')}", False
     if tool_name == "multi_edit":
         return result.get("summary") or "Edited file", False
@@ -1604,6 +1605,7 @@ def run_livecode_turn(
     design_loop_for_turn = False
     enable_browser_for_turn = False
     browser_tabs_note = ""
+    browser_open_note = ""
     if enable_browser_tools:
         attached_images = _image_urls_in_content(effective_user_content)
         if attached_images:
@@ -2170,7 +2172,7 @@ def run_livecode_turn(
     def _build_base_messages(brief_summary: str, *, include_layout: bool = True) -> list[dict[str, Any]]:
         rules_reminder = prefetched.pop("rules") if "rules" in prefetched else load_workspace_rules_reminder(active_workspace)
         compacted = has_valid_compaction(state_path, session_id)
-        reminders = "\n".join(part for part in (build_reminder_text(state_path, session_id), _parallel_agents_hint(), browser_tabs_note) if part)
+        reminders = "\n".join(part for part in (build_reminder_text(state_path, session_id), _parallel_agents_hint(), browser_tabs_note, browser_open_note) if part)
         memory = prefetched.pop("memory") if "memory" in prefetched else _memory_context_for(question)
         prefetched_layout = prefetched.pop("layout", None)
         system_content = build_system_prompt(
@@ -2334,6 +2336,17 @@ def run_livecode_turn(
             browser_tabs_note = browser_turn_context(state_path, session_id)
         except Exception:
             browser_tabs_note = ""
+        # "Go to github.com", "open localhost:3000": the page opens in the user's Browser tab, which
+        # the UI brings forward as soon as the browser navigates. Without this the model tends to
+        # fetch the page as text, or to open the browser only when told to in so many words.
+        site_to_open = user_requests_site_visit(question)
+        if site_to_open:
+            browser_open_note = (
+                f"The user asked you to open {site_to_open}: open it in the built-in browser now, with browser "
+                "{action: \"navigate\", url} (it appears in their Browser tab, which opens by itself), then read the "
+                "page with snapshot or a screenshot. Do not fetch it as text with web_fetch instead, and do not ask "
+                "whether to open the browser."
+            )
     messages = _build_base_messages(summary)
     tools_result = get_livecode_tools(
         enable_mcp=enable_mcp_for_turn,
