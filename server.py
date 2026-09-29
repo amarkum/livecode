@@ -1,6 +1,6 @@
 """Standalone LiveCode server.
 
-Run from the repo root:  python3 server.py  (then open http://localhost:5077)
+Run from the repo root:  python3 server.py  (then open http://localhost:9000)
 """
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ logging.basicConfig(level=os.environ.get("LIVECODE_LOG_LEVEL", "INFO"), format="
 logger = logging.getLogger("LiveCode")
 
 MONACO_CDN = "https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min"
-PORT = int(os.environ.get("LIVECODE_PORT", "5077"))
+PORT = int(os.environ.get("LIVECODE_PORT", "9000"))
 
 app = Flask(__name__, static_folder=None)
 app.config["SECRET_KEY"] = os.environ.get("LIVECODE_SECRET_KEY") or os.urandom(16).hex()

@@ -5,14 +5,14 @@
       "name": "livecode",
       "runtimeExecutable": "python3",
       "runtimeArgs": ["server.py"],
-      "port": 5077
+      "port": 9000
     },
     {
       "name": "livecode-alt",
       "runtimeExecutable": "python3",
       "runtimeArgs": ["server.py"],
-      "env": { "LIVECODE_PORT": "5078" },
-      "port": 5078
+      "env": { "LIVECODE_PORT": "9001" },
+      "port": 9001
     }
   ]
 }

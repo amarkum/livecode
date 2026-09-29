@@ -37,6 +37,21 @@
 
 ## Install
 
+### Homebrew (macOS)
+
+```bash
+brew install amarkum/livecode/livecode
+livecode                       # then open http://localhost:9000
+```
+
+To keep it running in the background and start it at login:
+
+```bash
+brew services start livecode
+```
+
+### From source
+
 ```bash
 git clone https://github.com/amarkum/livecode.git
 cd livecode
@@ -54,7 +69,7 @@ python -m playwright install chromium   # optional if Google Chrome is installed
 python3 server.py
 ```
 
-Open **http://localhost:5077**, then:
+Open **http://localhost:9000**, then:
 
 1. Open a project folder, or clone or create a new one.
 2. Go to **Settings → Models**, add an API key and make that provider the default.
@@ -63,7 +78,7 @@ Open **http://localhost:5077**, then:
 To use a different port, set `LIVECODE_PORT`:
 
 ```bash
-LIVECODE_PORT=5078 python3 server.py
+LIVECODE_PORT=9001 python3 server.py
 ```
 
 ## Configuration
@@ -81,7 +96,7 @@ Useful environment variables:
 
 | Variable | Purpose |
 | --- | --- |
-| `LIVECODE_PORT` | Server port (default `5077`) |
+| `LIVECODE_PORT` | Server port (default `9000`) |
 | `LIVECODE_LOG_LEVEL` | Log level (default `INFO`) |
 | `LIVECODE_BROWSER_EXECUTABLE` | Path to a Chrome or Chromium binary for the built-in browser |
 | `LIVECODE_BROWSER_CDP_URL` | Attach to your own Chrome, started with `--remote-debugging-port` |
