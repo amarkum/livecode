@@ -16696,6 +16696,9 @@ body.dark-theme .livecode-dialog-overlay {
 	display: block;
 	width: 100%;
 	height: 100%;
+	/* Never stretched: a frame whose shape the stage has not caught up with is letterboxed, top left. */
+	object-fit: contain;
+	object-position: top left;
 	user-select: none;
 	-webkit-user-drag: none;
 	cursor: default;

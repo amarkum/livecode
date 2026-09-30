@@ -1068,6 +1068,7 @@ def _state(session: _Session) -> dict[str, Any]:
         "seq": session.seq,
         "viewport": dict(session.viewport),
         "viewport_mode": session.viewport_mode,
+        "frame_size": _frame_size(session, active),
         "dialog": session.last_dialog,
         "zoom": session.zoom,
         "engine": "chrome" if session.shared else "builtin",
@@ -7597,6 +7598,75 @@ def _do_image_crop(session: _Session, reference: _Reference, args: dict[str, Any
     if abs(k - 1) > 0.01:
         out["reference_scale"] = round(k, 3)
     return out
+
+
+def _frame_size(session: _Session, page: Any) -> dict[str, int] | None:
+    """The CSS size of the page as its live frames show it, when a stream is on: the picture's true
+    aspect ratio, whatever viewport the UI last heard of (a fit resize under way, an attached Chrome)."""
+    stream = getattr(session, "stream", None)
+    if stream is None or stream.closed or page is None or stream.page is not page or not stream.page_size:
+        return None
+    return {"width": stream.page_size[0], "height": stream.page_size[1]}
+
+
+_INSPECT_MAP_JS = r"""
+(o) => {
+  // Every visible element in view, parents first, in viewport coordinates: the UI hit-tests these
+  // itself as the pointer moves, so the hover outline follows the mouse without a round trip.
+  const SKIP = new Set(["script", "style", "noscript", "template", "meta", "link", "br", "head", "title", "base", "html"]);
+  const vw = window.innerWidth, vh = window.innerHeight, out = [];
+  const label = (el) => {
+    let name = el.tagName.toLowerCase();
+    if (el.id) name += "#" + el.id;
+    const cls = (typeof el.className === "string" ? el.className : "").trim().split(/\s+/).filter(Boolean).slice(0, 2);
+    if (cls.length) name += "." + cls.join(".");
+    return name;
+  };
+  const text = (el) => (el.getAttribute("aria-label") || el.value || el.getAttribute("placeholder") || el.getAttribute("alt") || el.getAttribute("title") ||
+    Array.from(el.childNodes).filter((n) => n.nodeType === 3).map((n) => n.nodeValue).join(" ") || "").replace(/\s+/g, " ").trim().slice(0, 60);
+  const walk = (root) => {
+    for (const el of root.children) {
+      if (out.length >= o.max) return;
+      const tag = el.tagName.toLowerCase();
+      if (SKIP.has(tag)) continue;
+      const s = getComputedStyle(el);
+      if (s.display === "none") continue;
+      if (s.visibility !== "hidden" && Number(s.opacity) > 0.02) {
+        const r = el.getBoundingClientRect();
+        if (r.width >= 2 && r.height >= 2 && r.right > 0 && r.bottom > 0 && r.left < vw && r.top < vh) {
+          out.push([Math.round(r.left * 10) / 10, Math.round(r.top * 10) / 10, Math.round(r.width * 10) / 10, Math.round(r.height * 10) / 10, label(el), text(el)]);
+        }
+      }
+      if (tag === "svg") continue;
+      if (el.shadowRoot) walk(el.shadowRoot);
+      walk(el);
+    }
+  };
+  if (document.body) walk(document.body);
+  return { vw: vw, vh: vh, scroll: [scrollX, scrollY], elements: out };
+}
+"""
+INSPECT_MAP_MAX = 2500
+
+
+def inspect_map(state_path: str) -> dict[str, Any]:
+    """The visible elements of the active tab, for the Browser tab's select tool to hit-test locally."""
+    session = _session(state_path)
+    if session.context is None or not session.tabs:
+        return {"elements": []}
+
+    def _run() -> dict[str, Any]:
+        page = session.tabs.get(session.active)
+        if page is None or page.is_closed():
+            return {"elements": []}
+        try:
+            data = page.evaluate(_INSPECT_MAP_JS, {"max": INSPECT_MAP_MAX}) or {}
+        except Exception:
+            return {"elements": []}
+        data["seq"] = session.seq
+        return data
+
+    return session.worker.call(_run, priority=True, timeout=8)
 
 
 def _idle_state(session: _Session) -> dict[str, Any]:

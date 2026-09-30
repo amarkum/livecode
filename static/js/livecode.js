@@ -15263,11 +15263,41 @@ function _livecodeBrowserWatchDpr() {
 }
 
 function _livecodeBrowserPageSize(img) {
-  const vp = (_livecodeBrowser.state && _livecodeBrowser.state.viewport) || {};
+  // The page's CSS size: what the live frames say they show, else the viewport the UI last heard of.
+  // The two differ while a fit resize is under way and with an attached Chrome, and the frame is
+  // what is drawn, so its size wins.
+  const state = _livecodeBrowser.state || {};
+  const frame = _livecodeBrowser.streaming && state.frame_size;
+  if (frame && frame.width > 0 && frame.height > 0) return { width: frame.width, height: frame.height };
+  const vp = state.viewport || {};
   return {
     width: Number(img && img.dataset.vw) || vp.width || 1280,
     height: Number(img && img.dataset.vh) || vp.height || 800,
   };
+}
+
+// The stage's size for a frame: the page's CSS width, at the picture's own aspect ratio, scaled to
+// fit the pane and never above 1:1. The picture is drawn top-left with object-fit: contain, so
+// even a frame that arrives before the stage catches up is never stretched.
+function _livecodeBrowserStageSize(paneW, paneH, pageW, pageH, natW, natH) {
+  const w = Math.max(1, pageW), h = natW > 0 && natH > 0 ? w * natH / natW : Math.max(1, pageH);
+  const scale = Math.min(paneW / w, paneH / h, 1) || 1;
+  return { width: Math.max(1, Math.round(w * scale)), height: Math.max(1, Math.round(h * scale)), scale: scale, pageHeight: h };
+}
+
+// Where the picture sits inside the frame image (object-fit: contain, top left), and the page's CSS
+// pixels per screen pixel there.
+function _livecodeBrowserDrawnRect(img) {
+  const rect = img.getBoundingClientRect();
+  const size = _livecodeBrowserPageSize(img);
+  let w = rect.width, h = rect.height;
+  if (img.naturalWidth > 0 && img.naturalHeight > 0 && rect.width > 0 && rect.height > 0) {
+    const fit = Math.min(rect.width / img.naturalWidth, rect.height / img.naturalHeight);
+    w = img.naturalWidth * fit;
+    h = img.naturalHeight * fit;
+  }
+  const scale = w / size.width || 1;
+  return { left: rect.left, top: rect.top, width: w, height: h, pageWidth: size.width, pageHeight: h / scale, scale: scale };
 }
 
 function _livecodeBrowserStartStream() {
@@ -15391,15 +15421,20 @@ function _livecodeBrowserLayoutFrame() {
   const stage = _livecodeBrowserEl(".ide-browser-stage");
   if (!img || !frame || !stage) return;
   const size = _livecodeBrowserPageSize(img);
-  const vw = size.width, vh = size.height;
   const kind = _livecodeBrowserFrameKind();
   // Only the phone-sized device preview gets a margin; fit and fixed pages fill the pane edge to edge.
   const pad = kind === "device" ? 24 : 0;
-  const scale = Math.min((frame.clientWidth - pad * 2) / vw, (frame.clientHeight - pad * 2) / vh, 1) || 1;
-  stage.style.width = Math.max(1, Math.round(vw * scale)) + "px";
-  stage.style.height = Math.max(1, Math.round(vh * scale)) + "px";
-  stage.style.marginTop = pad + "px";
-  stage.dataset.scale = String(scale);
+  const shown = !img.hidden && img.naturalWidth > 0 && img.naturalHeight > 0;
+  const box = _livecodeBrowserStageSize(frame.clientWidth - pad * 2, frame.clientHeight - pad * 2, size.width, size.height,
+    shown ? img.naturalWidth : 0, shown ? img.naturalHeight : 0);
+  const key = box.width + "x" + box.height + "@" + pad;
+  if (stage.dataset.layout !== key) {
+    stage.dataset.layout = key;
+    stage.style.width = box.width + "px";
+    stage.style.height = box.height + "px";
+    stage.style.marginTop = pad + "px";
+  }
+  stage.dataset.scale = String(box.scale);
   _livecodeBrowserSnapStage(stage, img);
   const refImg = _livecodeBrowserEl(".ide-browser-ref-img");
   if (refImg) refImg.style.width = stage.style.width;
@@ -15468,15 +15503,14 @@ async function _livecodeBrowserAction(action, args) {
 function _livecodeBrowserPoint(e, clamp) {
   const img = _livecodeBrowserEl(".ide-browser-frame");
   if (!img || img.hidden) return null;
-  const rect = img.getBoundingClientRect();
-  if (!rect.width || !rect.height) return null;
-  const size = _livecodeBrowserPageSize(img);
-  let x = (e.clientX - rect.left) * (size.width / rect.width);
-  let y = (e.clientY - rect.top) * (size.height / rect.height);
-  if (x < 0 || y < 0 || x > size.width || y > size.height) {
+  const drawn = _livecodeBrowserDrawnRect(img);
+  if (!drawn.width || !drawn.height) return null;
+  let x = (e.clientX - drawn.left) / drawn.scale;
+  let y = (e.clientY - drawn.top) / drawn.scale;
+  if (x < 0 || y < 0 || x > drawn.pageWidth || y > drawn.pageHeight) {
     if (!clamp) return null;
-    x = Math.min(Math.max(x, 0), size.width - 1);
-    y = Math.min(Math.max(y, 0), size.height - 1);
+    x = Math.min(Math.max(x, 0), drawn.pageWidth - 1);
+    y = Math.min(Math.max(y, 0), drawn.pageHeight - 1);
   }
   return { x: Math.round(x * 10) / 10, y: Math.round(y * 10) / 10 };
 }
@@ -15484,8 +15518,7 @@ function _livecodeBrowserPoint(e, clamp) {
 function _livecodeBrowserStageScale() {
   const img = _livecodeBrowserEl(".ide-browser-frame");
   if (!img) return 1;
-  const rect = img.getBoundingClientRect();
-  return rect.width / _livecodeBrowserPageSize(img).width || 1;
+  return _livecodeBrowserDrawnRect(img).scale || 1;
 }
 
 const _LIVECODE_BROWSER_MODIFIER_KEYS = { Shift: 1, Control: 1, Alt: 1, Meta: 1, AltGraph: 1, CapsLock: 1, Fn: 1 };
@@ -15888,6 +15921,7 @@ function _livecodeBrowserBind(view) {
   img.addEventListener("load", function() {
     if (_livecodeBrowser.streaming) _livecodeBrowserStreamLoaded();
     else _livecodeBrowserLayoutFrame();
+    if (_livecodeBrowser.selecting) _livecodeBrowserLoadInspectMap(false);
   });
   img.addEventListener("error", _livecodeBrowserStreamFailed);
   frame.addEventListener("keydown", function(e) {
@@ -16130,6 +16164,66 @@ function _livecodeBrowserMenuAction(id) {
 }
 
 
+// The innermost visible element under a point (viewport CSS px), from the element map: the last of
+// those that contain it in document order, the smallest when nested boxes tie.
+function _livecodeBrowserPickElement(elements, x, y) {
+  let best = null, bestArea = Infinity;
+  for (let i = 0; i < elements.length; i++) {
+    const e = elements[i];
+    if (x < e[0] || y < e[1] || x > e[0] + e[2] || y > e[1] + e[3]) continue;
+    const area = e[2] * e[3];
+    if (area <= bestArea) { best = e; bestArea = area; }
+  }
+  return best ? { rect: { x: e4(best[0]), y: e4(best[1]), width: e4(best[2]), height: e4(best[3]) }, label: best[4], text: best[5] || "" } : null;
+  function e4(v) { return Math.round(v); }
+}
+
+function _livecodeBrowserLoadInspectMap(force) {
+  const b = _livecodeBrowser;
+  if (!b.selecting || !livecodeProjectPath || !_livecodeBrowserHasPage()) return;
+  const now = Date.now();
+  if (!force && b.inspectMapAt && now - b.inspectMapAt < 400) {
+    clearTimeout(b.inspectMapTimer);
+    b.inspectMapTimer = setTimeout(function() { _livecodeBrowserLoadInspectMap(true); }, 400 - (now - b.inspectMapAt));
+    return;
+  }
+  if (b.inspectMapLoading) { b.inspectMapAgain = true; return; }
+  b.inspectMapLoading = true;
+  b.inspectMapAt = now;
+  _livecodeBrowserPost("inspect-map").then(function(data) {
+    b.inspectMap = data && Array.isArray(data.elements) ? data : null;
+    if (b.hoverPoint) _livecodeBrowserHoverAt(b.hoverPoint);
+  }).catch(function() {
+    b.inspectMap = null;
+  }).then(function() {
+    b.inspectMapLoading = false;
+    if (b.inspectMapAgain) { b.inspectMapAgain = false; _livecodeBrowserLoadInspectMap(true); }
+  });
+}
+
+// The hover outline follows the pointer: from the element map at once, without a round trip; from
+// the server (inspect_point) only while the map is missing.
+function _livecodeBrowserHoverAt(point) {
+  const b = _livecodeBrowser;
+  b.hoverPoint = point;
+  if (!b.selecting || b.drag || b.selection) return;
+  const box = _livecodeBrowserEl(".ide-browser-hover-box");
+  if (!box) return;
+  const map = b.inspectMap;
+  if (!map) { _livecodeBrowserInspectAt({ x: Math.round(point.x), y: Math.round(point.y) }); return; }
+  const el = _livecodeBrowserPickElement(map.elements, point.x, point.y);
+  if (!el || el.rect.width < 1 || el.rect.height < 1) {
+    b.hover = null;
+    box.hidden = true;
+    return;
+  }
+  if (b.hover && b.hover.label === el.label && b.hover.rect.x === el.rect.x && b.hover.rect.y === el.rect.y &&
+      b.hover.rect.width === el.rect.width && b.hover.rect.height === el.rect.height && !box.hidden) return;
+  b.hover = el;
+  _livecodeBrowserPlaceBox(box, el.rect);
+  box.querySelector(".ide-browser-hover-label").textContent = el.label + "  " + el.rect.width + "\u00d7" + el.rect.height;
+}
+
 function _livecodeBrowserSetSelecting(on) {
   const view = _livecodeBrowserView();
   if (!view || !view._livecodeBrowserBuilt) return;
@@ -16137,6 +16231,9 @@ function _livecodeBrowserSetSelecting(on) {
   _livecodeBrowser.selection = null;
   _livecodeBrowser.hover = null;
   _livecodeBrowser.drag = null;
+  _livecodeBrowser.inspectMap = null;
+  _livecodeBrowser.hoverPoint = null;
+  if (on) _livecodeBrowserLoadInspectMap(true);
   view.querySelector(".ide-browser-select-layer").hidden = !on;
   view.querySelector(".ide-browser-hover-box").hidden = true;
   view.querySelector(".ide-browser-select-box").hidden = true;
@@ -16209,6 +16306,18 @@ function _livecodeBrowserBindSelect(view) {
   layer.addEventListener("mousemove", function(e) {
     const p = toPage(e);
     const drag = _livecodeBrowser.drag;
+    if (!drag) {
+      // One hit-test per animation frame, however fast the mouse moves.
+      _livecodeBrowser.hoverPending = p;
+      if (!_livecodeBrowser.hoverFrame) {
+        _livecodeBrowser.hoverFrame = requestAnimationFrame(function() {
+          _livecodeBrowser.hoverFrame = 0;
+          const at = _livecodeBrowser.hoverPending;
+          if (at && !_livecodeBrowser.selection) _livecodeBrowserHoverAt(at);
+        });
+      }
+      return;
+    }
     if (drag) {
       if (Math.abs(p.x - drag.start.x) + Math.abs(p.y - drag.start.y) > 4) drag.moved = true;
       if (!drag.moved) return;
@@ -16219,7 +16328,6 @@ function _livecodeBrowserBindSelect(view) {
       });
       return;
     }
-    if (!_livecodeBrowser.selection) _livecodeBrowserInspectAt({ x: Math.round(p.x), y: Math.round(p.y) });
   });
   const finish = function(e) {
     const drag = _livecodeBrowser.drag;

@@ -21,6 +21,11 @@ Notes for the agent harness: what was added, and which files changed. Newest fir
 - **New `restart_command` tool** stops a background dev server, frees its port (also for servers started elsewhere), starts it again and waits for its URL.
 - **`reload {hard: true}`** clears the cache and service workers. Local pages that refuse the connection or show an error page point at the restart.
 
+### Browser tab's live view
+
+- **The frame is never stretched.** The stage takes the live frame's own aspect ratio (the screencast reports the page's real size, which also covers an attached Chrome), and the picture is drawn with `object-fit: contain`, so a frame that arrives before a fit resize finishes is letterboxed, not distorted. Pointer positions are mapped from the picture as drawn.
+- **Selecting elements is instant.** The select tool loads a map of the visible elements once (`/livecode/browser/inspect-map`) and hit-tests it locally as the pointer moves, one test per animation frame; the map refreshes as frames change. The server round trip is only a fallback.
+
 ### Asking, and doing what was asked
 
 - **The request's own final steps go through.** "Send Gurubani a message saying …" presses Send without a second yes, for send, post, submit, buy, book and confirm. "Don't send it" and "just draft it" are respected. Subagents get the same go-ahead.
@@ -36,7 +41,8 @@ Notes for the agent harness: what was added, and which files changed. Newest fir
 
 | File | Change |
 |---|---|
-| `browser.py` | Compare rewrite: layout mode, component locator, sections, padding, border, status matching, framing, hard reload, error-page hints, final-action authorisation, board style |
+| `browser_stream.py` | Frame metadata (page size), real page size for attached Chrome |
+| `browser.py` | `frame_size` in state, `inspect_map`; compare rewrite: layout mode, component locator, sections, padding, border, status matching, framing, hard reload, error-page hints, final-action authorisation, board style |
 | `harness.py` | Site-visit and go-ahead notes, permission gate, UI-verify tracker and gate, questions card offered in agent mode, subagent go-ahead |
 | `routing.py` | Site-visit and named-site detection, own-app detection, authorised final actions, permission-question detection, UI-file detection |
 | `prompts.py` | Design-loop scope guidance, ask-or-act guidance, verify and restart guidance, Plan-mode question kinds, gate templates |
@@ -44,11 +50,11 @@ Notes for the agent harness: what was added, and which files changed. Newest fir
 | `bg_commands.py` | `restart`, port discovery and freeing |
 | `questions.py` | Questions without options (open answers) |
 | `subagent.py` | `restart_command` excluded for scoped writers |
-| `routes.py` | Settings comment for the new keys |
-| `static/js/livecode.js` | Browser tab comes forward on navigate, new Settings rows, open questions in the card |
-| `static/css/livecode.css` | "Pick any that apply" hint |
+| `routes.py` | `/livecode/browser/inspect-map`; settings comment for the new keys |
+| `static/js/livecode.js` | Live view keeps the frame's aspect and maps pointers from the drawn picture, local element hit-testing, Browser tab comes forward on navigate, new Settings rows, open questions in the card |
+| `static/css/livecode.css` | `object-fit: contain` on the live frame, "Pick any that apply" hint |
 | `README.md` | Feature notes and how to run the tests |
-| `tests/` | 115 tests: intent, prompts, agent turns with a scripted model, compare in Chromium, restart, front-end helper, fixtures |
+| `tests/` | 124 tests: intent, prompts, agent turns with a scripted model, compare in Chromium, restart, front-end helper, fixtures |
 
 ### Settings added (`~/.livecode/browser.json`)
 

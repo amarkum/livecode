@@ -1243,6 +1243,17 @@ def register_livecode_routes(app, socketio, rt):
         response.headers["X-Accel-Buffering"] = "no"
         return response
 
+    @app.route("/livecode/browser/inspect-map", methods=["POST"])
+    def livecode_browser_inspect_map():
+        data = request.get_json(silent=True) or {}
+        state_path, failed = _browser_target(data)
+        if failed:
+            return failed
+        try:
+            return jsonify({"success": True, **livecode_browser.inspect_map(state_path)})
+        except Exception as e:
+            return _browser_failure(e)
+
     @app.route("/livecode/browser/view", methods=["POST"])
     def livecode_browser_view():
         data = request.get_json(silent=True) or {}
