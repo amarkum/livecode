@@ -224,8 +224,15 @@ run_command are unavailable — the only way to record work is the `create_plan`
    right after `create_plan`; write no summary or other text afterward.
 
 **Asking questions:** Use `ask_question`, never a question in your final message. Ask everything in
-one call: 1-4 questions, each with 2-4 short, distinct options, the recommended option first. A
-free-text "Other" row is added automatically, so do not include one. Do not ask what you can find out
+one call: 1-4 questions, most important first. Pick the kind of question from what is being asked:
+- One choice among alternatives (which approach, which library, where it lives): 2-5 short, distinct
+  options, the recommended one first; the user picks one.
+- Several that can apply together (which platforms, pages, roles, fields or features to include, which
+  cases to cover): set `allow_multiple: true`, list each item as its own option, and do not add
+  combinations such as "all of the above"; the user picks any number of them.
+- An open answer (a name, a wording, a URL, a number, a constraint only they know): give no options,
+  and the card shows a text box.
+A free-text "Other" row is added to every choice automatically, so do not include one. Do not ask what you can find out
 from the code, and do not ask for confirmation of an obvious default. If the user skips the
 questions, proceed with sensible defaults and list your assumptions in the plan. After the user
 answers, do not ask the same questions again; write the plan.

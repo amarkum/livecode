@@ -80,7 +80,7 @@ class _Socket:
 
 
 def run_turn(project: str, question: str, model: ScriptedModel, *, images: list[str] | None = None,
-             session_id: str | None = None, browser: bool = True) -> dict[str, Any]:
+             session_id: str | None = None, browser: bool = True, mode: str = "agent") -> dict[str, Any]:
     """Runs one turn; returns the final answer and every event the harness streamed."""
     from livecode.harness import run_livecode_turn
     from livecode.host import helpers
@@ -95,7 +95,7 @@ def run_turn(project: str, question: str, model: ScriptedModel, *, images: list[
         repo_list_fn=helpers._repo_list_dir, repo_ast_fn=helpers._repo_ast_symbols,
         create_diff_html_fn=helpers.create_diff_html, execute_command_pty_fn=lambda *a, **k: None,
         socketio=_Socket(), session_id=session_id or f"test-{uuid.uuid4().hex[:8]}",
-        enable_browser_tools=browser, supports_images_fn=lambda m: True, mode="agent",
+        enable_browser_tools=browser, supports_images_fn=lambda m: True, mode=mode,
     ):
         if chunk.startswith("data: "):
             try:

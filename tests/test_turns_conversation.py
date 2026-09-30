@@ -130,3 +130,38 @@ def test_open_questions_need_no_options():
     assert not problem and found[0]["options"] == []
     result = questions.build_answer_result(found, {"answers": [{"id": "text", "selected": [], "other": "Hello"}]})
     assert result["answers"][0]["other"] == "Hello"
+
+
+def test_plan_mode_asks_a_multiple_choice_question_and_plans_with_the_answers():
+    """Plan mode: several options that can apply together are asked as one multi-select question, next to a
+    single choice and an open one; the plan is written from the answers in the same turn."""
+    ask = call("ask_question", questions=[
+        {"id": "pages", "prompt": "Which pages should get the new status pills?", "allow_multiple": True,
+         "options": [{"id": "orders", "label": "Orders"}, {"id": "invoices", "label": "Invoices"}, {"id": "returns", "label": "Returns"}]},
+        {"id": "style", "prompt": "Where should the status colours live?",
+         "options": [{"id": "tokens", "label": "Design tokens (recommended)"}, {"id": "css", "label": "Component CSS"}]},
+        {"id": "extra", "prompt": "Any status names beyond Paid, Due, Cancelled and Sold?"},
+    ])
+    plan = call("create_plan", title="Status pills", overview="Colour-coded status pills on the chosen pages.",
+                plan="# Status pills\n\nOrders and Returns get pills; colours come from design tokens.\n\n## Tests\n\nA test per status.",
+                todos=[{"content": "Add the status tokens"}, {"content": "Use the pill on Orders and Returns"}])
+    model = ScriptedModel([lambda c: reply("A few decisions first.", ask), lambda c: reply("Writing the plan.", plan)])
+    seen: list = []
+    answerer = _answer_when_asked([
+        {"id": "pages", "selected": ["orders", "returns", "__freeform_other__"], "other": "Refunds too"},
+        {"id": "style", "selected": ["tokens"]},
+        {"id": "extra", "selected": [], "other": "Refunded"},
+    ], seen)
+    out = run_turn(_project(), "plan colour-coded status pills for the order pages", model, mode="plan")
+    answerer.join(timeout=25)
+    assert not out["errors"]
+    first = model.calls[0]
+    assert "ask_question" in first.tools and "create_plan" in first.tools and "edit_file" not in first.tools
+    assert "allow_multiple: true" in first.text(), "the plan-mode prompt teaches multi-select questions"
+    asked = seen[0]
+    assert asked[0]["allow_multiple"] is True and asked[1]["allow_multiple"] is False and asked[2]["options"] == []
+    answers = _last(model.calls[1])["answers"]
+    assert answers[0]["selected"] == ["Orders", "Returns"] and answers[0]["other"] == "Refunds too"
+    assert answers[1]["selected"] == ["Design tokens (recommended)"]
+    assert answers[2]["other"] == "Refunded"
+    assert len(model.calls) == 2, "the plan follows the answers in the same turn"
