@@ -835,10 +835,13 @@ ASK_QUESTION_TOOL = {
     "function": {
         "name": "ask_question",
         "description": (
-            "Ask the user multiple-choice clarifying questions while plan mode is active. The turn "
-            "pauses and the user picks answers in a questions card (a free-text 'Other' row is always "
-            "added, so do not include an 'Other' option). Use it only for decisions that change the "
-            "plan and that the code cannot answer. Ask everything you need in one call."
+            "Ask the user what only they can decide, in a questions card: the turn pauses and continues "
+            "with their answers, in this same turn. Give options for a choice (allow_multiple when several "
+            "can apply together, else one is picked); a free-text 'Other' row is always added, so do not "
+            "include an 'Other' option. Give no options for an open answer (what a message should say, a "
+            "name, an address): the card shows a text box. Use it instead of ending your turn with a "
+            "question, only for what the request, the code and the page cannot answer, never to confirm "
+            "what the user already asked for. Ask everything you need in one call."
         ),
         "parameters": {
             "type": "object",
@@ -853,7 +856,7 @@ ASK_QUESTION_TOOL = {
                             "prompt": {"type": "string", "description": "The question, one or two sentences"},
                             "options": {
                                 "type": "array",
-                                "description": "2-4 distinct choices, recommended first.",
+                                "description": "2-5 distinct choices, recommended first; leave out for an open answer (a text box)",
                                 "items": {
                                     "type": "object",
                                     "properties": {
@@ -868,7 +871,7 @@ ASK_QUESTION_TOOL = {
                                 "description": "True when several options can be picked together.",
                             },
                         },
-                        "required": ["id", "prompt", "options"],
+                        "required": ["id", "prompt"],
                     },
                 },
             },
@@ -1011,9 +1014,11 @@ BROWSER_TOOL = {
             "(connection refused, a blank or error page), the dev server needs a restart: restart_command\n"
             "Forms that submit, send, buy, apply or post something: fill in only what the user told you or what the page "
             "pre-filled from their own profile; do not answer personal, legal or screening questions (work authorization, "
-            "salary, availability, demographics, willingness to relocate) on their behalf, list them and ask; and ask for a "
-            "clear yes before pressing the final Submit, Send, Apply or Pay button: the browser holds those clicks back (and Enter in "
-            "a form whose button is one of them) until you pass confirm: true, so pass it only when the user asked for exactly that.\n"
+            "salary, availability, demographics, willingness to relocate) on their behalf, ask them with ask_question. The "
+            "final Submit, Send, Apply or Pay button is held back (and Enter in a form whose button is one of them) unless the "
+            "user's request already asked for exactly that step (\"send her a message saying …\", \"submit it\"): then it goes "
+            "through, so do it and do not ask again. Otherwise ask for a clear yes with ask_question, and pass confirm: true "
+            "once they said yes.\n"
             "When actions keep failing or the page will not move, the result carries a screenshot: look at it and act on "
             "what it shows instead of repeating the same call: its pink numbered boxes are refs for click and type (screenshot "
             "{marks: true} draws them on any screenshot), or click x, y, or press Escape.\n"
@@ -1301,8 +1306,9 @@ def filter_tools_for_mode(tools: list[dict], mode: str | None) -> list[dict]:
         if name in allowed:
             filtered.append(tool)
             continue
+    # The questions card in every mode: a doubt is asked, and answered, within the turn.
+    filtered.append(dict(ASK_QUESTION_TOOL))
     if normalized == "plan":
-        filtered.append(dict(ASK_QUESTION_TOOL))
         filtered.append(dict(CREATE_PLAN_TOOL))
     return filtered
 

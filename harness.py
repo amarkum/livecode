@@ -65,6 +65,8 @@ from livecode.prompts import (
     DESIGN_LOOP_FIGMA_NOTE,
     DESIGN_LOOP_PROMPT,
     DESIGN_RECHECK_TEMPLATE,
+    PERMISSION_GATE_MAX_FIRES,
+    PERMISSION_GATE_TEMPLATE,
     UI_VERIFY_GATE_MAX_FIRES,
     UI_VERIFY_TEMPLATE,
     TODO_GATE_TEMPLATE,
@@ -101,6 +103,8 @@ from livecode.routing import (
     user_requests_browser,
     user_requests_design_work,
     user_requests_mcp_or_tool_use,
+    asks_permission,
+    authorized_final_actions,
     browse_request,
     is_ui_file,
     user_requests_web_lookup,
@@ -151,6 +155,7 @@ from livecode.browser import (
     design_context as browser_design_context,
     figma_configured as browser_figma_configured,
     agent_tabs_enabled as browser_agent_tabs_enabled,
+    authorize_final_actions as browser_authorize_final_actions,
     design_gate_enabled as browser_design_gate_enabled,
     ui_verify_enabled as browser_ui_verify_enabled,
     playwright_installed as browser_playwright_installed,
@@ -159,6 +164,7 @@ from livecode.browser import (
     turn_context as browser_turn_context,
 )
 from livecode.tools import (
+    ASK_QUESTION_TOOL,
     FILE_EDIT_TOOL_NAMES,
     MUTATING_TOOL_NAMES,
     READ_ONLY_TOOL_NAMES,
@@ -1373,7 +1379,7 @@ def _execute_one_tool(
             "iteration": iteration,
         }
 
-    allowed_in_read_only_mode = tool_name in READ_ONLY_TOOL_NAMES or tool_name in {"attempt_completion", STRUCTURED_OUTPUT_TOOL} or (mode == "plan" and tool_name in {"create_plan", "ask_question"})
+    allowed_in_read_only_mode = tool_name in READ_ONLY_TOOL_NAMES or tool_name in {"attempt_completion", STRUCTURED_OUTPUT_TOOL} or (mode == "plan" and tool_name == "create_plan") or tool_name == "ask_question"
     if tool_name == "browser":
         allowed_in_read_only_mode = not browser_action_needs_approval(tool_args)
     mcp_writes_in_read_only_mode = (
@@ -1655,6 +1661,8 @@ def run_livecode_turn(
     enable_browser_for_turn = False
     browser_tabs_note = ""
     browser_open_note = ""
+    authorized_note = ""
+    authorized_kinds = authorized_final_actions(question) if mode == "agent" else []
     if enable_browser_tools:
         attached_images = _image_urls_in_content(effective_user_content)
         if attached_images:
@@ -1969,6 +1977,12 @@ def run_livecode_turn(
             own_browser_tabs = enable_browser_for_turn and browser_agent_tabs_enabled()
         except Exception:
             own_browser_tabs = False
+        if enable_browser_for_turn and authorized_kinds:
+            # A subagent sending the message the user asked for has the same go-ahead.
+            try:
+                browser_authorize_final_actions(state_path, parent_sid or session_id, authorized_kinds, browser_agent)
+            except Exception:
+                pass
 
         def _mini_turn(project_path: str, question: str, session_id: str = "", max_iterations: int = SUBAGENT_MAX_ITERATIONS, **kwargs):
             del kwargs, session_id
@@ -2221,7 +2235,7 @@ def run_livecode_turn(
     def _build_base_messages(brief_summary: str, *, include_layout: bool = True) -> list[dict[str, Any]]:
         rules_reminder = prefetched.pop("rules") if "rules" in prefetched else load_workspace_rules_reminder(active_workspace)
         compacted = has_valid_compaction(state_path, session_id)
-        reminders = "\n".join(part for part in (build_reminder_text(state_path, session_id), _parallel_agents_hint(), browser_tabs_note, browser_open_note) if part)
+        reminders = "\n".join(part for part in (build_reminder_text(state_path, session_id), _parallel_agents_hint(), browser_tabs_note, browser_open_note, authorized_note) if part)
         memory = prefetched.pop("memory") if "memory" in prefetched else _memory_context_for(question)
         prefetched_layout = prefetched.pop("layout", None)
         system_content = build_system_prompt(
@@ -2316,6 +2330,7 @@ def run_livecode_turn(
     todo_gate_fires = 0
     design_rounds = _DesignRounds()
     ui_verify = _UiVerify()
+    permission_gate_fires = 0
     last_diag_sig_by_file: dict[str, str] = {}
     diagnostics_blocked_completion = False
     interjection_extensions = 0
@@ -2389,6 +2404,19 @@ def run_livecode_turn(
         # "Go to github.com and …", "open localhost:3000", "check it in the browser": the page opens in the
         # user's Browser tab, which the UI brings forward as soon as the browser navigates. Without this the
         # model tends to fetch the page as text, or to open the browser only when told to in so many words.
+        # The final step the request already asks for ("send her a message saying …"): that button goes
+        # through this turn, and the model is told not to ask again.
+        try:
+            browser_authorize_final_actions(state_path, session_id, authorized_kinds)
+        except Exception:
+            pass
+        if authorized_kinds:
+            _names = {"send": "send it", "post": "post it", "submit": "submit it", "buy": "place the order", "book": "book it", "confirm": "confirm it"}
+            authorized_note = (
+                "The user's request already tells you to " + " and ".join(_names[k] for k in authorized_kinds) +
+                ": that is their go-ahead. Carry it through to the end and press that button yourself (the browser lets it "
+                "through this turn); do not ask them to confirm, and say in your answer that it is done."
+            )
         wanted = browse_request(question)
         if wanted:
             steps = str(wanted.get("steps") or "")
@@ -2426,6 +2454,9 @@ def run_livecode_turn(
     else:
         tools, allowed_mcp_tools = tools_result, {}
     tools = filter_tools_for_mode(tools, mode)
+    if mode == "agent" and not any((t.get("function") or {}).get("name") == "ask_question" for t in tools):
+        # The questions card in agent mode too: a doubt is asked, and answered, in this same turn.
+        tools.append(dict(ASK_QUESTION_TOOL))
     allowed_mcp_tools = {
         name: binding
         for name, binding in allowed_mcp_tools.items()
@@ -3471,6 +3502,25 @@ def run_livecode_turn(
                             f"fire={todo_gate_fires}",
                         )
                     continue
+
+            # "Shall I send it?" after the user said to send it: do it instead of asking.
+            asked_for = asks_permission(content) if mode == "agent" else ""
+            if (asked_for and permission_gate_fires < PERMISSION_GATE_MAX_FIRES and iteration < max_iterations - CLOSURE_ITERATIONS
+                    and (authorized_kinds or asked_for in ("proceed", "go ahead", "continue", "do it", "do that", "do this", "do so"))):
+                permission_gate_fires += 1
+                if content.strip():
+                    step_stream.close_content(role="narration", text=content, thought_content=reasoning_only)
+                    early = {"role": "assistant", "content": content}
+                    messages.append(early)
+                    _persist_msg(early)
+                what = (" (" + ", ".join(authorized_kinds) + ")") if authorized_kinds else ""
+                gate = {"role": "user", "content": PERMISSION_GATE_TEMPLATE.format(verb=asked_for, what=what), "internal": True}
+                messages.append(gate)
+                _persist_msg(gate)
+                force_tool_choice_required = True
+                if logger:
+                    _ide_log(logger, "info", "permission-gate re-entry", asked_for)
+                continue
 
             if (mode == "agent" and enable_browser_for_turn and iteration < max_iterations - CLOSURE_ITERATIONS
                     and any((t.get("function") or {}).get("name") == "browser" for t in tools)

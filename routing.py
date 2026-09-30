@@ -325,6 +325,64 @@ def user_requests_site_visit(question: str) -> str:
     found = browse_request(question)
     return str(found.get("site") or "") if found else ""
 
+# The final steps a request itself asks for: "send him a message saying …" is the go-ahead to press Send.
+_ACTION_VERBS = {
+    "send": r"send|sending|reply|respond|dm|ping|e-?mail|message\s+(?:him|her|them|[A-Z][\w.-]+)|text\s+(?:him|her|them|[A-Z][\w.-]+)|invite|connect\s+with",
+    "post": r"post|publish|tweet|comment\s+on|share\s+(?:it|this|the\s+post)",
+    "submit": r"submit|apply(?:\s+(?:for|to))?|sign\s*up|register",
+    "buy": r"buy|purchase|(?<!in\s)order(?!\s+(?:of|by|to|in)\b)|pay(?:\s+for)?|check\s*out\s+(?:the\s+)?(?:cart|basket)|checkout",
+    "book": r"book|reserve",
+    "confirm": r"confirm",
+}
+_NEGATION_RE = re.compile(r"\b(?:don'?t|do\s+not|never|without|not|no\s+need\s+to|avoid|instead\s+of|before\s+you|until\s+i|wait\s+(?:for|until))\b[^.;!?]{0,24}$", re.I)
+_DRAFT_RE = re.compile(r"\b(?:draft|prepare|write\s+up|compose)\b[^.;!?]{0,60}\b(?:but|and)\s+(?:don'?t|do\s+not|not)\b|\bjust\s+(?:draft|prepare|fill)\b|\bfor\s+me\s+to\s+(?:review|check)\b", re.I)
+
+
+def authorized_final_actions(question: str) -> list[str]:
+    """The kinds of final step the request itself asks for ("send", "post", "submit", "buy", "book",
+    "confirm"): the user asked, so doing it needs no second yes. A negated one ("don't send it yet", "just
+    draft it") is left out."""
+    text = question or ""
+    if _DRAFT_RE.search(text):
+        return []
+    kinds = []
+    for kind, verbs in _ACTION_VERBS.items():
+        for match in re.finditer(r"\b(?:" + verbs + r")\b", text, re.I if kind != "send" else 0):
+            if not _NEGATION_RE.search(text[: match.start()]):
+                kinds.append(kind)
+                break
+        else:
+            # "send" matched case-sensitively above only for "message Name": try the verbs in any case.
+            if kind == "send":
+                for match in re.finditer(r"\b(?:send|sending|reply|respond|dm|ping|e-?mail|invite|connect\s+with)\b", text, re.I):
+                    if not _NEGATION_RE.search(text[: match.start()]):
+                        kinds.append(kind)
+                        break
+    return kinds
+
+
+# An answer that stops to ask permission for the next step ("Shall I send it?", "Should I go ahead?").
+_PERMISSION_RE = re.compile(
+    r"(?:\b(?:shall|should|can|may)\s+i\b|\bdo\s+you\s+want\s+me\s+to\b|\bwould\s+you\s+like\s+me\s+to\b|\bwant\s+me\s+to\b|"
+    r"\bis\s+it\s+ok(?:ay)?\s+(?:if|to)\b|\bready\s+(?:for\s+me\s+)?to\b|\bok(?:ay)?\s+to\b|\bconfirm\s+(?:that|whether|if)?\b|\blet\s+me\s+know\s+if\b)"
+    r"[^?]{0,160}?\b(?P<verb>send|post|submit|publish|apply|book|buy|purchase|pay|place|proceed|go\s+ahead|continue|do\s+(?:it|that|this|so)|click|press|hit)\b[^?]{0,100}\?",
+    re.I,
+)
+
+
+def asks_permission(answer: str) -> str:
+    """The step a final answer stops to ask permission for, or "" when it does not."""
+    tail = (answer or "").strip()[-500:]
+    found = None
+    for found in _PERMISSION_RE.finditer(tail):
+        pass
+    rest = tail[found.end():] if found else ""
+    # Only when it ends the answer (a short "Let me know." after it is still the ending).
+    if not found or "?" in rest or len(rest.strip(" \n\t*_)\"'")) > 60:
+        return ""
+    return re.sub(r"\s+", " ", found.group("verb").lower())
+
+
 # Files whose change shows in a browser: components, pages, styles and templates.
 _UI_EXTENSIONS = (".tsx", ".jsx", ".vue", ".svelte", ".astro", ".html", ".htm", ".css", ".scss", ".sass", ".less",
                   ".styl", ".pcss", ".mdx", ".hbs", ".handlebars", ".ejs", ".njk", ".jinja", ".jinja2", ".j2", ".twig",

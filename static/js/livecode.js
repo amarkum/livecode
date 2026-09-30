@@ -11033,6 +11033,7 @@ function _livecodeActiveQuestionState() {
 }
 
 function _livecodeQuestionAnswered(state, question) {
+  if (!question.options || !question.options.length) return !!String(state.other[question.id] || "").trim();
   return (state.selections[question.id] || []).length > 0;
 }
 
@@ -11130,10 +11131,12 @@ function _livecodeRenderQuestionsBar() {
       return _livecodeQuestionRowHtml(state, q, qIndex, oIndex, opt.id,
         '<span class="livecode-questions-option-label">' + _livecodeEscapeHtml(opt.label) + "</span>");
     }).join("") + _livecodeQuestionRowHtml(state, q, qIndex, q.options.length, LIVECODE_FREEFORM_OPTION_ID,
-      '<textarea class="livecode-questions-freeform" rows="1" placeholder="Other..." data-q="' + qIndex + '"></textarea>');
+      '<textarea class="livecode-questions-freeform" rows="' + (q.options.length ? 1 : 2) + '" placeholder="' +
+        (q.options.length ? "Other..." : "Type your answer…") + '" data-q="' + qIndex + '"></textarea>');
+    const hint = q.options.length ? (q.allow_multiple ? '<span class="livecode-questions-hint">Pick any that apply</span>' : "") : "";
     return '<div class="livecode-questions-question' + (qIndex === state.active ? " is-active" : "") + '" data-q="' + qIndex + '">' +
       '<div class="livecode-questions-prompt"><span class="livecode-questions-number">' + (qIndex + 1) + ".</span>" +
-      '<span class="livecode-questions-prompt-text">' + _livecodeEscapeHtml(q.prompt) + "</span></div>" +
+      '<span class="livecode-questions-prompt-text">' + _livecodeEscapeHtml(q.prompt) + "</span>" + hint + "</div>" +
       '<div class="livecode-questions-options">' + rows + "</div></div>";
   }).join("");
 
@@ -11399,6 +11402,9 @@ function _livecodeBindQuestionsBarOnce(bar) {
     if (!question) return;
     state.other[question.id] = ta.value;
     _livecodeAutosizeQuestionFreeform(ta);
+    // An open question counts as answered once it has text: Continue follows it without a redraw.
+    const go = bar.querySelector('[data-questions-action="continue"]');
+    if (go) go.disabled = !(_livecodeQuestionsAllAnswered(state) && !state.submitting);
   });
   bar.addEventListener("focusin", function(e) {
     const ta = e.target.closest && e.target.closest(".livecode-questions-freeform");

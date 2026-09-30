@@ -28,7 +28,11 @@ def variants(site_dir, site):
     card = app.replace("border-radius: 4px; padding: 14px;", "border-radius: 12px; padding: 20px;")
     assert card != app
     everything = (card.replace("border: 1px solid #6b7280; border-radius: 2px;", "border: 1px solid #d1d5db; border-radius: 8px;")
-                      .replace("background: #16a34a;", "background: #2563eb;").replace("font-size: 28px;", "font-size: 22px;"))
+                      .replace("background: #16a34a;", "background: #2563eb;").replace("font-size: 28px;", "font-size: 22px;")
+                      .replace(".pill.cancelled { background: #f3f4f6; color: #374151; }", ".pill.cancelled { background: #fee2e2; color: #991b1b; }")
+                      .replace('<button type="button" class="primary">Save</button><button type="button" class="secondary">Cancel</button>',
+                               '<button type="button" class="secondary">Cancel</button><button type="button" class="primary">Save</button>'))
+    assert ".pill.cancelled { background: #fee2e2; color: #991b1b; }" in everything and 'secondary">Cancel</button><button' in everything
     for name, text in (("app_card_fixed.html", card), ("app_fixed.html", everything)):
         with open(os.path.join(site_dir, name), "w") as handle:
             handle.write(text)
@@ -113,3 +117,29 @@ def test_locate_false_compares_the_view(act, variants, design_shots):
     act(action="navigate", url=variants["app"])
     result = act(action="compare", reference=design_shots["card"], locate=False)
     assert result["mode"] == "view" and not result.get("located")
+
+
+def test_shuffled_statuses_are_matched_by_their_words(act, variants, design_shots):
+    """The design shows Paid, Cancelled, Sold on its rows; the app its own orders: Sold, Paid, Cancelled, Due.
+    Each status is compared with the design's status of the same words, wherever it is."""
+    act(action="resize", width=1100, height=700)
+    act(action="navigate", url=variants["app"])
+    result = act(action="compare", reference=design_shots["page"], full_page=True)
+    pills = next(g for g in result["labels"] if g["label"] == "span.pill")
+    assert set(pills["checked"]) == {"Sold", "Paid", "Cancelled"} and pills["not_in_design"] == ["Due"]
+    cancelled = _findings(result, "span.pill.cancelled")
+    assert any("has background #f3f4f6 here; the design\u2019s \u201cCancelled\u201d has #FEE2E2" in f for f in cancelled)
+    assert not _findings(result, "span.pill.sold") and not _findings(result, "span.pill.paid"), "the same status in another row is no difference"
+    # Where the design has its "Cancelled": the second card (Wade Warren's), left of the app's (the third).
+    element = next(e for e in result["elements"] if e["element"].startswith("span.pill.cancelled"))
+    assert element["design_box"]["x"] < element["box"]["x"] - 100
+
+
+def test_buttons_in_another_order_are_one_finding(act, variants, design_shots):
+    act(action="resize", width=1100, height=700)
+    act(action="navigate", url=variants["app"])
+    result = act(action="compare", reference=design_shots["page"], full_page=True)
+    save = _findings(result, "button.primary")
+    assert any("the design has them in the order \u201cCancel\u201d, \u201cSave\u201d" in f for f in save)
+    assert any("\u201cSave\u201d has background #16a34a here; the design\u2019s \u201cSave\u201d has #2563EB" in f for f in save)
+    assert not any("sits" in f for f in save + _findings(result, "button.secondary")), "the swap is not reported as moves"

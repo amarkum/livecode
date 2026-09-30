@@ -534,6 +534,9 @@ class _Agent:
         self.design_rounds: dict[str, dict[str, str]] = {}
         # Where each component screenshot (a card, an input) was found on the page: its selector.
         self.located: dict[str, str] = {}
+        # The final steps this turn's request already asked for ("send", "post", "submit", …): buttons
+        # of those kinds go through without a confirm.
+        self.authorized: frozenset[str] = frozenset()
 
 
 MAX_AGENTS_KEPT = 64
@@ -1225,7 +1228,7 @@ def _first_visible(locator: Any) -> Any:
     return locator.first
 
 
-_FINAL_ACTION_RX = (r"^\s*(submit( application| order| form)?|send( message| now| invitation)?|place( your)? order|pay( now)?|"
+_FINAL_ACTION_RX = (r"^\s*(submit( application| order| form)?|send( message| now| invitation| invite| reply| email)?|reply|place( your)? order|pay( now)?|"
                     r"confirm( order| purchase| payment| booking)?|buy now|purchase|post|publish|book now|complete (order|purchase)|apply now)\s*$")
 _FINAL_ACTION_JS = """
 (el, o) => {
@@ -1248,6 +1251,35 @@ _FINAL_ACTION_ADVICE = (
 )
 
 
+# Which buttons each kind of request lets through: "send him a message" is the go-ahead for Send.
+FINAL_ACTION_KINDS = {
+    "send": r"^\s*(send( message| now| invitation| invite| reply| email)?|reply)\s*$",
+    "post": r"^\s*(post|publish)\s*$",
+    "submit": r"^\s*(submit( application| form)?|apply now)\s*$",
+    "buy": r"^\s*(place( your)? order|pay( now)?|buy now|purchase|complete (order|purchase)|confirm( order| purchase| payment)|submit order)\s*$",
+    "book": r"^\s*(book now|confirm( booking)?)\s*$",
+    "confirm": r"^\s*confirm\s*$",
+}
+
+
+def authorize_final_actions(state_path: str, session_id: str, kinds: Any, agent: dict[str, Any] | None = None) -> None:
+    """Records the final steps this turn's request already asked for (it replaces the last turn's), for the
+    main agent or, with agent, a subagent working on the same request."""
+    try:
+        session = _session(state_path)
+    except BrowserError:
+        return
+    _agent_for(session, session_id, agent).authorized = frozenset(k for k in (kinds or []) if k in FINAL_ACTION_KINDS)
+
+
+def _authorized_for(name: str) -> str:
+    who = _ACTIVE.get("agent")
+    for kind in sorted(getattr(who, "authorized", ()) or ()):
+        if re.match(FINAL_ACTION_KINDS[kind], name or "", re.I):
+            return kind
+    return ""
+
+
 def _guard_final_action(locator: Any, args: dict[str, Any], mode: str) -> None:
     if args.get("confirm") in (True, "true", "yes", 1):
         return
@@ -1255,6 +1287,8 @@ def _guard_final_action(locator: Any, args: dict[str, Any], mode: str) -> None:
         name = locator.evaluate(_FINAL_ACTION_JS, {"rx": _FINAL_ACTION_RX, "mode": mode}, timeout=1500)
     except Exception:
         return
+    if name and _authorized_for(name):
+        return  # the user's request already asked for exactly this
     if name:
         what = f'the "{name}" button' if mode == "click" else f'Enter here (it triggers the "{name}" button of this form)'
         raise BrowserError(f"Held back: this would press {what}. " + _FINAL_ACTION_ADVICE)
@@ -3370,6 +3404,9 @@ def _fit_viewport(session: _Session, page: Any, reference: _Reference, ranked: l
             continue  # a fixed width: the viewport does not change it
         for k in scales:
             target = v0 + (image_w / k - w0) / slope
+            # Designs are made at round widths (1100, 1440): a width a few px off one is that one.
+            near_round = round(target / 10) * 10
+            target = near_round if abs(target - near_round) <= 3 else target
             if MIN_VIEWPORT[0] <= target <= MAX_VIEWPORT[0] and abs(target - v0) >= 8:
                 widths.setdefault(int(round(target)), k)
     best: tuple[float, list[tuple[float, dict[str, Any]]], int] | None = None
@@ -6028,7 +6065,9 @@ const measureElement = (S, e) => {
         const nearD = nearPage.map((a) => [a[0] + offset.dx - D.x, a[1] + offset.dy - D.y, a[2] + offset.dx - D.x, a[3] + offset.dy - D.y]);
         const sA = ringDark(A, eA, fA ? rgbLab(fA.rgb) : outA, near), sB = ringDark(D, eB, fB ? rgbLab(fB.rgb) : outB, nearD);
         // (A screenshot of the element alone leaves out its shadow: the element it was found at is not held to it.)
-        if (sA !== null && sB !== null && Math.abs(sB - sA) >= tol(S, 1.5, 0.5) && !(o.paddedRef && e.parent < 0)) {
+        // (Around a small label without a shadow of its own the ring is too thin to tell.)
+        if (sA !== null && sB !== null && Math.abs(sB - sA) >= tol(S, 1.5, 0.5) && !(o.paddedRef && e.parent < 0) &&
+            (e.flags.shadow || b.width * b.height >= 2500)) {
           findings.push({ kind: "shadow", text: sB > sA ? "the design's shadow or outline around it is stronger" : "its shadow or outline is stronger than the design's", page: r1(sA), design: r1(sB) });
         }
       }
@@ -6235,12 +6274,167 @@ window.elementsFinish = function () {
       if (!f) continue;
       // (A child at the box's right moves the other way when both sides' padding changed alike.)
       const ex = Math.abs(Math.abs(f.dx || 0) - Math.abs(dx)) <= 1.5, ey = Math.abs((f.dy || 0) - dy) <= 1.5;
-      if (ex && ey) {
+      // (A child further in moves with the padding along one side and not at all along the other.)
+      if ((ex && (ey || !f.dy)) || (ey && !f.dx)) {
         q.findings = q.findings.filter((x) => x !== f);
         if (!q.findings.length) q.status = "matches";
       } else if (ex || ey) {
         f.text += " (partly the " + r.name.split(/[\s"]/)[0] + "'s padding)";
       }
+    }
+  }
+  // Labels whose words are data, a status above all (Paid, Due, Sold, Cancelled): the design shows each
+  // status in its own colours, in another order than the app's rows. Each label is compared with the
+  // design's label of the same words, wherever the design has it (the shapes of their words are
+  // compared); what compared it with another status in its place is dropped. Sibling buttons whose
+  // words the design has in another order (OK and Cancel swapped) are a finding of their own.
+  const labelWords = [];
+  if (S.layout) {
+    const kindOf = (name) => String(name || "").split(/[\s"]/)[0];
+    const COLOURS = new Set(["background", "text_color", "border_color", "shadow"]);
+    const labelKey = (r) => {
+      const it = S.items[r.i], b = it.box, f = it.flags;
+      // Grouped by tag and first class (span.pill, not span.pill.sold: the second is the status).
+      // (Buttons and other controls by their tag alone: a primary and a secondary one are one set of buttons.)
+      return f.text && it.text && ((f.bg && f.bg !== "translucent") || f.outline || f.control) && b.height <= 56 && b.width <= 320 ?
+        (f.control ? kindOf(r.name).split(".")[0] : kindOf(r.name).split(".").slice(0, 2).join(".")) : "";
+    };
+    const labelInk = (ctx, box) => {
+      const R = region(ctx, box.x - 2, box.y - 2, box.width + 4, box.height + 4);
+      // Inside it, clear of its rounded ends (past its corners what is around it shows).
+      const ix = 2 + Math.min(10, Math.round(box.height / 2)), iy = 4;
+      if (R.w - 2 * ix < 4 || R.h - 2 * iy < 4) return null;
+      const bg = commonColor(R, ix, iy, R.w - 1 - ix, R.h - 1 - iy);
+      const ink = bg && inkOf(R, ix, iy, R.w - 1 - ix, R.h - 1 - iy, rgbLab(bg.rgb), 0, bg.rgb);
+      if (!ink) return null;
+      // Its own background: right around its words (a crop the size of another label takes in what is past it).
+      const inside = (x, y) => x >= ink.x0 - 5 && x <= ink.x1 + 5 && y >= ink.y0 - 3 && y <= ink.y1 + 3 &&
+                               !(x >= ink.x0 - 1 && x <= ink.x1 + 1 && y >= ink.y0 - 1 && y <= ink.y1 + 1);
+      const own = commonColor(R, Math.max(0, ink.x0 - 5), Math.max(0, ink.y0 - 3), Math.min(R.w - 1, ink.x1 + 5), Math.min(R.h - 1, ink.y1 + 3), inside) || bg;
+      const color = ink.dir ? own.rgb.map((v, c) => Math.max(0, Math.min(255, v + ink.reach * ink.dir[c]))) : null;
+      return { R: R, bg: own.rgb, ink: ink, color: color };
+    };
+    // The design's label where the page has one: its own extent (its words may be longer or shorter than
+    // the page's there), grown out from the middle over what stands apart from its surroundings.
+    const grow = (ctx, box) => {
+      const E = Math.min(90, Math.round(box.width) + 10);
+      const R = region(ctx, box.x - E, box.y - 4, box.width + 2 * E, box.height + 8);
+      const far = commonColor(R, 0, 0, R.w - 1, R.h - 1, (x) => x < 6 || x >= R.w - 6);
+      if (!far) return box;
+      const out = rgbLab(far.rgb), cy = Math.round(R.h / 2), cx = Math.round(R.w / 2);
+      const apart = (x, y) => x >= 0 && y >= 0 && x < R.w && y < R.h && dE94(R.X, (y * R.w + x) * 3, out, 0) > 4;
+      const col = (x) => apart(x, cy - 2) || apart(x, cy) || apart(x, cy + 2);
+      const row = (y, x0, x1) => { for (let x = x0; x <= x1; x += 2) if (apart(x, y)) return true; return false; };
+      let l = cx, r = cx, gap = 0;
+      if (!col(cx)) return box;
+      for (let x = cx; x >= 0; x--) { if (col(x)) { l = x; gap = 0; } else if (++gap > 3) break; }
+      gap = 0;
+      for (let x = cx; x < R.w; x++) { if (col(x)) { r = x; gap = 0; } else if (++gap > 3) break; }
+      let t = cy, b = cy;
+      for (let y = cy; y >= 0 && row(y, l, r); y--) t = y;
+      for (let y = cy; y < R.h && row(y, l, r); y++) b = y;
+      if (r - l < 6 || b - t < 6 || l <= 1 || r >= R.w - 2) return box;
+      return { x: R.x + l, y: R.y + t, width: r - l + 1, height: b - t + 1 };
+    };
+    const groups = new Map(), unplaced = new Map();
+    for (const r of res) {
+      const key = labelKey(r);
+      if (!key) continue;
+      if (r.status === "missing" || !r.found) { if (!unplaced.has(key)) unplaced.set(key, []); unplaced.get(key).push(String(S.items[r.i].text || "").trim()); continue; }
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(r);
+    }
+    for (const [key, list] of groups) {
+      const page = list.map((r) => ({ r: r, text: String(S.items[r.i].text || "").trim(), L: labelInk(S.pctx, r.box) }));
+      const places = list.map((r) => {
+        const d = r.disp || r.offset || { dx: 0, dy: 0 }, g = r.geometry;
+        const box = { x: r.box.x + d.dx, y: r.box.y + d.dy, width: Math.max(4, r.box.width + (g ? g.dw : 0)), height: Math.max(4, r.box.height + (g ? g.dh : 0)) };
+        const grown = grow(S.dctx, box);
+        return { r: r, L: labelInk(S.dctx, grown), box: grown, words: "" };
+      });
+      // One page label for each of its words, to read the design's labels by.
+      const byWords = new Map();
+      for (const p of page) if (p.L && p.text && !byWords.has(p.text.toLowerCase())) byWords.set(p.text.toLowerCase(), p);
+      for (const q of places) {
+        if (!q.L) continue;
+        let best = "", top = SAME_WORDS;
+        for (const [words, p] of byWords) {
+          const sim = inkSimilarity(p.L.R, p.L.ink, q.L.R, q.L.ink, true);
+          if (sim >= top) { top = sim; best = words; }
+        }
+        q.words = best;
+      }
+      const found = new Map();
+      for (const q of places) if (q.words && !found.has(q.words)) found.set(q.words, q);
+      const styleCheck = (p, q, where) => {
+        
+        const add = (f) => { p.r.findings = (p.r.findings || []).filter((x) => x.kind !== f.kind || x.status !== true); p.r.findings.push(f); p.r.status = "different";
+                             if (q.box && q.r !== p.r) p.r.twin = { dx: Math.round(q.box.x + q.box.width / 2 - (p.r.box.x + p.r.box.width / 2)), dy: Math.round(q.box.y + q.box.height / 2 - (p.r.box.y + p.r.box.height / 2)) }; };
+        // The page's side as its CSS has it; the design's text colour corrected by how the page's own
+        // strokes read against its CSS colour (thin strokes never reach it fully).
+        const st = S.items[p.r.i].style || {}, cssInk = hexRgb(st.color);
+        const eBg = dE2000(rgbLab(p.L.bg), rgbLab(q.L.bg));
+        if (eBg >= tol(S, 2.5, 1)) add({ kind: "status_style", status: true, text: "“" + p.text + "” has background " + (st.bg || hex(p.L.bg)) + " here; the design’s “" + p.text + "” has " + hex(q.L.bg) + where,
+                                          page: st.bg || hex(p.L.bg), design: hex(q.L.bg), delta_e: r1(eBg) });
+        if (p.L.color && q.L.color) {
+          const eInk = dE2000(rgbLab(p.L.color), rgbLab(q.L.color));
+          const want = cssInk ? q.L.color.map((v, c) => Math.max(0, Math.min(255, v + cssInk[c] - p.L.color[c]))) : q.L.color;
+          // (Thin strokes read a little off: only a clearly other colour, or one beside another fill.)
+          if (eInk >= Math.max(tol(S, 10, 3), 18) || (eBg >= tol(S, 2.5, 1) && eInk >= tol(S, 10, 3))) add({ kind: "status_text", status: true, text: "“" + p.text + "” has text colour " + (st.color || hex(p.L.color)) + " here; the design’s “" + p.text + "” looks like " + hex(want) + where,
+                                             page: st.color || hex(p.L.color), design: hex(want) });
+        }
+      };
+      const checked = [], notInDesign = [];
+      // Labels on rows the design does not show (one more order than it has) cannot be matched either.
+      for (const text of unplaced.get(key) || []) if (text && !byWords.has(text.toLowerCase()) && !notInDesign.includes(text)) notInDesign.push(text);
+      for (const [words, p] of byWords) {
+        const q = found.get(words);
+        if (!q) { notInDesign.push(p.text); continue; }
+        checked.push(p.text);
+        // In its own place the element's own measures already compared it.
+        if (q.r === p.r) continue;
+        styleCheck(p, q, " (the design has it on another row)");
+      }
+      // What was compared with another label in its place (other words there): not a finding.
+      for (let k = 0; k < list.length; k++) {
+        const p = page[k], q = places[k];
+        if (!p.text || (q.words && q.words === p.text.toLowerCase())) continue;
+        // (Its size and where it starts across follow its words too: only a move up or down stays.)
+        p.r.findings = (p.r.findings || []).filter((f) => f.status === true || !(COLOURS.has(f.kind) || f.kind === "size"));
+        for (const f of p.r.findings) if (f.kind === "moved" && f.dx) {
+          if (Math.abs(f.dy || 0) >= tol(S, 3, 1)) { f.dx = 0; f.text = movedText(0, f.dy); } else f.drop = true;
+        }
+        p.r.findings = p.r.findings.filter((f) => !f.drop);
+        p.r.content = true;
+        if (!p.r.findings.length) p.r.status = "matches";
+      }
+      // Buttons side by side in another order: their order is the layout's, not data.
+      const byParent = new Map();
+      for (let k = 0; k < list.length; k++) { const par = list[k].parent; if (!byParent.has(par)) byParent.set(par, []); byParent.get(par).push(k); }
+      for (const [, ks] of byParent) {
+        if (ks.length < 2 || ks.some((k) => !places[k].words)) continue;
+        // Left to right (top to bottom in a column): the page's words, and the design's where each was found.
+        const across = (a, b) => Math.abs(a.y - b.y) < 8 ? a.x - b.x : a.y - b.y;
+        const pageSeq = ks.slice().sort((a, b) => across(page[a].r.box, page[b].r.box)).map((k) => page[k].text.toLowerCase());
+        const designSeq = ks.slice().sort((a, b) => across(places[a].box, places[b].box)).map((k) => places[k].words);
+        if (pageSeq.join("|") === designSeq.join("|") || pageSeq.slice().sort().join("|") !== designSeq.slice().sort().join("|")) continue;
+        const name = (w) => "“" + (byWords.get(w) ? byWords.get(w).text : w) + "”";
+        const first = page[ks[0]].r;
+        first.findings = (first.findings || []).concat([{ kind: "order", text: "the design has them in the order " + designSeq.map(name).join(", ") + " (here " + pageSeq.map(name).join(", ") + ")" }]);
+        first.status = "different";
+        // Their moves across are the swap's: the order says it once. And their colours are compared with the
+        // twin each was matched with, right around its words (next to the other one, what is around them differs).
+        for (const k of ks) {
+          const r = page[k].r;
+          r.findings = (r.findings || []).filter((f) => f.status === true || !COLOURS.has(f.kind));
+          if (page[k].L && places[k].L) styleCheck(page[k], places[k], "");
+          for (const f of r.findings || []) if (f.kind === "moved" && f.dx) { if (Math.abs(f.dy || 0) >= tol(S, 3, 1)) { f.dx = 0; f.text = movedText(0, f.dy); } else f.drop = true; }
+          r.findings = (r.findings || []).filter((f) => !f.drop);
+          if (!r.findings.length && r !== first) r.status = "matches";
+        }
+      }
+      if (list.length >= 2 || notInDesign.length) labelWords.push({ label: key, checked: checked, not_in_design: notInDesign,
+                                                                  design_only: places.filter((q) => q.L && !q.words).length });
     }
   }
   if (S.layout) {
@@ -6256,6 +6450,18 @@ window.elementsFinish = function () {
       if (inExtra || twin) {
         extra.add(r.i);
         r.status = "matches"; r.content = true; r.extraCopy = true; r.findings = [];
+      }
+    }
+    // Below more rows than the design shows, what follows sits lower by those rows: that is the data's
+    // length, so only where it sits across is compared there.
+    const extraTop = Math.min(...res.filter((r) => r.extraCopy).map((r) => r.box.y), Infinity);
+    if (extraTop < Infinity) {
+      for (const r of res) {
+        if (r.extraCopy || r.box.y <= extraTop) continue;
+        const f = (r.findings || []).find((x) => x.kind === "moved" && x.dy);
+        if (!f) continue;
+        if (Math.abs(f.dx || 0) >= tol(S, 2, 1)) { f.dy = 0; f.text = movedText(f.dx, 0) + " (below more rows than the design shows: not compared up or down)"; }
+        else { r.findings = r.findings.filter((x) => x !== f); if (!r.findings.length) r.status = "matches"; }
       }
     }
   }
@@ -6283,7 +6489,7 @@ window.elementsFinish = function () {
   }
   const verdict = !bad.length && !lacking.length && !background ? (counts.nearly ? "nearly identical" : S.base.verdict === "identical" ? "identical" : "nearly identical") : "different";
   const exported = bad.map((r) => {
-    const d = r.disp || r.offset, geo = r.geometry;
+    const d = r.twin || r.disp || r.offset, geo = r.twin ? null : r.geometry;
     const out = { n: r.n, element: r.name, selector: r.selector, status: r.status, box: r.box,
                   findings: (r.findings || []).map((f) => f.text) };
     if (r.match !== undefined) out.match = r.match;
@@ -6296,7 +6502,7 @@ window.elementsFinish = function () {
     }
     return out;
   });
-  const result = { verdict: verdict, counts: counts, elements: exported, lacking: lacking, background: background,
+  const result = { verdict: verdict, counts: counts, elements: exported, lacking: lacking, background: background, labels: labelWords,
                    statuses: res.map((r) => [r.selector, r.status]), beyond: S.beyond.size,
                    similarity: S.base.similarity, structure: S.base.structure, notes: S.base.notes, shifts: S.base.shifts,
                    page_size: S.base.page_size, reference_size: S.base.reference_size, reference_scale: S.base.reference_scale,
@@ -6385,7 +6591,7 @@ window.elementsFinish = function () {
     return f;
   };
   const onDesign = bad.filter((r) => r.status !== "missing").map((r) => {
-    const d = r.disp || r.offset, geo = r.geometry;
+    const d = r.twin || r.disp || r.offset, geo = r.twin ? null : r.geometry;
     return { n: r.n, cls: "different", x: r.box.x + d.dx, y: r.box.y + d.dy, width: r.box.width + (geo ? geo.dw : 0), height: r.box.height + (geo ? geo.dh : 0) };
   }).concat(lacking.map((a) => ({ n: a.n, cls: "lacking", x: a.x, y: a.y, width: a.width, height: a.height })));
   const onPage = bad.map((r) => ({ n: r.n, cls: r.status === "missing" ? "missing" : "different", x: r.box.x, y: r.box.y, width: r.box.width, height: r.box.height }));
@@ -6420,7 +6626,8 @@ window.elementsFinish = function () {
       for (const f of (r.findings || []).slice(0, 4)) { const li = document.createElement("li"); li.textContent = f.text; list.appendChild(li); }
       // Text is shown by its own box (a heading's block is often far wider than its words).
       const item = S.items[r.i], f = r.textual && item.text_box ? item.text_box : r.box;
-      const m = Math.max(8, Math.round(0.12 * Math.max(f.width, f.height))), d = r.disp || r.offset, w = f.width + 2 * m, h = f.height + 2 * m;
+      // (A label matched with the design's label of the same words shows that one.)
+      const m = Math.max(8, Math.round(0.12 * Math.max(f.width, f.height))), d = r.twin || r.disp || r.offset, w = f.width + 2 * m, h = f.height + 2 * m;
       const q = Math.min(3, 225 / w, 150 / h);
       const pair = document.createElement("div");
       pair.className = "pair";
@@ -7241,6 +7448,17 @@ def _elements_result(reference: _Reference, target: str, rect: dict[str, int], s
     background = stats.get("background")
     if background:
         summary += " " + background["text"][0].upper() + background["text"][1:] + "."
+    labels = [g for g in stats.get("labels") or [] if g.get("checked") or g.get("not_in_design")]
+    for group in labels[:3]:
+        quote = lambda words: ", ".join("\u201c" + w + "\u201d" for w in words[:8])
+        bits = []
+        if group.get("checked"):
+            bits.append(f"{quote(group['checked'])} compared with the design's label of the same words, wherever it is")
+        if group.get("not_in_design"):
+            bits.append(f"{quote(group['not_in_design'])} not in the design, so {'its' if len(group['not_in_design']) == 1 else 'their'} colours could not be checked")
+        if group.get("design_only"):
+            bits.append(f"{group['design_only']} of the design's are none of the page's words")
+        summary += f" {group['label']} labels (statuses): " + "; ".join(bits) + "."
     if len(stats.get("elements") or []) > len(listed):
         summary += f" The first {len(listed)} are listed."
     out: dict[str, Any] = {
@@ -7257,6 +7475,8 @@ def _elements_result(reference: _Reference, target: str, rect: dict[str, int], s
             out[key] = stats[key]
     if lacking:
         out["missing_on_page"] = lacking
+    if labels:
+        out["labels"] = labels
     if background:
         out["background"] = {"page": background["page"], "design": background["design"], "delta_e": background["delta_e"]}
     agent = _agent()
@@ -7811,7 +8031,7 @@ _SHOT_RESULT_KEYS = ("region", "target", "source", "mode", "reference", "similar
                      "reference_size", "reference_scale", "reference_region", "reference_image_size", "offset", "size_diff",
                      "shifts", "differences", "notes", "coords", "reference_tab", "opened_tab", "tab_id", "threshold", "marks",
                      "compare", "summary", "elements_compared", "elements", "missing_on_page", "background", "progress", "accuracy",
-                     "content", "located", "sections")
+                     "content", "located", "sections", "labels")
 
 
 FAIL_STREAK_SHOT = 2

@@ -10644,6 +10644,13 @@ body.pink-theme #ide-plan-view {
 	line-height: 135%;
 	transition: color 0.1s ease-out;
 }
+.livecode-questions-bar .livecode-questions-hint {
+	flex-shrink: 0;
+	margin-left: auto;
+	color: var(--lc-text-3);
+	font-size: 11.5px;
+	font-weight: 500;
+}
 .livecode-questions-bar .livecode-questions-number {
 	flex-shrink: 0;
 	width: 12px;

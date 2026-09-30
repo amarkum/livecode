@@ -13,15 +13,22 @@ form.filters input { width: 260px; height: 38px; box-sizing: border-box; padding
 .card { background: #fff; border-radius: 4px; padding: 14px; display: flex; gap: 16px; align-items: center;
   box-shadow: 0 1px 3px rgba(0,0,0,.12); }
 .body { flex: 1; } .name { font-size: 16px; font-weight: 600; } .price { font-size: 14px; color: #6b7280; margin-top: 4px; }
-.pill { font-size: 12px; padding: 4px 10px; border-radius: 999px; background: #dcfce7; color: #166534; }
+.pill { font-size: 12px; padding: 4px 10px; border-radius: 999px; }
+.actions { display: flex; gap: 12px; justify-content: flex-end; margin-top: 24px; }
+button.secondary { background: #e5e7eb; color: #111827; }
+.pill.paid { background: #dcfce7; color: #166534; }
+.pill.due { background: #fef3c7; color: #92400e; }
+.pill.cancelled { background: #f3f4f6; color: #374151; }
+.pill.sold { background: #dbeafe; color: #1e40af; }
 </style></head><body>
 <header><h1>Orders</h1><button>New order</button></header>
 <div id="orders-mfe">
   <form class="filters"><input class="search" placeholder="Search orders"><input class="date" placeholder="Any date"><button type="button">Apply</button></form>
   <div class="grid"><article class="card"><img class="avatar" src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='48' height='48'><circle cx='24' cy='24' r='22' fill='%23ef4444'/><rect x='12' y='20' width='24' height='8' rx='2' fill='white'/></svg>" width="48" height="48" alt="">
-      <div class="body"><div class="name">Amar Kumar</div><div class="price">$99.00</div></div><span class="pill">Paid</span></article><article class="card"><img class="avatar" src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='48' height='48'><circle cx='24' cy='24' r='22' fill='%238b5cf6'/><rect x='12' y='20' width='24' height='8' rx='2' fill='white'/></svg>" width="48" height="48" alt="">
-      <div class="body"><div class="name">Priya Sharma</div><div class="price">$15,000.75</div></div><span class="pill">Due</span></article><article class="card"><img class="avatar" src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='48' height='48'><circle cx='24' cy='24' r='22' fill='%2314b8a6'/><rect x='12' y='20' width='24' height='8' rx='2' fill='white'/></svg>" width="48" height="48" alt="">
-      <div class="body"><div class="name">Sam Lee</div><div class="price">$0.00</div></div><span class="pill">Paid</span></article><article class="card"><img class="avatar" src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='48' height='48'><circle cx='24' cy='24' r='22' fill='%23f97316'/><rect x='12' y='20' width='24' height='8' rx='2' fill='white'/></svg>" width="48" height="48" alt="">
-      <div class="body"><div class="name">Ava Chen</div><div class="price">$410.20</div></div><span class="pill">Paid</span></article></div>
+      <div class="body"><div class="name">Amar Kumar</div><div class="price">$99.00</div></div><span class="pill sold">Sold</span></article><article class="card"><img class="avatar" src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='48' height='48'><circle cx='24' cy='24' r='22' fill='%238b5cf6'/><rect x='12' y='20' width='24' height='8' rx='2' fill='white'/></svg>" width="48" height="48" alt="">
+      <div class="body"><div class="name">Priya Sharma</div><div class="price">$15,000.75</div></div><span class="pill paid">Paid</span></article><article class="card"><img class="avatar" src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='48' height='48'><circle cx='24' cy='24' r='22' fill='%2314b8a6'/><rect x='12' y='20' width='24' height='8' rx='2' fill='white'/></svg>" width="48" height="48" alt="">
+      <div class="body"><div class="name">Sam Lee</div><div class="price">$0.00</div></div><span class="pill cancelled">Cancelled</span></article><article class="card"><img class="avatar" src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='48' height='48'><circle cx='24' cy='24' r='22' fill='%23f97316'/><rect x='12' y='20' width='24' height='8' rx='2' fill='white'/></svg>" width="48" height="48" alt="">
+      <div class="body"><div class="name">Ava Chen</div><div class="price">$410.20</div></div><span class="pill due">Due</span></article></div>
+  <div class="actions"><button type="button" class="primary">Save</button><button type="button" class="secondary">Cancel</button></div>
 </div>
 </body></html>
