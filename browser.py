@@ -532,6 +532,11 @@ class _Agent:
         self.downloads_seen = 0
         self.done = False
         self.design_rounds: dict[str, dict[str, str]] = {}
+        # Where each component screenshot (a card, an input) was found on the page: its selector.
+        self.located: dict[str, str] = {}
+        # The final steps this turn's request already asked for ("send", "post", "submit", …): buttons
+        # of those kinds go through without a confirm.
+        self.authorized: frozenset[str] = frozenset()
 
 
 MAX_AGENTS_KEPT = 64
@@ -1063,6 +1068,7 @@ def _state(session: _Session) -> dict[str, Any]:
         "seq": session.seq,
         "viewport": dict(session.viewport),
         "viewport_mode": session.viewport_mode,
+        "frame_size": _frame_size(session, active),
         "dialog": session.last_dialog,
         "zoom": session.zoom,
         "engine": "chrome" if session.shared else "builtin",
@@ -1223,7 +1229,7 @@ def _first_visible(locator: Any) -> Any:
     return locator.first
 
 
-_FINAL_ACTION_RX = (r"^\s*(submit( application| order| form)?|send( message| now| invitation)?|place( your)? order|pay( now)?|"
+_FINAL_ACTION_RX = (r"^\s*(submit( application| order| form)?|send( message| now| invitation| invite| reply| email)?|reply|place( your)? order|pay( now)?|"
                     r"confirm( order| purchase| payment| booking)?|buy now|purchase|post|publish|book now|complete (order|purchase)|apply now)\s*$")
 _FINAL_ACTION_JS = """
 (el, o) => {
@@ -1246,6 +1252,35 @@ _FINAL_ACTION_ADVICE = (
 )
 
 
+# Which buttons each kind of request lets through: "send him a message" is the go-ahead for Send.
+FINAL_ACTION_KINDS = {
+    "send": r"^\s*(send( message| now| invitation| invite| reply| email)?|reply)\s*$",
+    "post": r"^\s*(post|publish)\s*$",
+    "submit": r"^\s*(submit( application| form)?|apply now)\s*$",
+    "buy": r"^\s*(place( your)? order|pay( now)?|buy now|purchase|complete (order|purchase)|confirm( order| purchase| payment)|submit order)\s*$",
+    "book": r"^\s*(book now|confirm( booking)?)\s*$",
+    "confirm": r"^\s*confirm\s*$",
+}
+
+
+def authorize_final_actions(state_path: str, session_id: str, kinds: Any, agent: dict[str, Any] | None = None) -> None:
+    """Records the final steps this turn's request already asked for (it replaces the last turn's), for the
+    main agent or, with agent, a subagent working on the same request."""
+    try:
+        session = _session(state_path)
+    except BrowserError:
+        return
+    _agent_for(session, session_id, agent).authorized = frozenset(k for k in (kinds or []) if k in FINAL_ACTION_KINDS)
+
+
+def _authorized_for(name: str) -> str:
+    who = _ACTIVE.get("agent")
+    for kind in sorted(getattr(who, "authorized", ()) or ()):
+        if re.match(FINAL_ACTION_KINDS[kind], name or "", re.I):
+            return kind
+    return ""
+
+
 def _guard_final_action(locator: Any, args: dict[str, Any], mode: str) -> None:
     if args.get("confirm") in (True, "true", "yes", 1):
         return
@@ -1253,6 +1288,8 @@ def _guard_final_action(locator: Any, args: dict[str, Any], mode: str) -> None:
         name = locator.evaluate(_FINAL_ACTION_JS, {"rx": _FINAL_ACTION_RX, "mode": mode}, timeout=1500)
     except Exception:
         return
+    if name and _authorized_for(name):
+        return  # the user's request already asked for exactly this
     if name:
         what = f'the "{name}" button' if mode == "click" else f'Enter here (it triggers the "{name}" button of this form)'
         raise BrowserError(f"Held back: this would press {what}. " + _FINAL_ACTION_ADVICE)
@@ -1662,6 +1699,100 @@ def _goto(session: _Session, page: Any, target: str, timeout_ms: int) -> int | N
     raise RuntimeError(f"Timeout {timeout_ms}ms exceeded.")
 
 
+def _local_server_hint(netloc: str) -> str:
+    return (f" Nothing answers on {netloc}: the dev server is not running or has stopped. If you started it with "
+            "run_command (background: true), check command_status for its error and restart it with restart_command "
+            "{command_id}; otherwise start it (run_command with background: true, e.g. npm run dev), wait until it "
+            "prints its URL, then open that URL.")
+
+
+_STALE_PAGE_NOTE = ("If the page still shows the old code after this, the dev server did not pick up the change: "
+                    "restart it with restart_command {command_id} (it frees the port and starts it again), wait for "
+                    "its URL, then reload.")
+
+
+def _do_reload(session: _Session, page: Any, args: dict[str, Any]) -> dict[str, Any]:
+    hard = _flag(args.get("hard"), "hard") if args.get("hard") not in (None, "") else False
+    timeout_ms = _timeout_ms(args, NAV_TIMEOUT_MS)
+    before = page.url
+    cleared = False
+    cdp = None
+    if hard:
+        # Chrome's cache and the page's service worker are what keep serving old code: clear both,
+        # and load with the cache off, so the page comes from the server this time.
+        try:
+            cdp = page.context.new_cdp_session(page)
+            cdp.send("Network.enable")
+            cdp.send("Network.clearBrowserCache")
+            try:
+                cdp.send("ServiceWorker.enable")
+                cdp.send("ServiceWorker.stopAllWorkers")
+            except Exception:
+                pass
+            cdp.send("Network.setCacheDisabled", {"cacheDisabled": True})
+            cleared = True
+        except Exception:
+            cleared = False
+    try:
+        page.reload(wait_until="domcontentloaded", timeout=timeout_ms)
+    except Exception as exc:
+        message = _first_line(exc)
+        if "net::" in message or "Timeout" in message:
+            parsed = urlparse(before)
+            hint = _local_server_hint(parsed.netloc) if _is_local_host(parsed.hostname or "") and "Timeout" not in message else ""
+            raise BrowserError(f"Could not reload {before}: {message}{hint}") from exc
+        raise
+    finally:
+        if cdp is not None:
+            try:
+                if cleared:
+                    cdp.send("Network.setCacheDisabled", {"cacheDisabled": False})
+            except Exception:
+                pass
+            try:
+                cdp.detach()
+            except Exception:
+                pass
+    session.touch()
+    out: dict[str, Any] = {"url": page.url, "title": _title(page)}
+    parsed = urlparse(page.url)
+    if hard:
+        out["hard"] = True
+        out["note"] = ("The cache was cleared and the page loaded again from the server. " if cleared else
+                       "The page was reloaded (the cache could not be cleared in this browser). ") + _STALE_PAGE_NOTE
+    elif _is_local_host(parsed.hostname or ""):
+        out["note"] = "If your change does not show, reload {hard: true} (clears the cache) before anything else; " + _STALE_PAGE_NOTE
+    _flag_error_page(out, page)
+    return out
+
+
+_ERROR_PAGE_JS = r"""
+() => {
+  const text = (document.body && document.body.innerText || "").slice(0, 4000);
+  const title = document.title || "";
+  const pats = [/This site can[’']t be reached/i, /ERR_CONNECTION_REFUSED/i, /Cannot GET \//i, /502 Bad Gateway/i, /503 Service Unavailable/i,
+    /ECONNREFUSED/i, /Failed to compile/i, /Internal Server Error/i, /Module not found/i, /Compiled with problems/i, /Application error/i];
+  const hit = pats.find((p) => p.test(text) || p.test(title));
+  if (!hit) return null;
+  return { text: text.replace(/\s+/g, " ").trim().slice(0, 300), blank: false };
+}
+"""
+
+
+def _flag_error_page(out: dict[str, Any], page: Any) -> None:
+    try:
+        found = page.evaluate(_ERROR_PAGE_JS)
+    except Exception:
+        found = None
+    if not found:
+        return
+    parsed = urlparse(page.url)
+    out["error_page"] = found.get("text") or ""
+    out["warning"] = ("The page shows an error rather than the app: " + (found.get("text") or "")[:200] +
+                      (" This is a local app: read command_status of its dev server (build errors show there), fix them, and if "
+                       "the server itself is down or stuck, restart_command {command_id}." if _is_local_host(parsed.hostname or "") else ""))
+
+
 def _do_navigate(session: _Session, page: Any, url: str, timeout_ms: int = NAV_TIMEOUT_MS) -> dict[str, Any]:
     target = normalize_url(url)
     status = None
@@ -1676,9 +1807,9 @@ def _do_navigate(session: _Session, page: Any, url: str, timeout_ms: int = NAV_T
             hint = ""
             if "Timeout" in message and _stop_loading(page):
                 hint = " Loading was stopped, so the tab still shows the page it showed before."
-            if "ERR_CONNECTION_REFUSED" in message and _is_local_host(parsed.hostname or ""):
-                hint = (f" Nothing is listening on {parsed.netloc}: start the dev server first (run_command with "
-                        "background: true, e.g. npm run dev), wait until it prints its URL, then open that URL.")
+            if _is_local_host(parsed.hostname or "") and ("ERR_CONNECTION_REFUSED" in message or "ERR_EMPTY_RESPONSE" in message
+                                                          or "ERR_CONNECTION_RESET" in message):
+                hint = _local_server_hint(parsed.netloc)
             raise BrowserError(f"Could not open {target}: {message}{hint}") from exc
         raise
     still_loading = not _wait_load(page, "domcontentloaded", min(timeout_ms, NAV_DOM_WAIT_MS))
@@ -1699,6 +1830,8 @@ def _do_navigate(session: _Session, page: Any, url: str, timeout_ms: int = NAV_T
                               "Do not retry in a loop; check the snapshot, and if it is blocked tell the user (attaching their own Chrome in Settings usually helps).")
         elif status >= 400:
             out["warning"] = f"The page answered HTTP {status}."
+    if _is_local_host(urlparse(page.url).hostname or ""):
+        _flag_error_page(out, page)
     return out
 
 
@@ -1882,9 +2015,7 @@ def _do_action(session: _Session, action: str, args: dict[str, Any], reference: 
         session.touch()
         return {"url": page.url, "title": _title(page)}
     if action == "reload":
-        page.reload(wait_until="domcontentloaded")
-        session.touch()
-        return {"url": page.url, "title": _title(page)}
+        return _do_reload(session, page, args)
     if action == "snapshot":
         text, count = _take_snapshot(session, page, query=str(args.get("query") or ""), selector=str(args.get("selector") or ""),
                                      max_chars=int(args.get("max_chars") or 0))
@@ -2973,6 +3104,7 @@ _ELEMENTS_JS = "(root, o) => {" + _DOM_HELPERS_JS + r"""
     }
     if (opaque(f.bg)) st.bg = f.bg;
     if (f.border) { st.border = f.border; st.border_width = round(parseFloat(s.borderTopWidth) || parseFloat(s.borderLeftWidth) || 0); }
+    if (opaque(f.bg) || f.outline || f.shadow || f.control) st.padding = ["Top", "Right", "Bottom", "Left"].map((k) => round(parseFloat(s["padding" + k]) || 0));
     st.radius = round(Math.max(...["TopLeft", "TopRight", "BottomRight", "BottomLeft"].map((k) => parseFloat(s["border" + k + "Radius"]) || 0)));
     return st;
   };
@@ -3030,6 +3162,355 @@ _ELEMENTS_JS = "(root, o) => {" + _DOM_HELPERS_JS + r"""
 }"""
 
 ELEMENTS_MAX = 120
+
+_LOCATE_CANDIDATES_JS = "(o) => {" + _DOM_HELPERS_JS + r"""
+  // Elements shaped like the screenshot (about its aspect ratio, at a size one of its likely scales
+  // gives): the places the part of the design it shows could be.
+  const out = [], vw = document.documentElement.clientWidth, ph = document.documentElement.scrollHeight;
+  const walk = (el, depth, parent) => {
+    if (out.length >= o.max) return;
+    const tag = el.tagName.toLowerCase();
+    if (SKIP.has(tag)) return;
+    const s = getComputedStyle(el);
+    if (s.display === "none") return;
+    let me = parent;
+    if (s.visibility !== "hidden" && Number(s.opacity) > 0.05) {
+      const r = el.getBoundingClientRect(), w = r.width, h = r.height;
+      if (w >= 16 && h >= 10 && !(w >= vw * 0.97 && h >= ph * 0.8)) {
+        const fits = Math.abs(Math.log((w / h) / o.aspect)) <= o.aspectTol && o.widths.some((x) => w >= x * 0.5 && w <= x * 2);
+        if (fits) {
+          out.push({ i: out.length, parent: parent, depth: depth, selector: cssPath(el), name: describe(el),
+                     key: tag + "." + Array.from(el.classList).slice(0, 2).join("."),
+                     box: { x: r.left + scrollX, y: r.top + scrollY, width: w, height: h } });
+          me = out.length - 1;
+        }
+      }
+    }
+    if (tag === "svg") return;
+    for (const child of el.children) walk(child, depth + 1, me);
+  };
+  if (document.body) walk(document.body, 0, -1);
+  return out;
+}"""
+
+_SECTIONS_JS = "(selectors) => {" + _DOM_HELPERS_JS + r"""
+  // The section each element belongs to: the nearest enclosing component (a card, a form, a panel, a
+  // list item, a micro-frontend's root) that is well short of the whole page.
+  const vw = document.documentElement.clientWidth, ph = document.documentElement.scrollHeight, page = vw * ph;
+  const TAGS = new Set(["section", "article", "form", "fieldset", "li", "nav", "header", "footer", "aside", "dialog", "table", "main"]);
+  const NAMES = /(card|panel|tile|widget|modal|dialog|form|section|item|row|block|container|module|mfe|micro|remote|single-spa|app-|-app|shell|region|pane|box|group)/i;
+  const component = (el, s) => {
+    const tag = el.tagName.toLowerCase();
+    const name = (el.id || "") + " " + (typeof el.className === "string" ? el.className : "");
+    const bg = s.backgroundColor && !/rgba\(0, 0, 0, 0\)|transparent/.test(s.backgroundColor);
+    const edge = parseFloat(s.borderTopWidth) > 0 || (s.boxShadow && s.boxShadow !== "none") || parseFloat(s.borderTopLeftRadius) > 0;
+    return TAGS.has(tag) || tag.includes("-") || NAMES.test(name) || bg || edge;
+  };
+  return selectors.map((sel) => {
+    let el = null;
+    try { el = document.querySelector(sel); } catch (e) {}
+    if (!el) return null;
+    // A component that differs itself (a card whose corners changed) is its own section.
+    let pick = null, top = null;
+    const own = el.getBoundingClientRect();
+    if (el.children.length && own.width * own.height >= 5000 && own.width * own.height < 0.45 * page && component(el, getComputedStyle(el))) pick = el;
+    for (let node = el.parentElement; !pick && node && node !== document.body && node !== document.documentElement; node = node.parentElement) {
+      const r = node.getBoundingClientRect();
+      if (r.width * r.height >= 0.45 * page || (r.width >= vw * 0.98 && r.height >= ph * 0.6)) break;
+      top = node;
+      if (component(node, getComputedStyle(node)) && r.width * r.height >= 1600) pick = node;
+    }
+    const sec = pick || top;
+    if (!sec) return null;
+    const r = sec.getBoundingClientRect();
+    const key = sec.tagName.toLowerCase() + "." + Array.from(sec.classList).slice(0, 2).join(".");
+    return { selector: cssPath(sec), name: describe(sec), key: key, parent: sec.parentElement ? cssPath(sec.parentElement) : "",
+             box: { x: Math.round(r.left + scrollX), y: Math.round(r.top + scrollY), width: Math.round(r.width), height: Math.round(r.height) } };
+  });
+}"""
+
+SECTIONS_MIN_DIFFERENCES = 3
+SECTIONS_LISTED = 6
+
+
+def _sections_of(page: Any, elements: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Groups what differs by the section it is in, most differences first."""
+    selectors = [str(e.get("selector") or "") for e in elements]
+    try:
+        found = page.evaluate(_SECTIONS_JS, selectors) or []
+    except Exception:
+        return []
+    # Copies of one component side by side (the cards of a grid, the rows of a list) are one section:
+    # its code is written once, so it is fixed once.
+    instances: dict[tuple[str, str], set[str]] = {}
+    for sec in found:
+        if sec:
+            instances.setdefault((sec.get("parent") or "", sec.get("key") or ""), set()).add(sec["selector"])
+    groups: dict[str, dict[str, Any]] = {}
+    for item, sec in zip(elements, found):
+        if not sec:
+            continue
+        same = instances.get((sec.get("parent") or "", sec.get("key") or ""), set())
+        gid = f"{sec.get('parent')}|{sec.get('key')}" if len(same) > 1 else sec["selector"]
+        group = groups.setdefault(gid, {"element": sec["name"], "selector": sec["selector"], "box": sec["box"], "differ": 0, "items": []})
+        if len(same) > 1:
+            group["instances"] = len(same)
+            group["element"] = f"{sec.get('key') or sec['name']} \u00d7{len(same)} (one component, repeated)"
+            if sec["box"]["y"] < group["box"]["y"] or (sec["box"]["y"] == group["box"]["y"] and sec["box"]["x"] < group["box"]["x"]):
+                group["selector"], group["box"] = sec["selector"], sec["box"]
+        group["differ"] += 1
+        group["items"].append(item.get("n"))
+    return sorted(groups.values(), key=lambda g: (-g["differ"], g["box"]["y"], g["box"]["x"]))[:SECTIONS_LISTED]
+
+
+LOCATE_MAX_CANDIDATES = 700
+LOCATE_PADDING = 72  # past the widest scan for an element's edges (64 px)
+
+_BACKDROP_OF_JS = r"""
+(el) => {
+  for (let node = el.parentElement; node; node = node.parentElement) {
+    const c = getComputedStyle(node).backgroundColor;
+    if (c && !/rgba\(0, 0, 0, 0\)|transparent/.test(c)) return c;
+  }
+  return "#ffffff";
+}
+"""
+
+
+def _pad_image(data: bytes, mime: str, pad: float, fill: str, *, detect: bool) -> bytes | None:
+    with _compare_page() as tools:
+        try:
+            done = _in_background(tools, "evaluate", "o => window.padImage(o)",
+                                  {"src": _data_url(data, mime), "pad": pad, "fallback": fill, "detect": detect})
+        except Exception:
+            return None
+    return base64.b64decode(str(done.get("data") or "").split(",", 1)[-1]) or None
+
+
+def _frame_located(page: Any, reference: _Reference, selector: str, pad: int) -> tuple[_Reference, str]:
+    """A screenshot of one element ends at its edges, so they cannot be measured: it is framed in what
+    was around it (the colour its rounded corners show, else the page's colour behind the element),
+    as wide at its scale as the page's capture of the element will be framed. Returns the framed
+    screenshot and the colour to frame the page's capture in ("" when it could not be framed)."""
+    try:
+        locator = page.locator(selector).first
+        width = float(locator.bounding_box()["width"])
+        fill = str(locator.evaluate(_BACKDROP_OF_JS) or "#ffffff")
+    except Exception:
+        return reference, ""
+    image_w, _image_h = _image_size(reference.data)
+    if not width or not image_w:
+        return reference, ""
+    data = _pad_image(reference.data, reference.mime, pad * image_w / width, fill, detect=True)
+    if not data:
+        return reference, ""
+    framed = _Reference(data, "image/png", reference.label, scale=reference.scale)
+    framed.note = reference.note
+    return framed, fill
+LOCATE_MIN_SCORE = 0.5
+LOCATE_MIN_SCORE_ASKED = 0.3
+
+
+def _reference_key(reference: _Reference) -> str:
+    import hashlib
+
+    digest = hashlib.sha1(reference.data[:65536] + str(len(reference.data)).encode()).hexdigest()[:16]
+    return f"{reference.label}|{digest}"
+
+
+def _wants_locate(args: dict[str, Any], reference: _Reference, layout_width: int) -> bool:
+    """A screenshot of one part of a page (a card, an input box, a form) is looked for on the page,
+    unless the call already says where (a target, a region) or the design is a whole page."""
+    asked = args.get("locate")
+    if asked in (False, 0, "0", "false", "no", "off"):
+        return False
+    if _has_element_target(args) or args.get("width") is not None or args.get("reference_region") not in (None, "", {}, []):
+        return False
+    if reference.figma or reference.layer or not reference.data:
+        return False
+    image_w, image_h = _image_size(reference.data)
+    if not image_w or not image_h:
+        return False
+    if asked not in (None, ""):
+        return True
+    # A design as wide as the page (at 1x, 2x or 3x) is the whole page, not a part of it.
+    if _whole_width_scale(image_w, layout_width):
+        return False
+    scale = float(reference.scale or 0)
+    return image_w / (scale or 1) < 0.9 * layout_width or (not scale and image_w / 2 < 0.9 * layout_width)
+
+
+def _locate_pass(page: Any, reference: _Reference, image_w: int, image_h: int, scales: list[float]) -> list[tuple[float, dict[str, Any]]]:
+    """Every element shaped like the screenshot, scored against it, best first."""
+    options = {"aspect": image_w / image_h, "aspectTol": 0.45, "widths": [image_w / k for k in scales], "max": LOCATE_MAX_CANDIDATES}
+    candidates = page.evaluate(_LOCATE_CANDIDATES_JS, options) or []
+    if not candidates:
+        return []
+    shot = page.screenshot(full_page=True, type="png", timeout=30_000, scale="css")
+    with _compare_page() as tools:
+        try:
+            found = _in_background(tools, "evaluate", "o => window.locateReference(o)", {
+                "ref": _data_url(reference.data, reference.mime), "page": _data_url(shot, "image/png"),
+                "candidates": [{"box": c["box"]} for c in candidates],
+            })
+        except Exception as exc:
+            raise _compare_error(exc) from exc
+    ranked = []
+    for cand, sc in zip(candidates, found.get("scores") or []):
+        box = cand["box"]
+        aspect_off = abs(math.log((box["width"] / box["height"]) / (image_w / image_h)))
+        score = 0.45 * sc["gray"] + 0.35 * sc["edges"] + 0.2 * sc["color"] - 0.5 * aspect_off - 0.2 * _width_off(box["width"], image_w, scales)
+        ranked.append((round(score, 3), cand))
+    # Best first; of an element and a wrapper the same size, the outer one.
+    ranked.sort(key=lambda item: (-item[0], item[1]["depth"]))
+    return ranked
+
+
+def _width_off(width: float, image_w: int, scales: list[float]) -> float:
+    """How far an element's width is from the screenshot's at the nearest of its likely scales (log ratio)."""
+    return min(abs(math.log(max(1.0, width) * k / image_w)) for k in scales)
+
+
+def _fit_viewport(session: _Session, page: Any, reference: _Reference, ranked: list[tuple[float, dict[str, Any]]],
+                  image_w: int, image_h: int, scales: list[float]) -> tuple[list[tuple[float, dict[str, Any]]], int] | None:
+    """A screenshot of a card or a form from a design made at another page width: in a fluid layout the
+    element is wider or narrower here. Measures how its width follows the viewport's, tries the widths at
+    which it is as wide as in the screenshot, and returns the best of those passes and its width."""
+    start = dict(page.viewport_size or session.viewport)
+    v0, height = int(start["width"]), int(start["height"])
+
+    def _set(width: int) -> None:
+        page.set_viewport_size({"width": int(width), "height": height})
+        _pause(page, 250)
+
+    def _width_of(selector: str) -> float:
+        try:
+            box = page.locator(selector).first.bounding_box()
+            return float(box["width"]) if box else 0.0
+        except Exception:
+            return 0.0
+
+    seeds = [c for score, c in ranked[:8] if score >= 0.15][:3] or [c for _s, c in ranked[:2]]
+    widths: dict[int, float] = {}
+    probe = v0 + 160 if v0 + 160 <= MAX_VIEWPORT[0] else v0 - 160
+    try:
+        _set(probe)
+        after = {c["selector"]: _width_of(c["selector"]) for c in seeds}
+    finally:
+        _set(v0)
+    for cand in seeds:
+        w0, w1 = float(cand["box"]["width"]), after.get(cand["selector"]) or 0.0
+        slope = (w1 - w0) / (probe - v0)
+        if abs(slope) < 0.05 or not w1:
+            continue  # a fixed width: the viewport does not change it
+        for k in scales:
+            target = v0 + (image_w / k - w0) / slope
+            # Designs are made at round widths (1100, 1440): a width a few px off one is that one.
+            near_round = round(target / 10) * 10
+            target = near_round if abs(target - near_round) <= 3 else target
+            if MIN_VIEWPORT[0] <= target <= MAX_VIEWPORT[0] and abs(target - v0) >= 8:
+                widths.setdefault(int(round(target)), k)
+    best: tuple[float, list[tuple[float, dict[str, Any]]], int] | None = None
+    try:
+        for width in sorted(widths, key=lambda w: abs(w - v0))[:4]:
+            _set(width)
+            passed = _locate_pass(page, reference, image_w, image_h, scales)
+            if passed and (best is None or passed[0][0] > best[0]):
+                best = (passed[0][0], passed, width)
+    finally:
+        if best is None:
+            _set(v0)
+    if best is None:
+        return None
+    _set(best[2])
+    return best[1], best[2]
+
+
+def _locate_reference(session: _Session, page: Any, reference: _Reference, args: dict[str, Any],
+                      layout_width: int) -> dict[str, Any] | None:
+    agent = _agent()
+    key = _reference_key(reference)
+    image_w, image_h = _image_size(reference.data)
+    try:
+        forced = float(args.get("reference_scale") or 0)
+    except (TypeError, ValueError):
+        forced = 0.0
+    scales = [forced] if 0 < forced <= 8 else ([float(reference.scale)] if reference.scale else [1.0, 2.0, 3.0])
+    remembered = agent.located.get(key)
+    if remembered:
+        try:
+            if page.locator(remembered).count() == 1 and page.locator(remembered).first.is_visible():
+                return {"selector": remembered, "remembered": True, **_located_scale(page, remembered, image_w, scales)}
+        except Exception:
+            pass
+    asked = args.get("locate") not in (None, "")
+    least = LOCATE_MIN_SCORE_ASKED if asked else LOCATE_MIN_SCORE
+    ranked = _locate_pass(page, reference, image_w, image_h, scales)
+    resized: dict[str, Any] = {}
+    weak = not ranked or ranked[0][0] < least or _width_off(ranked[0][1]["box"]["width"], image_w, scales) > 0.06
+    if weak and ranked and args.get("resize") not in (False, 0, "0", "false", "no"):
+        v0 = int((page.viewport_size or session.viewport)["width"])
+        fitted = _fit_viewport(session, page, reference, ranked, image_w, image_h, scales)
+
+        def _worth(rk: list[tuple[float, dict[str, Any]]]) -> float:
+            # A match the wrong width for the screenshot at any likely scale is no match of its size.
+            return rk[0][0] - 0.6 * max(0.0, _width_off(rk[0][1]["box"]["width"], image_w, scales) - 0.03)
+
+        if fitted and fitted[0] and fitted[0][0][0] >= least and _worth(fitted[0]) > _worth(ranked) + 0.01:
+            ranked, width = fitted
+            # Kept, the way resize keeps it: every tab at the design's width, until changed.
+            _do_resize(session, {"width": width, "height": (page.viewport_size or session.viewport)["height"]})
+            resized = {"from": v0, "to": width}
+            layout_width = width
+        elif fitted:
+            page.set_viewport_size({"width": v0, "height": int((page.viewport_size or session.viewport)["height"])})
+    if not ranked:
+        return {"failed": "nothing on the page has the screenshot's shape"}
+    best_score, best = ranked[0]
+    if best_score < least:
+        return {"failed": f"no part of the page looks enough like it (best: {best['name']}, score {best_score})"}
+    if not asked and best["box"]["width"] >= 0.97 * layout_width:
+        return None
+
+    def _inside(a: dict[str, Any], b: dict[str, Any]) -> bool:
+        return (a["x"] >= b["x"] - 1 and a["y"] >= b["y"] - 1 and a["x"] + a["width"] <= b["x"] + b["width"] + 1
+                and a["y"] + a["height"] <= b["y"] + b["height"] + 1)
+
+    bb = best["box"]
+    similar = [c for s_, c in ranked[1:] if s_ >= best_score - 0.08 and c["key"] == best["key"]
+               and abs(c["box"]["width"] - bb["width"]) <= 0.1 * bb["width"] and abs(c["box"]["height"] - bb["height"]) <= 0.35 * bb["height"]
+               and not _inside(c["box"], bb) and not _inside(bb, c["box"])]
+    agent.located[key] = best["selector"]
+    while len(agent.located) > 40:
+        agent.located.pop(next(iter(agent.located)))
+    out: dict[str, Any] = {"selector": best["selector"], "element": best["name"], "score": best_score,
+                           "box": {k: round(float(v), 1) for k, v in bb.items()},
+                           **_located_scale(page, best["selector"], image_w, scales, width=bb["width"])}
+    if resized:
+        out["resized"] = resized
+    if similar:
+        out["similar"] = 1 + len(similar)
+        out["similar_selectors"] = [c["selector"] for c in similar[:5]]
+    runner = [c for s_, c in ranked[1:6] if c["selector"] != best["selector"] and c not in similar and not _inside(c["box"], bb) and not _inside(bb, c["box"])]
+    if runner:
+        out["next_best"] = {"element": runner[0]["name"], "selector": runner[0]["selector"]}
+    return out
+
+
+def _located_scale(page: Any, selector: str, image_w: int, scales: list[float], width: float = 0.0) -> dict[str, Any]:
+    """The screenshot's scale, when its width is a whole multiple of the element's (a 2x retina crop)."""
+    if not width:
+        try:
+            width = float(page.locator(selector).first.bounding_box()["width"])
+        except Exception:
+            return {}
+    if not width:
+        return {}
+    ratio = image_w / width
+    near = min((1.0, 2.0, 3.0), key=lambda k: abs(ratio - k))
+    if len(scales) == 1:
+        return {"scale": scales[0]}
+    return {"scale": near} if abs(ratio - near) <= 0.2 * near else {}
 
 INSPECT_MAX_LINES = 220
 INSPECT_MAX_CHARS = 14_000
@@ -3835,83 +4316,94 @@ def _figma_action(state_path: str, args: dict[str, Any], session_id: str = "", a
 
 
 _COMPARE_PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><style>
-html, body { margin: 0; background: #111113; }
-#board { display: inline-block; padding: 24px 26px 26px; background: #111113; color: #e4e4e4;
+/* Light board: white cards on a pale grey page, dark text, soft borders and shadows. */
+html, body { margin: 0; background: #f3f4f6; }
+#board { display: inline-block; padding: 24px 26px 26px; background: #f3f4f6; color: #1f2937;
   font: 13px/18px -apple-system, "Segoe UI", system-ui, Ubuntu, sans-serif; }
 .hdr { display: flex; align-items: flex-start; justify-content: space-between; gap: 28px; margin-bottom: 16px; padding: 18px 20px;
-  background: #18181c; border: 1px solid #2a2a30; border-radius: 14px; }
+  background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06); }
 .hdr .main { min-width: 0; flex: 1 1 auto; }
-.verdict { display: inline-flex; align-items: center; gap: 7px; padding: 3px 11px 3px 9px; border-radius: 999px; font-size: 11px; line-height: 16px;
-  font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; background: rgba(239, 68, 68, 0.14); color: #f87171; }
-.verdict::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-.verdict.nearly { background: rgba(86, 156, 214, 0.16); color: #7cb8ee; } .verdict.identical { background: rgba(34, 197, 94, 0.14); color: #4ade80; }
-.title { margin: 10px 0 4px; color: #fff; font-size: 22px; line-height: 28px; font-weight: 650; letter-spacing: -0.015em; }
-.route { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; color: #8e8e98; font-size: 12.5px; line-height: 18px; }
-.route b { color: #d4d4da; font-weight: 500; } .route .arrow { color: #5c5c66; }
-.note { margin-top: 12px; padding: 7px 11px; border-left: 3px solid #ff9f1a; border-radius: 0 8px 8px 0; background: rgba(255, 159, 26, 0.08);
-  color: #e8d3b0; font-size: 12.5px; line-height: 18px; max-width: 720px; }
+.verdict { display: inline-flex; align-items: center; gap: 8px; padding: 4px 13px 4px 11px; border-radius: 999px; font-size: 12.5px; line-height: 18px;
+  font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; background: #fee2e2; color: #e11d48; }
+.verdict::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: currentColor; }
+.verdict.nearly { background: #dbeafe; color: #2563eb; } .verdict.identical { background: #dcfce7; color: #16a34a; }
+.title { margin: 12px 0 6px; color: #0f172a; font-size: 28px; line-height: 34px; font-weight: 700; letter-spacing: -0.015em; }
+.route { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; color: #6b7280; font-size: 14.5px; line-height: 20px; }
+.route b { color: #374151; font-weight: 500; } .route .arrow { color: #9ca3af; }
+.note { margin-top: 12px; padding: 7px 11px; border-left: 3px solid #f59e0b; border-radius: 0 8px 8px 0; background: #fffbeb;
+  color: #92400e; font-size: 12.5px; line-height: 18px; max-width: 720px; }
 .counts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
-.count { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px 3px 8px; border: 1px solid #2a2a30; border-radius: 999px;
-  background: #111113; color: #c9c9d1; font-size: 12px; line-height: 16px; }
-.count b { color: #fff; font-weight: 650; font-variant-numeric: tabular-nums; }
-.count .swatch { margin: 0; }
-.swatch.ok { background: #22c55e; } .swatch.nearly { background: #569cd6; }
+.count { display: inline-flex; align-items: center; gap: 7px; padding: 5px 13px 5px 11px; border: 1px solid #e5e7eb; border-radius: 999px;
+  background: #fff; color: #1f2937; font-size: 14px; line-height: 18px; }
+.count b { color: #0f172a; font-weight: 700; font-variant-numeric: tabular-nums; }
+.count .swatch { width: 11px; height: 11px; margin: 0; border-radius: 50%; }
+.count.k-color b, .count.k-size b { color: #d97706; } .count.k-content b, .count.k-edges b { color: #db2777; }
+.count.k-missing b, .count.s-different b { color: #dc2626; } .count.k-extra b, .count.s-missing b { color: #9333ea; }
+.count.k-moved b { color: #0284c7; } .count.s-lacking b { color: #d97706; } .count.ok b { color: #16a34a; } .count.nearly b { color: #2563eb; }
+.swatch.ok { background: #22c55e; } .swatch.nearly { background: #3b82f6; }
 .stats { display: flex; gap: 10px; flex: 0 0 auto; }
-.stat { min-width: 124px; padding: 11px 14px 12px; background: #111113; border: 1px solid #2a2a30; border-radius: 11px; }
-.stat .l { color: #8e8e98; font-size: 10.5px; line-height: 14px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; }
-.stat .v { margin-top: 3px; color: #fff; font-size: 24px; line-height: 28px; font-weight: 650; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
-.stat .v small { margin-left: 2px; color: #8e8e98; font-size: 13px; font-weight: 500; letter-spacing: 0; }
-.stat .n { margin-top: 2px; color: #8e8e98; font-size: 11px; line-height: 14px; }
-.meter { position: relative; height: 5px; margin-top: 8px; border-radius: 3px; background: #2a2a30; }
+.stat { min-width: 150px; padding: 13px 16px 14px; background: #fff; border: 1px solid #e5e7eb; border-radius: 11px; }
+.stat .l { color: #4b5563; font-size: 12px; line-height: 16px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; }
+.stat .v { margin-top: 4px; color: #0f172a; font-size: 30px; line-height: 36px; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.stat .v small { margin-left: 2px; color: #374151; font-size: 16px; font-weight: 500; letter-spacing: 0; }
+.stat .n { margin-top: 4px; color: #6b7280; font-size: 12.5px; line-height: 16px; }
+.meter { position: relative; height: 7px; margin-top: 10px; border-radius: 3px; background: #e5e7eb; }
 .meter span { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: #ef4444; }
-.meter.nearly span { background: #569cd6; } .meter.identical span { background: #22c55e; }
-.meter em { position: absolute; top: -3px; width: 2px; height: 11px; margin-left: -1px; border-radius: 1px; background: #e4e4e4; }
-.fix { margin: 14px 0 0; padding: 12px 0 0; border-top: 1px solid #2a2a30; list-style: none; }
-.fix h5 { margin: 0 0 6px; color: #8e8e98; font-size: 10.5px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; }
-.fix li { display: flex; align-items: baseline; gap: 8px; color: #b9b9c2; font-size: 12.5px; line-height: 20px; }
-.fix li b { flex: 0 0 auto; color: #fff; font-weight: 600; }
+.meter.nearly span { background: #3b82f6; } .meter.identical span { background: #22c55e; }
+.meter em { position: absolute; top: -3px; width: 2px; height: 11px; margin-left: -1px; border-radius: 1px; background: #374151; }
+.fix { margin: 14px 0 0; padding: 12px 0 0; border-top: 1px solid #e5e7eb; list-style: none; }
+.fix h5 { margin: 0 0 6px; color: #4b5563; font-size: 10.5px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; }
+.fix li { display: flex; align-items: baseline; gap: 8px; color: #374151; font-size: 12.5px; line-height: 21px; }
+.fix li b { flex: 0 0 auto; color: #0f172a; font-weight: 700; }
 .fix li i { flex: 0 0 auto; min-width: 10px; padding: 0 4px; border-radius: 3px; background: #ef4444; color: #fff; text-align: center;
-  font: 600 10px/15px -apple-system, "Segoe UI", system-ui, sans-serif; font-style: normal; }
-.fix li i.s-missing { background: #a855f7; } .fix li i.s-lacking { background: #ff9f1a; color: #111; }
+  font: 700 10px/15px -apple-system, "Segoe UI", system-ui, sans-serif; font-style: normal; }
+.fix li i.s-missing { background: #a855f7; } .fix li i.s-lacking { background: #f59e0b; color: #111; }
 .cols { display: flex; align-items: flex-start; gap: 16px; }
-figure { display: flex; flex-direction: column; gap: 12px; margin: 0; padding: 14px; background: #1b1b1f; border: 1px solid #2a2a30;
-  border-radius: 14px; box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset; }
-figcaption { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; min-height: 22px; color: #8e8e98; font-size: 12px; word-break: break-word; }
-.tag { padding: 2px 9px; border-radius: 999px; font-size: 11px; line-height: 16px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;
-  background: rgba(255, 255, 255, 0.08); color: #dcdce2; }
-.tag.design { background: rgba(86, 156, 214, 0.18); color: #86bdf0; }
-.tag.diff { background: rgba(255, 45, 140, 0.16); color: #ff77b4; }
-.chip { display: inline-flex; align-items: center; color: #a6a6b0; }
+figure { display: flex; flex-direction: column; gap: 12px; margin: 0; padding: 14px; background: #fff; border: 1px solid #e5e7eb;
+  border-radius: 14px; box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06); }
+figcaption { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; min-height: 24px; color: #6b7280; font-size: 14px; word-break: break-word; }
+.tag { padding: 3px 11px; border-radius: 999px; font-size: 12.5px; line-height: 18px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+  background: #f3f4f6; color: #374151; }
+.tag.design { background: #dbeafe; color: #1d4ed8; }
+.tag.diff { background: #ffe4e6; color: #e11d48; }
+.chip { display: inline-flex; align-items: center; color: #4b5563; }
 .frame { align-self: start; }
 .frame { position: relative; }
-canvas { display: block; border: 1px solid #2c2c31; border-radius: 8px; background: #fff; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4); }
+canvas { display: block; border: 1px solid #e5e7eb; border-radius: 8px; background: #fff; box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08); }
 .box { position: absolute; border: 1.5px solid #ff2d8c; box-sizing: border-box; }
-.box.k-size { border-color: #ff9f1a; } .box.k-missing { border-color: #ef4444; } .box.k-extra { border-color: #a855f7; }
-.box.k-moved { border-color: #38bdf8; } .box.k-color { border-color: #f5b400; } .box.k-edges { border-color: #8a8a93; }
+.box.k-size { border-color: #f59e0b; } .box.k-missing { border-color: #ef4444; } .box.k-extra { border-color: #a855f7; }
+.box.k-moved { border-color: #0ea5e9; } .box.k-color { border-color: #eab308; } .box.k-edges { border-color: #9ca3af; }
 .box.minor { border-style: dashed; opacity: 0.6; }
 .box i { position: absolute; left: -1.5px; top: -16px; min-width: 10px; padding: 0 3px; height: 15px; border-radius: 3px 3px 3px 0;
-  background: #ff2d8c; color: #fff; font: 600 10px/15px -apple-system, "Segoe UI", system-ui, sans-serif; font-style: normal; text-align: center; }
-.box.k-size i { background: #ff9f1a; } .box.k-missing i { background: #ef4444; } .box.k-extra i { background: #a855f7; }
-.box.k-moved i { background: #38bdf8; } .box.k-color i { background: #f5b400; color: #111; } .box.k-edges i { background: #8a8a93; }
+  background: #ff2d8c; color: #fff; font: 700 10px/15px -apple-system, "Segoe UI", system-ui, sans-serif; font-style: normal; text-align: center; }
+.box.k-size i { background: #f59e0b; } .box.k-missing i { background: #ef4444; } .box.k-extra i { background: #a855f7; }
+.box.k-moved i { background: #0ea5e9; } .box.k-color i { background: #eab308; color: #111; } .box.k-edges i { background: #9ca3af; }
 .box.low i { top: auto; bottom: -16px; border-radius: 0 3px 3px 3px; }
+/* The "What differs" view: bold markers over the page, a badge on each one's top-left corner. */
+.markers .box { border-width: 2px; border-radius: 3px; }
+.markers .box i { left: -10px; top: -11px; min-width: 14px; height: 20px; padding: 0 4px; border-radius: 4px;
+  font: 700 13px/20px -apple-system, "Segoe UI", system-ui, sans-serif; box-shadow: 0 1px 3px rgba(15, 23, 42, 0.25); }
+.markers .box.low i { top: -11px; bottom: auto; left: -10px; border-radius: 4px; }
+.markers .box.k-content { border-color: #f43f5e; } .markers .box.k-content i { background: #f43f5e; }
+.markers .box.k-color i { background: #f5b400; color: #111; }
 .swatch { display: inline-block; width: 9px; height: 9px; margin: 0 5px 0 0; border-radius: 3px; background: #ff2d8c; }
-.swatch.k-size { background: #ff9f1a; } .swatch.k-missing { background: #ef4444; } .swatch.k-extra { background: #a855f7; }
-.swatch.k-moved { background: #38bdf8; } .swatch.k-color { background: #f5b400; }
-.swatch.aa { background: #6e6028; }
+.swatch.k-size { background: #f59e0b; } .swatch.k-missing { background: #ef4444; } .swatch.k-extra { background: #a855f7; }
+.swatch.k-moved { background: #0ea5e9; } .swatch.k-color { background: #eab308; }
+.swatch.aa { background: #c7cbe0; }
 .box.s-different { border-color: #ef4444; } .box.s-missing { border-color: #a855f7; border-style: dashed; }
-.box.s-lacking { border-color: #ff9f1a; border-style: dashed; }
-.box.s-different i { background: #ef4444; } .box.s-missing i { background: #a855f7; } .box.s-lacking i { background: #ff9f1a; color: #111; }
-.swatch.s-different { background: #ef4444; } .swatch.s-missing { background: #a855f7; } .swatch.s-lacking { background: #ff9f1a; }
+.box.s-lacking { border-color: #f59e0b; border-style: dashed; }
+.box.s-different i { background: #ef4444; } .box.s-missing i { background: #a855f7; } .box.s-lacking i { background: #f59e0b; color: #111; }
+.swatch.s-different { background: #ef4444; } .swatch.s-missing { background: #a855f7; } .swatch.s-lacking { background: #f59e0b; }
 .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
-.card { padding: 12px; background: #1b1b1f; border: 1px solid #2a2a30; border-radius: 12px; }
-.card h4 { margin: 0 0 6px; color: #fff; font-size: 12px; line-height: 16px; font-weight: 600; word-break: break-word; }
+.card { padding: 14px; background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06); }
+.card h4 { margin: 0 0 6px; color: #0f172a; font-size: 13px; line-height: 17px; font-weight: 700; word-break: break-word; }
 .card h4 i { display: inline-block; min-width: 10px; margin-right: 6px; padding: 0 4px; border-radius: 3px; background: #ef4444;
-  color: #fff; font: 600 10px/15px -apple-system, "Segoe UI", system-ui, sans-serif; font-style: normal; text-align: center; }
+  color: #fff; font: 700 10px/15px -apple-system, "Segoe UI", system-ui, sans-serif; font-style: normal; text-align: center; }
 .card h4 i.s-missing { background: #a855f7; }
-.card ul { margin: 0 0 10px; padding-left: 15px; color: #b9b9c2; font-size: 11px; line-height: 15px; }
-.pair { display: flex; gap: 10px; align-items: flex-start; }
-.pair div { display: flex; flex-direction: column; gap: 4px; color: #8e8e98; font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase; }
-.pair canvas { border-radius: 4px; box-shadow: none; }
+.card ul { margin: 0 0 12px; padding-left: 15px; color: #4b5563; font-size: 11.5px; line-height: 16px; }
+.pair { display: flex; gap: 12px; align-items: flex-start; }
+.pair div { display: flex; flex-direction: column; gap: 5px; color: #6b7280; font-size: 10px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }
+.pair canvas { border-radius: 6px; box-shadow: none; }
 </style></head><body><div id="board"></div><script>
 const load = (src, what) => new Promise((resolve, reject) => {
   const img = new Image();
@@ -4095,7 +4587,7 @@ const boardHeader = (h) => {
   if (h.counts && h.counts.length) {
     const counts = el("div", "counts");
     for (const [cls, value, label] of h.counts) {
-      const c = el("span", "count");
+      const c = el("span", "count " + cls);
       c.append(el("span", "swatch " + cls));
       if (value !== null) c.append(el("b", "", String(value)));
       c.append(label);
@@ -4133,6 +4625,69 @@ const boardHeader = (h) => {
   }
   hdr.append(main, stats);
   return hdr;
+};
+
+// A screenshot of one element ends at its edges, so they cannot be measured. Framed in what was
+// around it (the colour its rounded corners show), or else in the page's colour behind the element,
+// its edges, corners and size can be.
+window.padImage = async function (o) {
+  const img = await load(o.src, "reference");
+  const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height, p = Math.max(1, Math.round(o.pad));
+  const src = make(w, h), sx = ctxOf(src);
+  sx.drawImage(img, 0, 0);
+  const px = (x, y) => Array.from(sx.getImageData(Math.max(0, Math.min(w - 1, x)), Math.max(0, Math.min(h - 1, y)), 1, 1).data).slice(0, 3);
+  const corners = [px(0, 0), px(w - 1, 0), px(0, h - 1), px(w - 1, h - 1)];
+  const inner = px(Math.round(Math.min(12, w / 4)), Math.round(Math.min(12, h / 4)));
+  const close = (a, b, t) => a.every((v, k) => Math.abs(v - b[k]) <= t);
+  const around = o.detect !== false && corners.every((c) => close(c, corners[0], 10)) && !close(corners[0], inner, 8);
+  const color = around ? "rgb(" + corners[0].join(",") + ")" : (o.fallback || "#ffffff");
+  const out = make(w + 2 * p, h + 2 * p), ox = out.getContext("2d");
+  ox.fillStyle = color;
+  ox.fillRect(0, 0, out.width, out.height);
+  ox.drawImage(img, p, p);
+  return { data: out.toDataURL("image/png"), color: color, around: around };
+};
+
+// Where a screenshot of one part of a page (a card, a form, an input box) is on the page: each
+// candidate's crop and the screenshot are drawn as small thumbnails and compared by their light and
+// their edges, which follow the layout (boxes, the avatar, the rows of text) and hardly the words.
+window.locateReference = async function (o) {
+  const ref = await load(o.ref, "reference"), cur = await load(o.page, "page");
+  const rw = ref.naturalWidth || ref.width, rh = ref.naturalHeight || ref.height;
+  const TW = 40, TH = Math.max(8, Math.min(96, Math.round(TW * rh / rw))), N = TW * TH;
+  const thumb = (img, sx, sy, sw, sh) => {
+    const c = make(TW, TH), x = c.getContext("2d", { willReadFrequently: true });
+    x.imageSmoothingEnabled = true; x.imageSmoothingQuality = "high";
+    x.fillStyle = "#ffffff"; x.fillRect(0, 0, TW, TH);
+    x.drawImage(img, sx, sy, sw, sh, 0, 0, TW, TH);
+    const d = x.getImageData(0, 0, TW, TH).data, g = new Float32Array(N), e = new Float32Array(N), mean = [0, 0, 0];
+    for (let i = 0; i < N; i++) { g[i] = 0.299 * d[4 * i] + 0.587 * d[4 * i + 1] + 0.114 * d[4 * i + 2]; for (let k = 0; k < 3; k++) mean[k] += d[4 * i + k] / N; }
+    for (let y = 0; y < TH; y++) for (let xx = 0; xx < TW; xx++) {
+      const gx = g[y * TW + Math.min(TW - 1, xx + 1)] - g[y * TW + Math.max(0, xx - 1)];
+      const gy = g[Math.min(TH - 1, y + 1) * TW + xx] - g[Math.max(0, y - 1) * TW + xx];
+      e[y * TW + xx] = Math.sqrt(gx * gx + gy * gy);
+    }
+    return { g: g, e: e, mean: mean };
+  };
+  const ncc = (a, b) => {
+    let ma = 0, mb = 0;
+    for (let i = 0; i < N; i++) { ma += a[i]; mb += b[i]; }
+    ma /= N; mb /= N;
+    let va = 0, vb = 0, cv = 0;
+    for (let i = 0; i < N; i++) { const p = a[i] - ma, q = b[i] - mb; va += p * p; vb += q * q; cv += p * q; }
+    va /= N; vb /= N; cv /= N;
+    if (va < 16 && vb < 16) return 1 - Math.min(1, Math.abs(ma - mb) / 40);
+    if (va < 16 || vb < 16) return 0;
+    return cv / Math.sqrt(va * vb);
+  };
+  const R = thumb(ref, 0, 0, rw, rh);
+  const scores = (o.candidates || []).map((c) => {
+    const b = c.box, S = thumb(cur, b.x, b.y, Math.max(1, b.width), Math.max(1, b.height));
+    const dc = Math.hypot(R.mean[0] - S.mean[0], R.mean[1] - S.mean[1], R.mean[2] - S.mean[2]) / 255;
+    return { gray: Math.round(ncc(R.g, S.g) * 1000) / 1000, edges: Math.round(ncc(R.e, S.e) * 1000) / 1000,
+             color: Math.round((1 - Math.min(1, 2 * dc)) * 1000) / 1000 };
+  });
+  return { size: [rw, rh], scores: scores };
 };
 
 window.renderCompare = async function (o) {
@@ -4267,7 +4822,7 @@ window.renderCompare = async function (o) {
       if (ma || mb) {
         // Only one of them reaches here: their sizes differ.
         if (ma !== mb) { missing++; content++; M[p] = 2; D[i] = 255; D[i + 1] = 159; D[i + 2] = 26; }
-        else { D[i] = 24; D[i + 1] = 24; D[i + 2] = 24; }
+        else { D[i] = 243; D[i + 1] = 244; D[i + 2] = 246; }
         D[i + 3] = 255;
         continue;
       }
@@ -4286,8 +4841,8 @@ window.renderCompare = async function (o) {
         if (d <= flatLimit || kind === 3) same++;
       }
       if (kind === 1) { differ++; M[p] = 1; D[i] = 255; D[i + 1] = 45; D[i + 2] = 140; }
-      else if (kind === 3) { D[i] = 110; D[i + 1] = 96; D[i + 2] = 40; }
-      else { const g = 30 + 0.3 * (0.3 * B[i] + 0.59 * B[i + 1] + 0.11 * B[i + 2]); D[i] = g; D[i + 1] = g; D[i + 2] = g; }
+      else if (kind === 3) { D[i] = 230; D[i + 1] = 215; D[i + 2] = 150; }
+      else { const g = 185 + 0.27 * (0.3 * B[i] + 0.59 * B[i + 1] + 0.11 * B[i + 2]); D[i] = g; D[i + 1] = g; D[i + 2] = g; }
       D[i + 3] = 255;
     }
   }
@@ -4686,13 +5241,14 @@ window.renderCompare = async function (o) {
     x.drawImage(src, 0, 0, src.width || src.naturalWidth, src.height || src.naturalHeight, 0, 0, c.width, c.height);
     return c;
   };
+  const marked = areas.filter((a) => !a.minor);
   const framed = (canvas, numbered) => {
     const wrap = document.createElement("div");
-    wrap.className = "frame";
+    wrap.className = "frame" + (numbered ? " markers" : "");
     wrap.appendChild(canvas);
-    for (const a of areas) {
+    for (const a of numbered ? marked : areas) {
       const box = document.createElement("div");
-      box.className = "box k-" + a.kind + (a.minor ? " minor" : "") + (a.y * k < 18 ? " low" : "");
+      box.className = "box k-" + a.kind + (a.minor ? " minor" : "") + (a.y * k < 14 || a.x * k < 14 ? " low" : "");
       box.style.left = (1 + a.x * k - 2) + "px";
       box.style.top = (1 + a.y * k - 2) + "px";
       box.style.width = (a.width * k + 4) + "px";
@@ -4731,8 +5287,9 @@ window.renderCompare = async function (o) {
   cols.className = "cols";
   cols.append(
     figure("Design", refCaption, view(refCanvas, refW, refH)),
-    figure("Your page", o.pageLabel + " · " + PW + "×" + PH, framed(view(cur, PW, PH), false)),
-    figure("What differs", "numbered as in the results \u00b7 dashed: minor", framed(view(diff, CW, CH), true))
+    figure("Your page", o.pageLabel + " · " + PW + "×" + PH, view(cur, PW, PH)),
+    figure("What differs", marked.length ? "numbered markers show the " + marked.length + (marked.length === 1 ? " difference" : " differences") :
+      "no difference stands out", framed(view(cur, CW, CH), true))
   );
   board.appendChild(cols);
   const box = board.getBoundingClientRect();
@@ -4921,9 +5478,10 @@ const cornerRadius = (R, e, ins, out, thin, bw) => {
       vals.push(thin ? dE94(lab, 0, out, 0) : dE94(lab, 0, out, 0) - dE94(lab, 0, ins, 0));
     }
     if (thin) {
-      let bi = 0;
-      for (let k = 1; k < vals.length; k++) if (vals[k] > vals[bi]) bi = k;
-      if (vals[bi] < least) return null;
+      // The border is the first line in from the corner: text or an icon further in can stand out more.
+      let bi = -1;
+      for (let k = 0; k < vals.length; k++) if (vals[k] >= least && (k + 1 >= vals.length || vals[k] >= vals[k + 1])) { bi = k; break; }
+      if (bi < 0) return null;
       const a = vals[Math.max(0, bi - 1)], c = vals[Math.min(vals.length - 1, bi + 1)], den = a - 2 * vals[bi] + c;
       const t = (bi + (den < 0 ? Math.max(-0.5, Math.min(0.5, (a - c) / (2 * den))) : 0)) * 0.25;
       return Math.max(0, (t - bw / (2 * Math.SQRT2)) / K);
@@ -4953,10 +5511,12 @@ const ringDark = (R, e, out, avoid) => {
 };
 
 // The colour around an element past its shadow: the commonest in a band 26-34 px out.
-const farColor = (ctx, b, dx, dy) => {
+// Not where a neighbour is (another card, the form above): what is past the element, not beside it.
+const farColor = (ctx, b, dx, dy, avoid) => {
   const x = Math.round(b.x + dx - 34), y = Math.round(b.y + dy - 34), w = Math.round(b.width + 68), h = Math.round(b.height + 68);
   const R = { P: ctx.getImageData(x, y, w, h).data, w: w, h: h };
-  return commonColor(R, 0, 0, w - 1, h - 1, (px, py) => px < 8 || py < 8 || px >= w - 8 || py >= h - 8);
+  const clear = (px, py) => !(avoid || []).some((a) => px + x >= a[0] + dx && px + x <= a[2] + dx && py + y >= a[1] + dy && py + y <= a[3] + dy);
+  return commonColor(R, 0, 0, w - 1, h - 1, (px, py) => (px < 8 || py < 8 || px >= w - 8 || py >= h - 8) && clear(px, py));
 };
 
 // Text's ink in a rectangle: pixels at least halfway from the backdrop to the text's own colour,
@@ -5241,14 +5801,24 @@ const measureText = (S, e, off, near, findings, cont) => {
     out.resized = true;
   };
   let ry = 1;
+  // Other words in the design (sample data: a name, a price, a date, a count) are content, not
+  // layout: in layout mode they are noted on the element and not held against it.
+  const otherWords = () => {
+    if (S.layout) out.content = true;
+    else findings.push({ kind: "text", text: "its text looks different in the design: other words, font or weight" });
+    out.same = false; out.resized = true;
+  };
   if (lp !== ld) {
-    findings.push({ kind: "wrap", text: "the design sets it on " + ld + " line" + (ld === 1 ? "" : "s") + " (" + lp + " here): width, font size or letter spacing", page: lp, design: ld });
-    out.resized = true;
+    // Other words wrap differently: only the same words on another number of lines is a layout finding.
+    if (S.layout && inkSimilarity(P, firstLine(pInk), D, firstLine(dInk), true) < SAME_WORDS) otherWords();
+    else {
+      findings.push({ kind: "wrap", text: "the design sets it on " + ld + " line" + (ld === 1 ? "" : "s") + " (" + lp + " here): width, font size or letter spacing", page: lp, design: ld });
+      out.resized = true;
+    }
   } else if (lp === 1) {
     if (S.o.debug) out.sims = [inkSimilarity(P, pInk, D, dInk, false), inkSimilarity(P, pInk, D, dInk, true)];
     if (inkSimilarity(P, pInk, D, dInk, true) < SAME_WORDS) {
-      findings.push({ kind: "text", text: "its text looks different in the design: other words, font or weight" });
-      out.same = false; out.resized = true;
+      otherWords();
     } else {
       // The same words: the height of their ink gives the type's size, the width beyond it the spacing.
       const r = dInk.sy / pInk.sy;
@@ -5271,8 +5841,7 @@ const measureText = (S, e, off, near, findings, cont) => {
     const type = (ink) => median(ink.lines.map((l) => l[1] - l[0] + 1));
     const pp = pitch(pInk), pd = pitch(dInk), gp = type(pInk), gd = type(dInk);
     if (inkSimilarity(P, firstLine(pInk), D, firstLine(dInk), true) < SAME_WORDS) {
-      findings.push({ kind: "text", text: "its text looks different in the design: other words, font or weight" });
-      out.same = false; out.resized = true;
+      otherWords();
     } else if (gp && gd && Math.abs(gd - gp) >= tol(S, 1.5, 0.5) && Math.abs(gd / gp - 1) >= tol(S, 0.06, 0.02) && size) { ry = gd / gp; fontSize(ry); }
     if (pp && pd && Math.abs(pd - pp) >= tol(S, 1.5, 0.75)) {
       const now = st.line_height || pp, want = Math.round(now * pd / pp);
@@ -5309,7 +5878,9 @@ const measureText = (S, e, off, near, findings, cont) => {
         const soft = (lab) => S.jpeg ? [lab[0], lab[1] / 2, lab[2] / 2] : lab;
         off = dE2000(soft(rgbLab(c)), soft(rgbLab(css)));
       }
-      if (off >= (!css ? 0 : tol(S, (out.resized ? 6 : 4.5) + 0.67 * Math.max(0, 18 - (st.font_size || 16)), 1.5))) {
+      // (Other words, sample data, are read off other strokes: only a clearly other colour counts there.)
+      const colourLimit = !css ? 0 : tol(S, (out.resized ? 6 : 4.5) + 0.67 * Math.max(0, 18 - (st.font_size || 16)), 1.5);
+      if (off >= (S.layout && out.content ? Math.max(12, colourLimit) : colourLimit)) {
         findings.push({ kind: "text_color", text: "text colour " + (st.color || hex(pc)) + "; the design's looks like " + hex(c), page: st.color || hex(pc), design: hex(c), delta_e: r1(off) });
       }
     }
@@ -5371,6 +5942,16 @@ const measureElement = (S, e) => {
       n++; if (bgB && dE94(B.X, p * 3, bgB, 0) > o.flatDeltaE) busy++;
     }
     const outside = B.P[((by0 + by1 >> 1) * B.w + (bx0 + bx1 >> 1)) * 4 + 3] < 128;
+    if (S.layout && e.flags.image && !outside && n && busy / n >= 0.03) {
+      // An image or icon that the design fills with something else (a photo, an avatar, a chart:
+      // sample content) is there; what it shows is not the layout's concern.
+      rec.found = true;
+      rec.content = true;
+      rec.status = "matches";
+      rec.findings = [];
+      delete rec.match;
+      return rec;
+    }
     rec.found = false;
     rec.status = "missing";
     rec.findings = [{ kind: "missing", text: outside ? "not in the design: the design ends before it" :
@@ -5399,7 +5980,31 @@ const measureElement = (S, e) => {
     const frameD = (x, y) => (x < 4 || y < 4 || x >= D.w - 4 || y >= D.h - 4) && (x < dx0 - 2 || x > dx1 + 2 || y < dy0 - 2 || y > dy1 + 2);
     const oA = commonColor(A, 0, 0, A.w - 1, A.h - 1, frame), oB = commonColor(D, 0, 0, D.w - 1, D.h - 1, frameD);
     const border = e.flags.outline ? hexLab(e.flags.border) : null;
-    const insA = iA ? rgbLab(iA.rgb) : border, insB = iB ? rgbLab(iB.rgb) : border;
+    // A bordered box the colour of what is around it (a white input on a white form): only its border
+    // shows where it is. Each side's border colour: across each edge, the pixel that stands out most.
+    const strokeOf = (R0, x0, y0, x1, y1, outRgb, reach) => {
+      if (!outRgb) return null;
+      const out = rgbLab(outRgb), cx = Math.round((x0 + x1) / 2), cy = Math.round((y0 + y1) / 2), hits = [];
+      for (const [sx, sy, ux, uy] of [[cx, y0 - reach, 0, 1], [cx, y1 + reach, 0, -1], [x0 - reach, cy, 1, 0], [x1 + reach, cy, -1, 0]]) {
+        let at = -1, far = 0;
+        for (let t = 0; t <= reach + 3; t++) {
+          const x = sx + ux * t, y = sy + uy * t;
+          if (x < 0 || y < 0 || x >= R0.w || y >= R0.h || R0.P[(y * R0.w + x) * 4 + 3] < 128) continue;
+          const d = dE94(R0.X, (y * R0.w + x) * 3, out, 0);
+          if (d > far) { far = d; at = y * R0.w + x; }
+        }
+        if (at >= 0 && far >= 2.5) hits.push([R0.P[at * 4], R0.P[at * 4 + 1], R0.P[at * 4 + 2]]);
+      }
+      return hits.length >= 2 ? [0, 1, 2].map((c) => median(hits.map((h) => h[c]))) : null;
+    };
+    const flat = !!(opaque && e.flags.outline && iA && oA && dE94(rgbLab(iA.rgb), 0, rgbLab(oA.rgb), 0) < 2.5);
+    // (What is around a flat box is its own colour: the far frame can be another box's.)
+    const strokeA = flat ? strokeOf(A, bx0, by0, bx1, by1, iA.rgb, Math.min(6, EM - 2)) : null;
+    // (Near the edge only: further out lies the box it sits in, its edge and shadow.)
+    const strokeB = flat ? strokeOf(D, dx0, dy0, dx1, dy1, (iB || oB || {}).rgb, Math.min(10, M2 - 2)) : null;
+    const aroundA = flat ? iA : oA, aroundB = flat && iB ? iB : oB;
+    const insA = flat ? (strokeA ? rgbLab(strokeA) : border) : iA ? rgbLab(iA.rgb) : border;
+    const insB = flat ? (strokeB ? rgbLab(strokeB) : null) : iB ? rgbLab(iB.rgb) : border;
     // A white card on a light grey page is barely 4 apart: enough, lined up over several scan lines.
     // How far out from each side a scan may go: never past its parent's edge or into a neighbour.
     const room = { l: Infinity, r: Infinity, t: Infinity, b: Infinity };
@@ -5422,8 +6027,8 @@ const measureElement = (S, e) => {
     const reachA = within(room, { x: E, y: E });
     const reachD = within(room, { x: Math.min(M2 - 2, Math.max(E, Math.round(0.25 * b.width))), y: Math.min(M2 - 2, Math.max(E, Math.round(0.25 * b.height))) });
     const roomy = Math.min(reachA.l, reachA.r, reachA.t, reachA.b) >= 3;
-    if (roomy && insA && insB && oA && oB && dE94(insA, 0, rgbLab(oA.rgb), 0) >= 2.5 && dE94(insB, 0, rgbLab(oB.rgb), 0) >= 2.5) {
-      const outA = rgbLab(oA.rgb), outB = rgbLab(oB.rgb);
+    if (roomy && insA && insB && aroundA && aroundB && dE94(insA, 0, rgbLab(aroundA.rgb), 0) >= 2.5 && dE94(insB, 0, rgbLab(aroundB.rgb), 0) >= 2.5) {
+      const outA = rgbLab(aroundA.rgb), outB = rgbLab(aroundB.rgb);
       const innA = { x: E, y: E }, innD = { x: Math.min(Math.round(b.width / 2), reachD.l + reachD.r), y: Math.min(Math.round(b.height / 2), reachD.t + reachD.b) };
       const eA = boxEdges(A, bx0, by0, bx1, by1, insA, outA, reachA, innA), eB = boxEdges(D, dx0, dy0, dx1, dy1, insB, outB, reachD, innD);
       if (eA && eB) {
@@ -5437,7 +6042,7 @@ const measureElement = (S, e) => {
         geo = { dx: D.x + eB.left - (A.x + gA.left), dy: D.y + eB.top - (A.y + gA.top),
                 dw: (eB.right - eB.left) - (gA.right - gA.left), dh: (eB.bottom - eB.top) - (gA.bottom - gA.top) };
         if (b.width >= 12 && b.height >= 12) {
-          const thin = !iA, bw = st.border_width || 1;
+          const thin = !iA || flat, bw = st.border_width || 1;
           const rA = cornerRadius(A, eA, insA, outA, thin, bw), rB = cornerRadius(D, eB, insB, outB, thin, bw);
           if (o.debug) rec.radius = [rA, rB, eA, eB];
           if (rA !== null && rB !== null && Math.abs(rB - rA) >= tol(S, 2, 1)) {
@@ -5446,11 +6051,24 @@ const measureElement = (S, e) => {
             if (want !== Math.round(now)) findings.push({ kind: "radius", text: "corner radius about " + want + "px in the design (" + Math.round(now) + "px here)", page: Math.round(now), design: want });
           }
         }
+        // The border's colour, where only the border sets the box apart: the page's own reading of its CSS
+        // colour corrects the design's for how thin lines are drawn.
+        if (flat && strokeA && strokeB) {
+          const e00 = dE2000(rgbLab(strokeA), rgbLab(strokeB)), css = hexRgb(st.border);
+          if (e00 >= tol(S, 4, 1.5)) {
+            const want = css ? strokeB.map((v, k) => Math.max(0, Math.min(255, v + css[k] - strokeA[k]))) : strokeB;
+            findings.push({ kind: "border_color", text: "border colour " + (st.border || hex(strokeA)) + "; the design's looks like " + hex(want),
+                            page: st.border || hex(strokeA), design: hex(want), delta_e: r1(e00) });
+          }
+        }
         // A shadow darkens what is around the element: measured against the colour further out, past it.
-        const fA = farColor(S.pctx, b, 0, 0), fB = farColor(S.dctx, b, D.x + eB.left - (A.x + eA.left), D.y + eB.top - (A.y + eA.top));
+        const fA = farColor(S.pctx, b, 0, 0, nearPage), fB = farColor(S.dctx, b, D.x + eB.left - (A.x + eA.left), D.y + eB.top - (A.y + eA.top), nearPage);
         const nearD = nearPage.map((a) => [a[0] + offset.dx - D.x, a[1] + offset.dy - D.y, a[2] + offset.dx - D.x, a[3] + offset.dy - D.y]);
         const sA = ringDark(A, eA, fA ? rgbLab(fA.rgb) : outA, near), sB = ringDark(D, eB, fB ? rgbLab(fB.rgb) : outB, nearD);
-        if (sA !== null && sB !== null && Math.abs(sB - sA) >= tol(S, 1.5, 0.5)) {
+        // (A screenshot of the element alone leaves out its shadow: the element it was found at is not held to it.)
+        // (Around a small label without a shadow of its own the ring is too thin to tell.)
+        if (sA !== null && sB !== null && Math.abs(sB - sA) >= tol(S, 1.5, 0.5) && !(o.paddedRef && e.parent < 0) &&
+            (e.flags.shadow || b.width * b.height >= 2500)) {
           findings.push({ kind: "shadow", text: sB > sA ? "the design's shadow or outline around it is stronger" : "its shadow or outline is stronger than the design's", page: r1(sA), design: r1(sB) });
         }
       }
@@ -5489,25 +6107,44 @@ const measureElement = (S, e) => {
     if (Math.abs(mx) <= give && !geo) mx = 0;
   }
   if (text && text.missing) mx = my = 0;
+  // Other words (sample data) change a text's width, and with it where centred or right-aligned text,
+  // or a box sized by its text (a pill, a badge), starts: only its vertical place and height count then.
+  const otherWords = S.layout && !!(text && text.content);
+  if (otherWords) {
+    const align = String(st.align || "start"), tw = e.text_box ? e.text_box.width : b.width;
+    // A box sized by its words (a pill, a badge) at its parent's right: where its right edge is counts.
+    const pb = parent && parent.box, rightSide = pb && geo && (pb.x + pb.width - b.x - b.width) < (b.x - pb.x);
+    if (rightSide) mx += geo.dw;
+    else if (!/^(start|left|justify|-webkit-auto)$/.test(align) || Math.abs(mx) > 0.25 * tw + 8 || (geo && Math.abs(mx) <= Math.abs(geo.dw) + 4)) mx = 0;
+    // Other words' ink can be taken for a neighbouring line's: less than a line's move is not trusted.
+    if (!geo && Math.abs(my) <= 1.2 * (st.line_height || 1.25 * (st.font_size || 14))) my = 0;
+    for (let k = findings.length - 1; k >= 0; k--) if (findings[k].kind === "shadow") findings.splice(k, 1);
+  }
   // Only what shows a place of its own moves: a box, text, an image. A bare wrapper (a rule under
   // a bar, a translucent tint) is placed by its children, and they report their own moves.
   if (!boxy && !(text && text.dInk)) mx = my = 0;
   if (Math.abs(mx) >= least || Math.abs(my) >= least) findings.push({ kind: "moved", text: movedText(Math.abs(mx) >= least ? mx : 0, Math.abs(my) >= least ? my : 0), dx: Math.round(mx), dy: Math.round(my) });
   const grown = tol(S, 2, 1);
-  if (geo && (Math.abs(geo.dw) >= grown || Math.abs(geo.dh) >= grown)) findings.push({ kind: "size", text: sizeText(Math.abs(geo.dw) >= grown ? geo.dw : 0, Math.abs(geo.dh) >= grown ? geo.dh : 0), dw: Math.round(geo.dw), dh: Math.round(geo.dh) });
+  const dwKept = geo && !otherWords && Math.abs(geo.dw) >= grown ? geo.dw : 0, dhKept = geo && Math.abs(geo.dh) >= grown ? geo.dh : 0;
+  if (dwKept || dhKept) findings.push({ kind: "size", text: sizeText(dwKept, dhKept), dw: Math.round(dwKept), dh: Math.round(dhKept) });
   // Pixels decide for images, icons and boxes (a real area of them: more than a stray edge); text
   // has its own measures (and renders differently anyway).
   const differing = pm.content * (1 - pm.match / 100) * pm.step * pm.step;
-  if (!findings.length && !e.flags.text && pm.content >= 30 && pm.match < 80 && differing >= Math.max(40, tol(S, 0.03, 0.005) * ownCount)) {
-    findings.push({ kind: "content", text: "looks different in the design: other content, icon or image" });
+  const otherContent = !e.flags.text && pm.content >= 30 && pm.match < 80 && differing >= Math.max(40, tol(S, 0.03, 0.005) * ownCount);
+  if (text && text.content) rec.content = true;
+  if (otherContent) {
+    // In layout mode what an image, icon or box shows is sample content: noted, not a finding.
+    if (S.layout) rec.content = true;
+    else if (!findings.length) findings.push({ kind: "content", text: "looks different in the design: other content, icon or image" });
   }
-  // Near 100% accuracy what is only nearly the same is not enough: its pixels must match too.
+  // Near 100% accuracy what is only nearly the same is not enough: its pixels must match too
+  // (unless the element shows other content, which layout mode leaves alone).
   const exact = 100 - 6 * S.tol;
-  if (!findings.length && S.tol < 0.5 && pm.content >= 1 && pm.match < exact) {
+  if (!findings.length && S.tol < 0.5 && pm.content >= 1 && pm.match < exact && !(S.layout && rec.content)) {
     findings.push({ kind: "pixels", text: r1(pm.match) + "% of its pixels match the design; " + r1(S.o.accuracy) + "% accuracy needs " + (exact >= 100 ? "all of them" : r1(exact) + "%"), match: r1(pm.match) });
   }
   rec.findings = findings;
-  rec.status = findings.length ? "different" : pm.match < 97 ? "nearly" : "matches";
+  rec.status = findings.length ? "different" : (S.layout && rec.content) || pm.match >= 97 ? "matches" : "nearly";
   if (rec.status === "different") rec.mask = pm.mask;
   return rec;
 };
@@ -5536,6 +6173,9 @@ window.elementsBegin = async function (o) {
   const beyond = new Set(items.filter((e) => e.box.y + e.box.height > H || e.box.x + e.box.width > W).map((e) => e.i));
   window.__el = { o: o, g: g, base: base, items: items, kids: kids, near: near, results: new Array(items.length), next: 0, wide: 0, beyond: beyond,
                   jpeg: /^data:image\/jpe?g/i.test(String(o.ref || "")), tol: Number.isFinite(o.tolerance) ? o.tolerance : 1,
+                  // Layout mode measures where each element sits, its size, colours and type, and
+                  // leaves what it shows (other words, numbers, images: sample data) alone.
+                  layout: o.content !== "exact",
                   prior: { dx: 0, dy: 0 }, pctx: ctxOf(g.pageCanvas), dctx: ctxOf(g.refCanvas), pp: pyramid(g.pageCanvas), dp: pyramid(g.refCanvas),
                   backdrop: [backdrop(g.pageCanvas), backdrop(g.refCanvas)] };
   return { count: items.length };
@@ -5605,10 +6245,231 @@ window.elementsFinish = function () {
     const cause = Math.abs(moved.dx) > Math.abs(moved.dy) ? side : up;
     if (cause) moved.text += " (" + cause.name.slice(0, 48) + (cause === up ? " above" : " before") + " it differs: fix that first)";
   }
+  // Where a box's first children all moved alike, its padding changed: say so on the box (the fix is
+  // there), and drop the moves it explains from the children.
+  for (const r of res) {
+    const st = S.items[r.i].style || {}, pad = st.padding;
+    if (!pad || r.status === "missing" || !r.found) continue;
+    const kids = res.filter((q) => q.parent === r.i && q.status !== "missing" && q.rel && q.found);
+    if (!kids.length) continue;
+    const bw = st.border_width || 0, least = tol(S, 2, 1);
+    const left = kids.reduce((a, q) => (q.box.x < a.box.x ? q : a)), top = kids.reduce((a, q) => (q.box.y < a.box.y ? q : a));
+    const atLeft = Math.abs(left.box.x - (r.box.x + bw + pad[3])) <= 2, atTop = Math.abs(top.box.y - (r.box.y + bw + pad[0])) <= 2;
+    const dx = atLeft ? Math.round(left.rel.dx) : 0, dy = atTop ? Math.round(top.rel.dy) : 0;
+    if (Math.abs(dx) < least && Math.abs(dy) < least) continue;
+    const want = pad.slice();
+    if (Math.abs(dx) >= least) want[3] = Math.max(0, pad[3] + dx);
+    if (Math.abs(dy) >= least) {
+      want[0] = Math.max(0, pad[0] + dy);
+      // As much again below it when the box grew by twice as much (the content stayed as tall).
+      if (r.geometry && Math.abs(r.geometry.dh - 2 * dy) <= Math.max(2, 0.2 * Math.abs(dy))) want[2] = Math.max(0, pad[2] + dy);
+    }
+    const same = want[0] === want[3] && (want[2] === want[0] || want[2] === pad[2]) && Math.abs(dx) >= least && Math.abs(dy) >= least;
+    const text = same ? "padding about " + want[0] + "px in the design (" + pad[0] + "px here)" :
+      "padding " + ["top", "right", "bottom", "left"].map((k, i) => want[i] !== pad[i] ? k + " about " + want[i] + "px (" + pad[i] + "px here)" : "").filter(Boolean).join(", ") + " in the design";
+    r.findings = (r.findings || []).filter((f) => !(f.kind === "size" && Math.abs((f.dh || 0) - 2 * dy) <= 2 && !(f.dw || 0)));
+    r.findings.unshift({ kind: "padding", text: text, page: pad, design: want });
+    r.status = "different";
+    for (const q of kids) {
+      const f = (q.findings || []).find((x) => x.kind === "moved");
+      if (!f) continue;
+      // (A child at the box's right moves the other way when both sides' padding changed alike.)
+      const ex = Math.abs(Math.abs(f.dx || 0) - Math.abs(dx)) <= 1.5, ey = Math.abs((f.dy || 0) - dy) <= 1.5;
+      // (A child further in moves with the padding along one side and not at all along the other.)
+      if ((ex && (ey || !f.dy)) || (ey && !f.dx)) {
+        q.findings = q.findings.filter((x) => x !== f);
+        if (!q.findings.length) q.status = "matches";
+      } else if (ex || ey) {
+        f.text += " (partly the " + r.name.split(/[\s"]/)[0] + "'s padding)";
+      }
+    }
+  }
+  // Labels whose words are data, a status above all (Paid, Due, Sold, Cancelled): the design shows each
+  // status in its own colours, in another order than the app's rows. Each label is compared with the
+  // design's label of the same words, wherever the design has it (the shapes of their words are
+  // compared); what compared it with another status in its place is dropped. Sibling buttons whose
+  // words the design has in another order (OK and Cancel swapped) are a finding of their own.
+  const labelWords = [];
+  if (S.layout) {
+    const kindOf = (name) => String(name || "").split(/[\s"]/)[0];
+    const COLOURS = new Set(["background", "text_color", "border_color", "shadow"]);
+    const labelKey = (r) => {
+      const it = S.items[r.i], b = it.box, f = it.flags;
+      // Grouped by tag and first class (span.pill, not span.pill.sold: the second is the status).
+      // (Buttons and other controls by their tag alone: a primary and a secondary one are one set of buttons.)
+      return f.text && it.text && ((f.bg && f.bg !== "translucent") || f.outline || f.control) && b.height <= 56 && b.width <= 320 ?
+        (f.control ? kindOf(r.name).split(".")[0] : kindOf(r.name).split(".").slice(0, 2).join(".")) : "";
+    };
+    const labelInk = (ctx, box) => {
+      const R = region(ctx, box.x - 2, box.y - 2, box.width + 4, box.height + 4);
+      // Inside it, clear of its rounded ends (past its corners what is around it shows).
+      const ix = 2 + Math.min(10, Math.round(box.height / 2)), iy = 4;
+      if (R.w - 2 * ix < 4 || R.h - 2 * iy < 4) return null;
+      const bg = commonColor(R, ix, iy, R.w - 1 - ix, R.h - 1 - iy);
+      const ink = bg && inkOf(R, ix, iy, R.w - 1 - ix, R.h - 1 - iy, rgbLab(bg.rgb), 0, bg.rgb);
+      if (!ink) return null;
+      // Its own background: right around its words (a crop the size of another label takes in what is past it).
+      const inside = (x, y) => x >= ink.x0 - 5 && x <= ink.x1 + 5 && y >= ink.y0 - 3 && y <= ink.y1 + 3 &&
+                               !(x >= ink.x0 - 1 && x <= ink.x1 + 1 && y >= ink.y0 - 1 && y <= ink.y1 + 1);
+      const own = commonColor(R, Math.max(0, ink.x0 - 5), Math.max(0, ink.y0 - 3), Math.min(R.w - 1, ink.x1 + 5), Math.min(R.h - 1, ink.y1 + 3), inside) || bg;
+      const color = ink.dir ? own.rgb.map((v, c) => Math.max(0, Math.min(255, v + ink.reach * ink.dir[c]))) : null;
+      return { R: R, bg: own.rgb, ink: ink, color: color };
+    };
+    // The design's label where the page has one: its own extent (its words may be longer or shorter than
+    // the page's there), grown out from the middle over what stands apart from its surroundings.
+    const grow = (ctx, box) => {
+      const E = Math.min(90, Math.round(box.width) + 10);
+      const R = region(ctx, box.x - E, box.y - 4, box.width + 2 * E, box.height + 8);
+      const far = commonColor(R, 0, 0, R.w - 1, R.h - 1, (x) => x < 6 || x >= R.w - 6);
+      if (!far) return box;
+      const out = rgbLab(far.rgb), cy = Math.round(R.h / 2), cx = Math.round(R.w / 2);
+      const apart = (x, y) => x >= 0 && y >= 0 && x < R.w && y < R.h && dE94(R.X, (y * R.w + x) * 3, out, 0) > 4;
+      const col = (x) => apart(x, cy - 2) || apart(x, cy) || apart(x, cy + 2);
+      const row = (y, x0, x1) => { for (let x = x0; x <= x1; x += 2) if (apart(x, y)) return true; return false; };
+      let l = cx, r = cx, gap = 0;
+      if (!col(cx)) return box;
+      for (let x = cx; x >= 0; x--) { if (col(x)) { l = x; gap = 0; } else if (++gap > 3) break; }
+      gap = 0;
+      for (let x = cx; x < R.w; x++) { if (col(x)) { r = x; gap = 0; } else if (++gap > 3) break; }
+      let t = cy, b = cy;
+      for (let y = cy; y >= 0 && row(y, l, r); y--) t = y;
+      for (let y = cy; y < R.h && row(y, l, r); y++) b = y;
+      if (r - l < 6 || b - t < 6 || l <= 1 || r >= R.w - 2) return box;
+      return { x: R.x + l, y: R.y + t, width: r - l + 1, height: b - t + 1 };
+    };
+    const groups = new Map(), unplaced = new Map();
+    for (const r of res) {
+      const key = labelKey(r);
+      if (!key) continue;
+      if (r.status === "missing" || !r.found) { if (!unplaced.has(key)) unplaced.set(key, []); unplaced.get(key).push(String(S.items[r.i].text || "").trim()); continue; }
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(r);
+    }
+    for (const [key, list] of groups) {
+      const page = list.map((r) => ({ r: r, text: String(S.items[r.i].text || "").trim(), L: labelInk(S.pctx, r.box) }));
+      const places = list.map((r) => {
+        const d = r.disp || r.offset || { dx: 0, dy: 0 }, g = r.geometry;
+        const box = { x: r.box.x + d.dx, y: r.box.y + d.dy, width: Math.max(4, r.box.width + (g ? g.dw : 0)), height: Math.max(4, r.box.height + (g ? g.dh : 0)) };
+        const grown = grow(S.dctx, box);
+        return { r: r, L: labelInk(S.dctx, grown), box: grown, words: "" };
+      });
+      // One page label for each of its words, to read the design's labels by.
+      const byWords = new Map();
+      for (const p of page) if (p.L && p.text && !byWords.has(p.text.toLowerCase())) byWords.set(p.text.toLowerCase(), p);
+      for (const q of places) {
+        if (!q.L) continue;
+        let best = "", top = SAME_WORDS;
+        for (const [words, p] of byWords) {
+          const sim = inkSimilarity(p.L.R, p.L.ink, q.L.R, q.L.ink, true);
+          if (sim >= top) { top = sim; best = words; }
+        }
+        q.words = best;
+      }
+      const found = new Map();
+      for (const q of places) if (q.words && !found.has(q.words)) found.set(q.words, q);
+      const styleCheck = (p, q, where) => {
+        
+        const add = (f) => { p.r.findings = (p.r.findings || []).filter((x) => x.kind !== f.kind || x.status !== true); p.r.findings.push(f); p.r.status = "different";
+                             if (q.box && q.r !== p.r) p.r.twin = { dx: Math.round(q.box.x + q.box.width / 2 - (p.r.box.x + p.r.box.width / 2)), dy: Math.round(q.box.y + q.box.height / 2 - (p.r.box.y + p.r.box.height / 2)) }; };
+        // The page's side as its CSS has it; the design's text colour corrected by how the page's own
+        // strokes read against its CSS colour (thin strokes never reach it fully).
+        const st = S.items[p.r.i].style || {}, cssInk = hexRgb(st.color);
+        const eBg = dE2000(rgbLab(p.L.bg), rgbLab(q.L.bg));
+        if (eBg >= tol(S, 2.5, 1)) add({ kind: "status_style", status: true, text: "“" + p.text + "” has background " + (st.bg || hex(p.L.bg)) + " here; the design’s “" + p.text + "” has " + hex(q.L.bg) + where,
+                                          page: st.bg || hex(p.L.bg), design: hex(q.L.bg), delta_e: r1(eBg) });
+        if (p.L.color && q.L.color) {
+          const eInk = dE2000(rgbLab(p.L.color), rgbLab(q.L.color));
+          const want = cssInk ? q.L.color.map((v, c) => Math.max(0, Math.min(255, v + cssInk[c] - p.L.color[c]))) : q.L.color;
+          // (Thin strokes read a little off: only a clearly other colour, or one beside another fill.)
+          if (eInk >= Math.max(tol(S, 10, 3), 18) || (eBg >= tol(S, 2.5, 1) && eInk >= tol(S, 10, 3))) add({ kind: "status_text", status: true, text: "“" + p.text + "” has text colour " + (st.color || hex(p.L.color)) + " here; the design’s “" + p.text + "” looks like " + hex(want) + where,
+                                             page: st.color || hex(p.L.color), design: hex(want) });
+        }
+      };
+      const checked = [], notInDesign = [];
+      // Labels on rows the design does not show (one more order than it has) cannot be matched either.
+      for (const text of unplaced.get(key) || []) if (text && !byWords.has(text.toLowerCase()) && !notInDesign.includes(text)) notInDesign.push(text);
+      for (const [words, p] of byWords) {
+        const q = found.get(words);
+        if (!q) { notInDesign.push(p.text); continue; }
+        checked.push(p.text);
+        // In its own place the element's own measures already compared it.
+        if (q.r === p.r) continue;
+        styleCheck(p, q, " (the design has it on another row)");
+      }
+      // What was compared with another label in its place (other words there): not a finding.
+      for (let k = 0; k < list.length; k++) {
+        const p = page[k], q = places[k];
+        if (!p.text || (q.words && q.words === p.text.toLowerCase())) continue;
+        // (Its size and where it starts across follow its words too: only a move up or down stays.)
+        p.r.findings = (p.r.findings || []).filter((f) => f.status === true || !(COLOURS.has(f.kind) || f.kind === "size"));
+        for (const f of p.r.findings) if (f.kind === "moved" && f.dx) {
+          if (Math.abs(f.dy || 0) >= tol(S, 3, 1)) { f.dx = 0; f.text = movedText(0, f.dy); } else f.drop = true;
+        }
+        p.r.findings = p.r.findings.filter((f) => !f.drop);
+        p.r.content = true;
+        if (!p.r.findings.length) p.r.status = "matches";
+      }
+      // Buttons side by side in another order: their order is the layout's, not data.
+      const byParent = new Map();
+      for (let k = 0; k < list.length; k++) { const par = list[k].parent; if (!byParent.has(par)) byParent.set(par, []); byParent.get(par).push(k); }
+      for (const [, ks] of byParent) {
+        if (ks.length < 2 || ks.some((k) => !places[k].words)) continue;
+        // Left to right (top to bottom in a column): the page's words, and the design's where each was found.
+        const across = (a, b) => Math.abs(a.y - b.y) < 8 ? a.x - b.x : a.y - b.y;
+        const pageSeq = ks.slice().sort((a, b) => across(page[a].r.box, page[b].r.box)).map((k) => page[k].text.toLowerCase());
+        const designSeq = ks.slice().sort((a, b) => across(places[a].box, places[b].box)).map((k) => places[k].words);
+        if (pageSeq.join("|") === designSeq.join("|") || pageSeq.slice().sort().join("|") !== designSeq.slice().sort().join("|")) continue;
+        const name = (w) => "“" + (byWords.get(w) ? byWords.get(w).text : w) + "”";
+        const first = page[ks[0]].r;
+        first.findings = (first.findings || []).concat([{ kind: "order", text: "the design has them in the order " + designSeq.map(name).join(", ") + " (here " + pageSeq.map(name).join(", ") + ")" }]);
+        first.status = "different";
+        // Their moves across are the swap's: the order says it once. And their colours are compared with the
+        // twin each was matched with, right around its words (next to the other one, what is around them differs).
+        for (const k of ks) {
+          const r = page[k].r;
+          r.findings = (r.findings || []).filter((f) => f.status === true || !COLOURS.has(f.kind));
+          if (page[k].L && places[k].L) styleCheck(page[k], places[k], "");
+          for (const f of r.findings || []) if (f.kind === "moved" && f.dx) { if (Math.abs(f.dy || 0) >= tol(S, 3, 1)) { f.dx = 0; f.text = movedText(0, f.dy); } else f.drop = true; }
+          r.findings = (r.findings || []).filter((f) => !f.drop);
+          if (!r.findings.length && r !== first) r.status = "matches";
+        }
+      }
+      if (list.length >= 2 || notInDesign.length) labelWords.push({ label: key, checked: checked, not_in_design: notInDesign,
+                                                                  design_only: places.filter((q) => q.L && !q.words).length });
+    }
+  }
+  if (S.layout) {
+    // More copies of a repeated component than the design shows (another order card, a longer list)
+    // are the app's data, not its layout: one of them not in the design is noted, not a finding.
+    const kind = (name) => String(name || "").split(/[\s"]/)[0];
+    const extra = new Set();
+    for (const r of res) {
+      const inExtra = r.parent >= 0 && extra.has(r.parent);
+      const twins = r.status === "missing" ? res.filter((q) => q !== r && q.parent === r.parent && q.status !== "missing" && kind(q.name) === kind(r.name)).length : 0;
+      const itemLike = /^(li|tr|article)\b|[.](card|item|row|tile|entry|result|order|product)/i.test(kind(r.name));
+      const twin = twins >= 2 || (twins >= 1 && itemLike);
+      if (inExtra || twin) {
+        extra.add(r.i);
+        r.status = "matches"; r.content = true; r.extraCopy = true; r.findings = [];
+      }
+    }
+    // Below more rows than the design shows, what follows sits lower by those rows: that is the data's
+    // length, so only where it sits across is compared there.
+    const extraTop = Math.min(...res.filter((r) => r.extraCopy).map((r) => r.box.y), Infinity);
+    if (extraTop < Infinity) {
+      for (const r of res) {
+        if (r.extraCopy || r.box.y <= extraTop) continue;
+        const f = (r.findings || []).find((x) => x.kind === "moved" && x.dy);
+        if (!f) continue;
+        if (Math.abs(f.dx || 0) >= tol(S, 2, 1)) { f.dy = 0; f.text = movedText(f.dx, 0) + " (below more rows than the design shows: not compared up or down)"; }
+        else { r.findings = r.findings.filter((x) => x !== f); if (!r.findings.length) r.status = "matches"; }
+      }
+    }
+  }
   const bad = res.filter((r) => r.status === "different" || r.status === "missing").sort((p, q) => (p.box.y - q.box.y) || (p.box.x - q.box.x));
   bad.forEach((r, k) => { r.n = k + 1; });
-  const counts = { compared: res.length, matches: 0, nearly: 0, different: 0, missing: 0 };
-  for (const r of res) counts[r.status]++;
+  const counts = { compared: res.length, matches: 0, nearly: 0, different: 0, missing: 0, content: 0 };
+  for (const r of res) { counts[r.status]++; if (r.content) counts.content++; }
   // Parts of the design the page lacks: what the whole comparison found missing where no element is.
   const lacking = [];
   for (const a of S.base.differences || []) {
@@ -5629,10 +6490,11 @@ window.elementsFinish = function () {
   }
   const verdict = !bad.length && !lacking.length && !background ? (counts.nearly ? "nearly identical" : S.base.verdict === "identical" ? "identical" : "nearly identical") : "different";
   const exported = bad.map((r) => {
-    const d = r.disp || r.offset, geo = r.geometry;
+    const d = r.twin || r.disp || r.offset, geo = r.twin ? null : r.geometry;
     const out = { n: r.n, element: r.name, selector: r.selector, status: r.status, box: r.box,
                   findings: (r.findings || []).map((f) => f.text) };
     if (r.match !== undefined) out.match = r.match;
+    if (r.content) out.other_content = true;
     if (r.status !== "missing") out.design_box = { x: r1(r.box.x + d.dx), y: r1(r.box.y + d.dy), width: r1(r.box.width + (geo ? geo.dw : 0)), height: r1(r.box.height + (geo ? geo.dh : 0)) };
     for (const f of r.findings || []) {
       if (f.kind === "moved") out.moved = { dx: f.dx, dy: f.dy };
@@ -5641,7 +6503,7 @@ window.elementsFinish = function () {
     }
     return out;
   });
-  const result = { verdict: verdict, counts: counts, elements: exported, lacking: lacking, background: background,
+  const result = { verdict: verdict, counts: counts, elements: exported, lacking: lacking, background: background, labels: labelWords,
                    statuses: res.map((r) => [r.selector, r.status]), beyond: S.beyond.size,
                    similarity: S.base.similarity, structure: S.base.structure, notes: S.base.notes, shifts: S.base.shifts,
                    page_size: S.base.page_size, reference_size: S.base.reference_size, reference_scale: S.base.reference_scale,
@@ -5658,6 +6520,7 @@ window.elementsFinish = function () {
   const good = counts.matches + counts.nearly, toFix = bad.length + lacking.length + (background ? 1 : 0);
   const tally = [["ok", counts.matches, "match"]];
   if (counts.nearly) tally.push(["nearly", counts.nearly, "nearly match"]);
+  if (counts.content) tally.push(["ok", counts.content, "show other content (not compared)"]);
   if (counts.different) tally.push(["s-different", counts.different, "differ"]);
   if (counts.missing) tally.push(["s-missing", counts.missing, "on the page, not in the design"]);
   if (lacking.length) tally.push(["s-lacking", lacking.length, "in the design, not on the page"]);
@@ -5729,7 +6592,7 @@ window.elementsFinish = function () {
     return f;
   };
   const onDesign = bad.filter((r) => r.status !== "missing").map((r) => {
-    const d = r.disp || r.offset, geo = r.geometry;
+    const d = r.twin || r.disp || r.offset, geo = r.twin ? null : r.geometry;
     return { n: r.n, cls: "different", x: r.box.x + d.dx, y: r.box.y + d.dy, width: r.box.width + (geo ? geo.dw : 0), height: r.box.height + (geo ? geo.dh : 0) };
   }).concat(lacking.map((a) => ({ n: a.n, cls: "lacking", x: a.x, y: a.y, width: a.width, height: a.height })));
   const onPage = bad.map((r) => ({ n: r.n, cls: r.status === "missing" ? "missing" : "different", x: r.box.x, y: r.box.y, width: r.box.width, height: r.box.height }));
@@ -5764,7 +6627,8 @@ window.elementsFinish = function () {
       for (const f of (r.findings || []).slice(0, 4)) { const li = document.createElement("li"); li.textContent = f.text; list.appendChild(li); }
       // Text is shown by its own box (a heading's block is often far wider than its words).
       const item = S.items[r.i], f = r.textual && item.text_box ? item.text_box : r.box;
-      const m = Math.max(8, Math.round(0.12 * Math.max(f.width, f.height))), d = r.disp || r.offset, w = f.width + 2 * m, h = f.height + 2 * m;
+      // (A label matched with the design's label of the same words shows that one.)
+      const m = Math.max(8, Math.round(0.12 * Math.max(f.width, f.height))), d = r.twin || r.disp || r.offset, w = f.width + 2 * m, h = f.height + 2 * m;
       const q = Math.min(3, 225 / w, 150 / h);
       const pair = document.createElement("div");
       pair.className = "pair";
@@ -5788,6 +6652,11 @@ BROWSER_SETTINGS_PATH = os.path.expanduser("~/.livecode/browser.json")
 DEFAULT_MATCH_THRESHOLD = 85.0
 DEFAULT_DESIGN_ACCURACY = 90.0
 MIN_DESIGN_ACCURACY = 50.0
+# What an element compare holds against the page: "layout" measures each element's place, size,
+# colours and type and leaves what it shows alone (a design's sample names, numbers and pictures
+# rarely match a running app's); "exact" counts other words, images and pixels as differences too.
+COMPARE_CONTENTS = ("layout", "exact")
+DEFAULT_COMPARE_CONTENT = "layout"
 
 
 _settings_cache: tuple[str, tuple[int, int], dict[str, Any]] | None = None
@@ -5874,6 +6743,26 @@ def design_gate_enabled() -> bool:
     return _saved_flag("design_gate", True)
 
 
+def ui_verify_enabled() -> bool:
+    return _saved_flag("ui_verify", True)
+
+
+def compare_content() -> str:
+    return _saved_choice("compare_content", COMPARE_CONTENTS, DEFAULT_COMPARE_CONTENT)
+
+
+def _compare_content_arg(args: dict[str, Any]) -> str:
+    """The content mode for one compare: the call's content argument, else the saved setting."""
+    word = str(args.get("content") or "").strip().lower()
+    if not word:
+        return compare_content()
+    if word in ("exact", "strict", "all", "pixels"):
+        return "exact"
+    if word in ("layout", "structure", "elements", "ignore"):
+        return "layout"
+    raise BrowserError(f"content is one of: {', '.join(COMPARE_CONTENTS)}.")
+
+
 def agent_tabs_enabled() -> bool:
     return _saved_flag("agent_tabs", True)
 
@@ -5896,11 +6785,14 @@ def browser_settings() -> dict[str, Any]:
         **accuracy_settings(),
         "reduce_automation_signals": automation_signals_reduced(),
         "design_gate": design_gate_enabled(),
+        "compare_content": compare_content(),
+        "ui_verify": ui_verify_enabled(),
         "agent_tabs": agent_tabs_enabled(),
         "view_quality": view_quality(),
         "default_viewport": default_viewport(),
         "allowed": {
             "design_accuracy": [MIN_DESIGN_ACCURACY, 100.0],
+            "compare_content": list(COMPARE_CONTENTS),
             "view_quality": list(VIEW_QUALITIES),
             "default_viewport": list(DEFAULT_VIEWPORTS),
         },
@@ -5918,6 +6810,10 @@ def save_browser_settings(data: dict[str, Any]) -> dict[str, Any]:
         updates["design_accuracy"] = _accuracy_from_threshold(data.get("match_threshold"))
     if "design_gate" in data:
         updates["design_gate"] = _flag(data.get("design_gate"), "design_gate")
+    if "ui_verify" in data:
+        updates["ui_verify"] = _flag(data.get("ui_verify"), "ui_verify")
+    if "compare_content" in data:
+        updates["compare_content"] = _choice(data.get("compare_content"), COMPARE_CONTENTS, "compare_content")
     if "agent_tabs" in data:
         updates["agent_tabs"] = _flag(data.get("agent_tabs"), "agent_tabs")
     if "view_quality" in data:
@@ -6119,8 +7015,11 @@ def _data_url(data: bytes, mime: str) -> str:
 def _compare_options(reference: _Reference, page_png: bytes, page_label: str, *, mode: str = "view",
                      region: dict[str, int] | None = None, layout_width: int = 0, ref_crop: dict[str, float] | None = None,
                      ref_scale: float = 0.0, auto_region: bool = True, target_kind: str = "element",
-                     text_target: bool = False, snap: bool = False) -> dict[str, Any]:
+                     text_target: bool = False, snap: bool = False, content: str = DEFAULT_COMPARE_CONTENT,
+                     padded_ref: bool = False) -> dict[str, Any]:
     return {
+        "content": content,
+        "paddedRef": padded_ref,
         "ref": _data_url(reference.data, reference.mime),
         "page": _data_url(page_png, _sniff_image_mime(page_png) or "image/png"),
         "refLabel": reference.label,
@@ -6130,7 +7029,7 @@ def _compare_options(reference: _Reference, page_png: bytes, page_label: str, *,
         "smoothDeltaE": COMPARE_SMOOTH_DELTA_E,
         "ssimNoise": COMPARE_SSIM_NOISE,
         "ssimRadius": COMPARE_SSIM_RADIUS,
-        "columnWidth": 560,
+        "columnWidth": 600,
         "maxHeight": 1600,
         "mode": mode,
         "region": region,
@@ -6179,11 +7078,12 @@ def _render_elements(reference: _Reference, page_png: bytes, page_label: str, el
 def _render_comparison(reference: _Reference, page_png: bytes, page_label: str, *, mode: str = "view",
                        region: dict[str, int] | None = None, layout_width: int = 0, ref_crop: dict[str, float] | None = None,
                        ref_scale: float = 0.0, auto_region: bool = True, target_kind: str = "element",
-                       text_target: bool = False, snap: bool = False,
+                       text_target: bool = False, snap: bool = False, content: str = DEFAULT_COMPARE_CONTENT,
+                       padded_ref: bool = False,
                        name_areas: Callable[[dict[str, Any]], list[str]] | None = None) -> tuple[bytes, dict[str, Any]]:
     options = _compare_options(reference, page_png, page_label, mode=mode, region=region, layout_width=layout_width,
                                ref_crop=ref_crop, ref_scale=ref_scale, auto_region=auto_region, target_kind=target_kind,
-                               text_target=text_target, snap=snap)
+                               text_target=text_target, snap=snap, content=content, padded_ref=padded_ref)
     with _compare_page() as tools:
         try:
             stats = _in_background(tools, "evaluate", "o => window.renderCompare(o)", options)
@@ -6318,11 +7218,32 @@ def _do_compare(session: _Session, page: Any, args: dict[str, Any], reference: _
     base = dict(reference.crop) if reference.crop else None
     reference = _cut_out(reference)
     capture = {"type": "jpeg", "quality": 75} if reference.mime == "image/jpeg" else {"type": "png"}
+    located: dict[str, Any] | None = None
+    frame_fill = ""
+    view_width = int(round(_page_geometry(page).get("layoutWidth") or VIEWPORT["width"]))
+    if _wants_locate(args, reference, view_width):
+        # A screenshot of a card or an input box: compare it with the element it shows, not the page.
+        located = _locate_reference(session, page, reference, args, view_width)
+        if located and located.get("selector"):
+            args = {**args, "selector": located["selector"]}
+            args.pop("full_page", None)
+            if located.get("scale") and not reference.scale and not args.get("reference_scale"):
+                reference.scale = float(located["scale"])
+            reference, frame_fill = _frame_located(page, reference, located["selector"], LOCATE_PADDING)
     if _has_element_target(args) or args.get("width") is not None:
         mode = "element"
         text_layer = bool(reference.layer and reference.layer.get("type") == "TEXT")
         rect, target, geo = _target_rect(page, args, default_padding=0, text_box=text_layer)
         page_png = _capture(page, rect, geo, **capture)
+        if frame_fill:
+            # Framed like the design's screenshot of it: the element alone, on the colour behind it.
+            framed_png = _pad_image(page_png, _sniff_image_mime(page_png) or "image/png", LOCATE_PADDING, frame_fill, detect=False)
+            if framed_png:
+                page_png = framed_png
+                rect = {"x": rect["x"] - LOCATE_PADDING, "y": rect["y"] - LOCATE_PADDING,
+                        "width": rect["width"] + 2 * LOCATE_PADDING, "height": rect["height"] + 2 * LOCATE_PADDING}
+            else:
+                frame_fill = ""
     else:
         geo = _page_geometry(page)
         if args.get("full_page"):
@@ -6353,16 +7274,30 @@ def _do_compare(session: _Session, page: Any, args: dict[str, Any], reference: _
         page_label += " · " + (target if len(target) <= 40 else target[:38].rstrip() + "…")
     geometry = {
         "mode": mode, "region": rect, "layout_width": layout_width, "ref_crop": crop, "ref_scale": scale,
-        "auto_region": not chosen, "target_kind": "region" if not _has_element_target(args) else "element",
+        # A located component's screenshot is that element, never a region of a whole-page design.
+        "auto_region": not chosen and not (located and located.get("selector")), "target_kind": "region" if not _has_element_target(args) else "element",
         "text_target": mode == "element" and (bool(geo.get("textOnly")) or bool(reference.layer and reference.layer.get("type") == "TEXT")),
         "snap": (chosen or reference.cut) and (mode == "page" or (mode == "view" and rect["y"] == 0)),
+        "content": _compare_content_arg(args),
+        "padded_ref": bool(frame_fill),
     }
-    by_element = args.get("elements") not in (None, False, "", 0, "0", "false", "no")
+    # Element by element is the default: each element is measured on its own (place, size, colours,
+    # type), so sample data that differs between the page and the design does not drown the layout.
+    # elements: false asks for the plain pixel comparison of the two images.
+    wants_elements = args.get("elements")
+    by_element = wants_elements not in (False, 0, "0", "false", "no") if wants_elements not in (None, "") else True
+    found: dict[str, Any] = {}
+    items: list[dict[str, Any]] = []
+    no_elements = ""
     if by_element:
         found = _page_elements(page, args, rect)
         items = found.get("elements") or []
         if not items:
-            raise BrowserError(f"Nothing to compare element by element in the {target}: no visible text, images, controls or boxes.")
+            no_elements = f"Nothing to compare element by element in the {target}: no visible text, images, controls or boxes."
+            if wants_elements not in (None, ""):
+                raise BrowserError(no_elements)
+            by_element = False
+    if by_element:
         data, stats = _render_elements(reference, page_png, page_label, _relative_to(items, rect), **geometry)
     else:
         data, stats = _render_comparison(reference, page_png, page_label, name_areas=lambda st: _name_areas(page, reference, rect, st),
@@ -6377,9 +7312,20 @@ def _do_compare(session: _Session, page: Any, args: dict[str, Any], reference: _
         "region": rect,
         **live,
         "accuracy": design_accuracy(),
+        "content": geometry["content"],
     }
     if by_element:
-        out.update(_elements_result(reference, target, rect, stats, total=int(found.get("total") or len(items))))
+        out.update(_elements_result(reference, target, rect, stats, total=int(found.get("total") or len(items)),
+                                    content=geometry["content"]))
+        differing = [e for e in stats.get("elements") or [] if e.get("status") in _BAD_STATUSES]
+        if len(differing) >= SECTIONS_MIN_DIFFERENCES:
+            sections = _sections_of(page, differing)
+            if len(sections) >= 2 or (sections and mode != "element" and sections[0]["differ"] < len(differing)):
+                out["sections"] = sections
+                worst = sections[0]
+                out["summary"] = (str(out.get("summary") or "") + f" What differs falls in {len(sections)} section"
+                                  f"{'s' if len(sections) != 1 else ''}; the most is {worst['element'][:60]} ({worst['differ']}): "
+                                  f"work on one section at a time with compare {{selector: {worst['selector']!r}}}, then the next.")
     else:
         for key in ("similarity", "structure", "diff_pct", "verdict", "page_size", "reference_size", "reference_scale", "offset",
                     "size_diff", "shifts", "differences", "threshold"):
@@ -6397,8 +7343,28 @@ def _do_compare(session: _Session, page: Any, args: dict[str, Any], reference: _
     notes = [note for note in (stats.get("notes") or []) if note and note != stats.get("size_diff")]
     if by_element:
         notes = [note for note in notes if not note.startswith(("Area ", "Areas ", "No one area"))]
+    elif no_elements:
+        notes.insert(0, no_elements + " The two images were compared pixel by pixel instead.")
     if reference.note:
         notes.insert(0, reference.note)
+    if located:
+        out["located"] = {k: v for k, v in located.items() if k not in ("similar_selectors",)}
+        if located.get("selector"):
+            text = (f"The design shows one part of a page: it was found at {located.get('element') or located['selector']} "
+                    f"(selector {located['selector']!r}" + (f", match {located['score']}" if located.get("score") is not None else "") + ")"
+                    + (" as in the last compare" if located.get("remembered") else "") + ", and compared with that element alone.")
+            if located.get("resized"):
+                rz = located["resized"]
+                text += (f" It is a fluid element, as wide as in the design at a {rz['to']} px wide page, so the browser was resized "
+                         f"from {rz['from']} to {rz['to']} px wide (the design was made at about that width); resize it back when done.")
+            if located.get("similar"):
+                text += (f" The page has {located['similar']} elements like it (a list or grid of the same component): fixing the "
+                         "component's code fixes them all, so compare this one.")
+            text += " If it picked the wrong element, pass its selector (or locate: false for the whole view)."
+            notes.insert(0, text)
+        elif located.get("failed"):
+            notes.insert(0, f"The design looks like one part of a page, but it could not be found on this page: {located['failed']}. "
+                            "It was compared with the view instead; pass the matching element's selector to compare it with that.")
     if notes:
         out["notes"] = " ".join(notes)
     if out.get("differences"):
@@ -6438,7 +7404,8 @@ def _relative_to(items: list[dict[str, Any]], rect: dict[str, int]) -> list[dict
     return out
 
 
-def _elements_result(reference: _Reference, target: str, rect: dict[str, int], stats: dict[str, Any], *, total: int) -> dict[str, Any]:
+def _elements_result(reference: _Reference, target: str, rect: dict[str, int], stats: dict[str, Any], *, total: int,
+                     content: str = DEFAULT_COMPARE_CONTENT) -> dict[str, Any]:
     counts = stats.get("counts") or {}
     region = stats.get("reference_region") or {}
     drawn_w = float((stats.get("reference_size") or [0])[0] or 0)
@@ -6465,6 +7432,10 @@ def _elements_result(reference: _Reference, target: str, rect: dict[str, int], s
         parts.append(f"{counts['different']} differ")
     if counts.get("missing"):
         parts.append(f"{counts['missing']} {'is' if counts['missing'] == 1 else 'are'} not in the design")
+    other = int(counts.get("content") or 0)
+    if other and content == "layout":
+        parts.append(f"{other} show{'s' if other == 1 else ''} other content than the design (words, numbers or images: sample data), "
+                     "which layout mode does not count")
     beyond = int(stats.get("beyond") or 0)
     summary = f"Compared {compared} element{'s' if compared != 1 else ''} with the design"
     if total > compared + beyond:
@@ -6478,17 +7449,35 @@ def _elements_result(reference: _Reference, target: str, rect: dict[str, int], s
     background = stats.get("background")
     if background:
         summary += " " + background["text"][0].upper() + background["text"][1:] + "."
+    labels = [g for g in stats.get("labels") or [] if g.get("checked") or g.get("not_in_design")]
+    for group in labels[:3]:
+        quote = lambda words: ", ".join("\u201c" + w + "\u201d" for w in words[:8])
+        bits = []
+        if group.get("checked"):
+            bits.append(f"{quote(group['checked'])} compared with the design's label of the same words, wherever it is")
+        if group.get("not_in_design"):
+            bits.append(f"{quote(group['not_in_design'])} not in the design, so {'its' if len(group['not_in_design']) == 1 else 'their'} colours could not be checked")
+        if group.get("design_only"):
+            bits.append(f"{group['design_only']} of the design's are none of the page's words")
+        summary += f" {group['label']} labels (statuses): " + "; ".join(bits) + "."
     if len(stats.get("elements") or []) > len(listed):
         summary += f" The first {len(listed)} are listed."
     out: dict[str, Any] = {
         "compare": "elements", "verdict": stats.get("verdict"), "similarity": stats.get("similarity"), "structure": stats.get("structure"),
         "elements_compared": compared, "summary": summary, "elements": listed,
     }
+    if content == "layout":
+        out["content"] = ("layout: each element's place, size, colours and type are compared; what it shows (its words, numbers, "
+                          "images) is not. Pass content: \"exact\" to compare the content too.")
+    else:
+        out["content"] = "exact: other words, images and pixels count as differences too."
     for key in ("page_size", "reference_size", "reference_scale", "shifts"):
         if stats.get(key) not in (None, "", [], 0):
             out[key] = stats[key]
     if lacking:
         out["missing_on_page"] = lacking
+    if labels:
+        out["labels"] = labels
     if background:
         out["background"] = {"page": background["page"], "design": background["design"], "delta_e": background["delta_e"]}
     agent = _agent()
@@ -6609,6 +7598,75 @@ def _do_image_crop(session: _Session, reference: _Reference, args: dict[str, Any
     if abs(k - 1) > 0.01:
         out["reference_scale"] = round(k, 3)
     return out
+
+
+def _frame_size(session: _Session, page: Any) -> dict[str, int] | None:
+    """The CSS size of the page as its live frames show it, when a stream is on: the picture's true
+    aspect ratio, whatever viewport the UI last heard of (a fit resize under way, an attached Chrome)."""
+    stream = getattr(session, "stream", None)
+    if stream is None or stream.closed or page is None or stream.page is not page or not stream.page_size:
+        return None
+    return {"width": stream.page_size[0], "height": stream.page_size[1]}
+
+
+_INSPECT_MAP_JS = r"""
+(o) => {
+  // Every visible element in view, parents first, in viewport coordinates: the UI hit-tests these
+  // itself as the pointer moves, so the hover outline follows the mouse without a round trip.
+  const SKIP = new Set(["script", "style", "noscript", "template", "meta", "link", "br", "head", "title", "base", "html"]);
+  const vw = window.innerWidth, vh = window.innerHeight, out = [];
+  const label = (el) => {
+    let name = el.tagName.toLowerCase();
+    if (el.id) name += "#" + el.id;
+    const cls = (typeof el.className === "string" ? el.className : "").trim().split(/\s+/).filter(Boolean).slice(0, 2);
+    if (cls.length) name += "." + cls.join(".");
+    return name;
+  };
+  const text = (el) => (el.getAttribute("aria-label") || el.value || el.getAttribute("placeholder") || el.getAttribute("alt") || el.getAttribute("title") ||
+    Array.from(el.childNodes).filter((n) => n.nodeType === 3).map((n) => n.nodeValue).join(" ") || "").replace(/\s+/g, " ").trim().slice(0, 60);
+  const walk = (root) => {
+    for (const el of root.children) {
+      if (out.length >= o.max) return;
+      const tag = el.tagName.toLowerCase();
+      if (SKIP.has(tag)) continue;
+      const s = getComputedStyle(el);
+      if (s.display === "none") continue;
+      if (s.visibility !== "hidden" && Number(s.opacity) > 0.02) {
+        const r = el.getBoundingClientRect();
+        if (r.width >= 2 && r.height >= 2 && r.right > 0 && r.bottom > 0 && r.left < vw && r.top < vh) {
+          out.push([Math.round(r.left * 10) / 10, Math.round(r.top * 10) / 10, Math.round(r.width * 10) / 10, Math.round(r.height * 10) / 10, label(el), text(el)]);
+        }
+      }
+      if (tag === "svg") continue;
+      if (el.shadowRoot) walk(el.shadowRoot);
+      walk(el);
+    }
+  };
+  if (document.body) walk(document.body);
+  return { vw: vw, vh: vh, scroll: [scrollX, scrollY], elements: out };
+}
+"""
+INSPECT_MAP_MAX = 2500
+
+
+def inspect_map(state_path: str) -> dict[str, Any]:
+    """The visible elements of the active tab, for the Browser tab's select tool to hit-test locally."""
+    session = _session(state_path)
+    if session.context is None or not session.tabs:
+        return {"elements": []}
+
+    def _run() -> dict[str, Any]:
+        page = session.tabs.get(session.active)
+        if page is None or page.is_closed():
+            return {"elements": []}
+        try:
+            data = page.evaluate(_INSPECT_MAP_JS, {"max": INSPECT_MAP_MAX}) or {}
+        except Exception:
+            return {"elements": []}
+        data["seq"] = session.seq
+        return data
+
+    return session.worker.call(_run, priority=True, timeout=8)
 
 
 def _idle_state(session: _Session) -> dict[str, Any]:
@@ -7038,11 +8096,12 @@ def action_label(args: dict[str, Any] | None) -> str:
 
 _RESULT_KEYS = ("status", "warning", "clicked", "typed_into", "submitted", "pressed", "opened_tab", "closed_tab", "waited_s",
                 "scroll_y", "scroll_max_y", "snapshot", "elements", "result", "truncated", "dialog", "hovered", "dragged",
-                "uploaded", "selected", "checked", "zoom", "note", "changed")
+                "uploaded", "selected", "checked", "zoom", "note", "changed", "hard", "error_page")
 _SHOT_RESULT_KEYS = ("region", "target", "source", "mode", "reference", "similarity", "structure", "diff_pct", "verdict", "page_size",
                      "reference_size", "reference_scale", "reference_region", "reference_image_size", "offset", "size_diff",
                      "shifts", "differences", "notes", "coords", "reference_tab", "opened_tab", "tab_id", "threshold", "marks",
-                     "compare", "summary", "elements_compared", "elements", "missing_on_page", "background", "progress", "accuracy")
+                     "compare", "summary", "elements_compared", "elements", "missing_on_page", "background", "progress", "accuracy",
+                     "content", "located", "sections", "labels")
 
 
 FAIL_STREAK_SHOT = 2

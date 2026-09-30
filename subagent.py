@@ -19,7 +19,7 @@ SEARCH_TOOLS = frozenset({
     "list_repo_dir", "web_search", "memory_search", "git_log", "lsp_references",
 })
 EDIT_TOOLS = frozenset({"write_file", "edit_file", "multi_edit"})
-SCOPED_WRITER_EXCLUDED_TOOLS = frozenset({"run_command", "kill_command", "command_status"})
+SCOPED_WRITER_EXCLUDED_TOOLS = frozenset({"run_command", "kill_command", "restart_command", "command_status"})
 
 _VERBS: dict[str, tuple[str, str]] = {
     "read_repo_file": ("Reading", "Read"),
