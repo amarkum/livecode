@@ -7743,6 +7743,27 @@ function _livecodeBindUserRevertOnce() {
   }, true);
 }
 
+function _livecodeRowGap(prev, row) {
+  return Math.max(parseFloat(getComputedStyle(prev).marginBottom) || 0, parseFloat(getComputedStyle(row).marginTop) || 0);
+}
+
+// Where each user row would sit if nothing were pinned. A pinned row's
+// offsetTop is its stuck position, so the previous row can't be trusted
+// when it is itself a user row: those positions are carried row by row.
+function _livecodeUserRowNaturalTops(rows) {
+  const natural = new Map();
+  return rows.map(function(row) {
+    const prev = row.previousElementSibling;
+    let top = 0;
+    if (prev) {
+      const prevTop = natural.has(prev) ? natural.get(prev) : prev.offsetTop;
+      top = prevTop + prev.offsetHeight + _livecodeRowGap(prev, row);
+    }
+    natural.set(row, top);
+    return top;
+  });
+}
+
 function _livecodeSyncStickyUserRows(out) {
   out = out || getLiveCodeChatOutput();
   if (!out) return;
@@ -7751,17 +7772,27 @@ function _livecodeSyncStickyUserRows(out) {
   _livecodeDecorateUserRows(rows);
   _livecodeBindUserRevertOnce();
   const top = out.scrollTop;
-  const naturalTops = rows.map(function(row) {
-    const prev = row.previousElementSibling;
-    if (!prev) return 0;
-    const gap = Math.max(parseFloat(getComputedStyle(prev).marginBottom) || 0, parseFloat(getComputedStyle(row).marginTop) || 0);
-    return prev.offsetTop + prev.offsetHeight + gap;
-  });
+  const naturalTops = _livecodeUserRowNaturalTops(rows);
   let current = 0;
   naturalTops.forEach(function(natural, i) { if (natural <= top + 1) current = i; });
   rows.forEach(function(row, i) {
     row.classList.toggle("is-unpinned", i !== current);
     row.classList.toggle("is-stuck", i === current && naturalTops[i] < top - 0.5);
+  });
+  // The next user message pushes the pinned one up and out rather than
+  // sliding over it, the way section headers hand over in a list.
+  const pinned = rows[current];
+  const next = rows[current + 1];
+  let push = 0;
+  if (pinned.classList.contains("is-stuck") && next) {
+    const pinTop = parseFloat(getComputedStyle(pinned).top) || 0;
+    const nextOnScreen = naturalTops[current + 1] - top;
+    push = Math.max(0, pinTop + pinned.offsetHeight + _livecodeRowGap(pinned, next) - nextOnScreen);
+  }
+  rows.forEach(function(row) {
+    const value = row === pinned && push > 0 ? "translateY(" + (-push).toFixed(1) + "px)" : "";
+    if (row.style.transform !== value) row.style.transform = value;
+    row.classList.toggle("is-pushed", row === pinned && push > 0);
   });
 }
 
@@ -11142,6 +11173,8 @@ function _livecodeRenderQuestionsBar() {
 
   bar.hidden = false;
   bar.classList.toggle("is-collapsed", !!state.collapsed);
+  bar.classList.toggle("is-settled", !!state.shown);
+  state.shown = true;
   bar.innerHTML =
     '<div class="livecode-questions-header" data-questions-action="' + (state.collapsed ? "expand" : "") + '">' +
       _LIVECODE_QUESTION_ICON_SVG +
@@ -17191,6 +17224,19 @@ document.addEventListener("click", function(e) {
   _livecodeOpenImageLightbox(btn.getAttribute("data-browser-shot"), btn.getAttribute("data-shot-title") || "Screenshot", btn.getAttribute("data-shot-size") || "");
 });
 
+// Images sent with a message open in the image viewer. Delegated from the
+// document so restored chat sessions work too; captured and stopped so the
+// click doesn't also expand or collapse a long message.
+document.addEventListener("click", function(e) {
+  const wrap = e.target && e.target.closest ? e.target.closest("#livecode-chat-messages .livecode-image-thumb-wrap") : null;
+  const img = wrap && wrap.querySelector("img.livecode-image-thumb");
+  if (!img || !img.getAttribute("src")) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const size = img.naturalWidth ? img.naturalWidth + " × " + img.naturalHeight : "";
+  _livecodeOpenImageLightbox(img.getAttribute("src"), img.getAttribute("alt") || "Image", size);
+}, true);
+
 document.addEventListener("keydown", function(e) {
   if (e.key !== "Escape") return;
   const modal = document.getElementById("livecodeImageViewerModal");
@@ -17717,7 +17763,7 @@ function _livecodeSettingsAgentHtml() {
   html += _livecodeSettingsCompareContentRowHtml();
   html += _livecodeSettingsDesignGateRowHtml();
   html += _livecodeBrowserSwitchRowHtml("ui_verify", "Check UI changes in the browser",
-    "After changing components, pages or styles, the agent opens the page in the Browser tab and looks at the change before it finishes.");
+    "After changing components, pages or styles, the agent asks whether to check the change in the Browser tab, and on Yes looks at just that element. It checks without asking when your request asks to see it.");
   html += _livecodeSettingsBrowserViewRowsHtml();
   html += _livecodeSettingsAutomationRowHtml();
   html += _livecodeSettingsChromeRowHtml();

@@ -239,6 +239,18 @@ _BROWSER_INTENT_RE = re.compile(
 def user_requests_browser(question: str) -> bool:
     return bool(_BROWSER_INTENT_RE.search(question or "")) or browse_request(question) is not None
 
+_UI_CHECK_RE = re.compile(
+    r"\b(?:verify|check|test|confirm|look\s+at|see|show\s+me)\b[^.;!?]{0,40}\b(?:visually|in\s+the\s+(?:built[- ]in\s+)?browser|"
+    r"on\s+(?:the\s+)?(?:page|screen)|how\s+it\s+looks|the\s+(?:ui|page|screen))\b",
+    re.IGNORECASE,
+)
+
+
+def user_requests_ui_check(question: str) -> bool:
+    """The request itself asks to see the result in the browser, so checking a UI change needs no question first."""
+    return user_requests_browser(question) or bool(_UI_CHECK_RE.search(question or ""))
+
+
 # A site the user names: a URL, a local dev server, or a bare domain (github.com, my-app.vercel.app).
 _SITE_PATTERN = (
     r"(?P<site>https?://[^\s<>\"']+|(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d{2,5})?(?:/[^\s<>\"']*)?|"

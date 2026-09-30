@@ -75,3 +75,12 @@ def test_not_a_site_visit(text):
 ])
 def test_ui_files(path, ui):
     assert is_ui_file(path) is ui
+
+
+def test_requests_that_already_ask_to_see_the_ui():
+    from livecode.routing import user_requests_ui_check
+    assert user_requests_ui_check("make the button blue and check it in the browser")
+    assert user_requests_ui_check("fix the card padding, then verify how it looks")
+    assert user_requests_ui_check("update the header and take a screenshot")
+    assert not user_requests_ui_check("make the button blue")
+    assert not user_requests_ui_check("rename the Card component to Tile")

@@ -67,7 +67,10 @@ from livecode.prompts import (
     DESIGN_RECHECK_TEMPLATE,
     PERMISSION_GATE_MAX_FIRES,
     PERMISSION_GATE_TEMPLATE,
+    UI_VERIFY_ASK_TEMPLATE,
+    UI_VERIFY_DECLINED_NOTE,
     UI_VERIFY_GATE_MAX_FIRES,
+    UI_VERIFY_QUESTION,
     UI_VERIFY_TEMPLATE,
     TODO_GATE_TEMPLATE,
     TODO_NUDGE_AFTER,
@@ -106,6 +109,7 @@ from livecode.routing import (
     asks_permission,
     authorized_final_actions,
     browse_request,
+    user_requests_ui_check,
     is_ui_file,
     user_requests_web_lookup,
     wants_structured_json,
@@ -775,14 +779,21 @@ _UI_LOOK_ACTIONS = frozenset({"navigate", "reload", "screenshot", "compare", "sn
 
 
 class _UiVerify:
-    """UI code changed in this turn has to be looked at in the browser after its last change."""
+    """UI code changed in this turn: ask whether to look at it in the browser, and hold the agent to the answer.
 
-    def __init__(self) -> None:
+    When the request already asked to see it in the browser (or the turn is a design compare), there is no
+    question: the change has to be looked at after its last edit. Otherwise the agent asks first, and only a
+    Yes sends it to the browser; No, a skip or a free-text answer ends the reminders for this turn.
+    """
+
+    def __init__(self, requested: bool = False) -> None:
         self.files: list[str] = []
         self.edited_at: int | None = None
         self.looked_at: int | None = None
         self.blocked = False
         self.fires = 0
+        self.requested = requested
+        self.consent: bool | None = None
 
     def observe_edit(self, path: str, iteration: int) -> None:
         if path and is_ui_file(path):
@@ -805,14 +816,42 @@ class _UiVerify:
         if any(a in _UI_LOOK_ACTIONS for a in actions):
             self.looked_at = iteration
 
+    @staticmethod
+    def _is_verify_question(prompt: Any) -> bool:
+        text = str(prompt or "").lower()
+        return text == UI_VERIFY_QUESTION.lower() or ("verify" in text and ("browser" in text or " ui" in text))
+
+    def observe_question(self, args: Any, result: Any) -> str:
+        """Read the answer to "verify in the browser?". Returns a note for the model when the user said no."""
+        if not isinstance(result, dict):
+            return ""
+        questions = (args or {}).get("questions") if isinstance(args, dict) else None
+        prompts = [str((q or {}).get("prompt") or "") for q in (questions or []) if isinstance(q, dict)]
+        if not any(self._is_verify_question(p) for p in prompts):
+            return ""
+        if result.get("skipped"):
+            self.consent = False
+        else:
+            answer = next((a for a in (result.get("answers") or [])
+                           if isinstance(a, dict) and self._is_verify_question(a.get("question"))), None)
+            picked = [str(x).strip().lower() for x in ((answer or {}).get("selected") or [])]
+            self.consent = bool(picked) and picked[0].startswith("yes") and not (answer or {}).get("other")
+        return "" if self.consent else UI_VERIFY_DECLINED_NOTE
+
     def reminder(self) -> str:
         if not self.files or self.blocked or self.fires >= UI_VERIFY_GATE_MAX_FIRES or self.edited_at is None:
+            return ""
+        if self.consent is False:
             return ""
         if self.looked_at is not None and self.looked_at > self.edited_at:
             return ""
         self.fires += 1
         shown = ", ".join(self.files[:4]) + (f" and {len(self.files) - 4} more" if len(self.files) > 4 else "")
-        return UI_VERIFY_TEMPLATE.format(files=shown)
+        if self.consent:
+            return UI_VERIFY_TEMPLATE.format(files=shown, why=", and the user asked you to")
+        if self.requested:
+            return UI_VERIFY_TEMPLATE.format(files=shown, why="")
+        return UI_VERIFY_ASK_TEMPLATE.format(files=shown)
 
 
 def _is_child_directory(parent: str, child: str) -> bool:
@@ -2329,7 +2368,7 @@ def run_livecode_turn(
     todo_nudger = _TodoNudgeRun()
     todo_gate_fires = 0
     design_rounds = _DesignRounds()
-    ui_verify = _UiVerify()
+    ui_verify = _UiVerify()  # requested is set once the turn's browser intent is known
     permission_gate_fires = 0
     last_diag_sig_by_file: dict[str, str] = {}
     diagnostics_blocked_completion = False
@@ -2437,6 +2476,8 @@ def run_livecode_turn(
                     "{action: \"navigate\", url} (it appears in their Browser tab, which opens by itself)." + then +
                     " Do not fetch it as text with web_fetch instead, and do not ask whether to open the browser."
                 )
+    # A request that already asks to see it in the browser (or a design compare) needs no question first.
+    ui_verify.requested = bool(design_loop_for_turn) or user_requests_ui_check(question)
     messages = _build_base_messages(summary)
     tools_result = get_livecode_tools(
         enable_mcp=enable_mcp_for_turn,
@@ -3124,6 +3165,10 @@ def run_livecode_turn(
                     if tool_name == "browser":
                         design_rounds.observe(result, iteration)
                         ui_verify.observe_browser(tool_args, result, iteration)
+                    if tool_name == "ask_question":
+                        declined = ui_verify.observe_question(tool_args, result)
+                        if declined and isinstance(compacted, dict):
+                            compacted = {**compacted, "note": declined}
                     if tool_name == "browser" and result.get("shot_id"):
                         if model_reads_images:
                             browser_shots.append(result)

@@ -2,6 +2,35 @@
 
 Notes for the agent harness: what was added, and which files changed. Newest first.
 
+## Chat fixes and asking before a UI check, September 2026
+
+Ported from the same fixes in IntelIDE.
+
+### Agent
+
+- **The agent asks before checking a UI change in the browser.** After a UI edit the reminder has it ask in the questions card, "Want me to verify the UI change in the browser?" (Yes / No). It opens the browser only on Yes, or without asking when the request already wants it seen (`user_requests_ui_check`: "check it in the browser", "take a screenshot", a URL, a design compare). On Yes it looks at a crop of just the changed element, not a full-page screenshot. No, a skip or a typed answer ends the reminders for the turn, and the answer's tool result tells the model to say the change was not checked. This replaces "UI changes are always checked in the browser" below.
+
+### Chat UI
+
+- **A pinned user message is pushed out by the next one** instead of the next one sliding over it. Natural positions are carried row by row, because a pinned row's `offsetTop` is its stuck position.
+- **Questions card:** 10px of bottom padding in the scroll area, so a focused "Other..." row keeps its border; questions fade in only when a question set first appears, not on every click.
+- **An empty tail below the last message** (10% of the chat height) whenever the chat has a message, never on the welcome screen. It no longer shrinks to nothing in a long chat (`flex: 0 0 auto`).
+- **Images sent with a message open in the image viewer** (zoom cursor; works in restored chats; the click does not expand or collapse a long message).
+- **Expanded command output has one scroller**, capped at `min(420px, 60vh)`. The outer body scrolled too, around an inner scroller that blocks scroll chaining, so the last lines of long output were out of reach.
+- **The empty editor screen** no longer lists Agent / Explorer / Terminal.
+
+### Files changed
+
+| File | Change |
+| --- | --- |
+| `harness.py` | `_UiVerify` asks first, reads the answer (`observe_question`), `requested` from the request |
+| `prompts.py` | `UI_VERIFY_QUESTION`, `UI_VERIFY_ASK_TEMPLATE`, `UI_VERIFY_DECLINED_NOTE`, crop in `UI_VERIFY_TEMPLATE`, system prompt Verifying paragraph |
+| `routing.py` | `user_requests_ui_check` |
+| `static/js/livecode.js` | Pinned row push-out and `_livecodeUserRowNaturalTops`, questions fade once, sent-image click handler |
+| `static/css/livecode.css` | Chat tail, questions padding and fade, thumbnail cursor, single command-output scroller, empty editor steps removed |
+| `templates/sections/ide-editor.html` | Empty editor steps list removed |
+| `tests/` | Ask, Yes and No turns; `_UiVerify` answers; `user_requests_ui_check`; prompt templates |
+
 ## Design compare, browser behaviour and asking, September 2026
 
 ### Design compare
