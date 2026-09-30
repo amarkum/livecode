@@ -968,7 +968,11 @@ BROWSER_TOOL = {
             "and each one that differs says what to change: where it sits (px, against its parent), its size, background "
             "and text colour, font size, letter spacing, line height or wrapping, corner radius, shadow, or that it is not "
             "in the design; missing_on_page lists parts of the design the page lacks, and progress what changed since the "
-            "last compare. What an element shows is judged by content: layout (the default) ignores other words, numbers "
+            "last compare. A screenshot of one part of a page (a card, an input box, a form) is found on the page by itself "
+            "(located: the element, its selector, similar copies in a list or grid) and compared with that element alone; "
+            "a whole-page compare with many differences groups them into sections (a card, a form, a micro-frontend's root; "
+            "copies of one component as one) to work through one at a time with compare {selector}. "
+            "What an element shows is judged by content: layout (the default) ignores other words, numbers "
             "and images (a design's sample data never matches a running app's: a card's name, price or photo) and counts "
             "them separately; content: \"exact\" holds other text, images and pixels against the page too. Fix findings top "
             "to bottom (a size change moves what follows it). The board numbers them on the design and the page, with a "
@@ -1049,6 +1053,7 @@ BROWSER_TOOL = {
                 "script": {"type": "string", "description": "javascript_exec: the code to run in the page"},
                 "full_page": {"type": "boolean", "description": "screenshot/compare: the whole page instead of the view; crop/compare region: x and y are page coordinates"},
                 "elements": {"type": "boolean", "description": "compare: element by element (the default), each element cropped and measured against its place in the design; false compares the two images pixel by pixel instead"},
+                "locate": {"type": "boolean", "description": "compare: find the element a screenshot of one part of the page shows (a card, a form, an input box) and compare with it (automatic when the design is narrower than the page; true forces it, false compares with the view)"},
                 "content": {"type": "string", "enum": ["layout", "exact"], "description": "compare: layout (the default, or the user's setting) measures each element's place, size, colours and type and ignores what it shows (other words, numbers or images: a design's sample data); exact counts other text, images and pixels as differences too"},
                 "seconds": {"type": "number", "description": "wait: how long, at most 30"},
                 "tab_id": {"type": "string", "description": "the tab to act on, from tabs (default: the current tab); switch_tab/close_tab: the tab"},

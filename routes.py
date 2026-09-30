@@ -1362,7 +1362,7 @@ def register_livecode_routes(app, socketio, rt):
     @app.route("/livecode/browser/settings", methods=["GET", "POST"])
     def livecode_browser_settings():
         # GET/POST reply: {success, design_accuracy, default_design_accuracy, min_design_accuracy, match_threshold,
-        # default_match_threshold, reduce_automation_signals, design_gate, compare_content, agent_tabs, view_quality,
+        # default_match_threshold, reduce_automation_signals, design_gate, compare_content, ui_verify, agent_tabs, view_quality,
         # default_viewport, allowed}. POST takes any of those setting keys (match_threshold from older clients is saved as the
         # design accuracy it stands for); every value is checked before any is saved.
         if request.method == "GET":

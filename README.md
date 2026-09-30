@@ -23,7 +23,8 @@
 - **Built-in browser.** The agent can open pages, click, type, take screenshots and read the console and network. Subagents get their own tabs.
   - You can take control and use the page directly: typing, drag, scroll, paste and copy all work.
   - **Design compare** checks a page against a screenshot, a Figma frame or a link, element by element, and keeps fixing until it matches the accuracy you set. It compares layout (where each element sits, its size, colours and type), not a design's sample names, numbers or pictures; switch it to Exact in Settings when you want the content held against the page too.
-  - Saying "go to github.com" or "open localhost:3000" opens the page in the Browser tab by itself, and when a change does not show after a reload the agent hard-reloads, then restarts the dev server.
+    Give it a screenshot of one component, such as a card or an input box, and it finds that element on the page by itself, even when the browser is wider than the design was. It then compares the two one to one and names the fix, for example "padding about 20px in the design (14px here)". A whole-page design is split into sections, and the agent fixes one section at a time.
+  - Saying "go to github.com and search for …" or "open localhost:3000" opens the page in the Browser tab by itself and does the steps there. After changing UI code the agent always looks at the change in the browser before it finishes. When a change does not show after a reload, it hard-reloads, then restarts the dev server.
 - **Editor and terminal.** A Monaco editor with Python and TypeScript intelligence, an integrated terminal, and background commands for dev servers and watchers.
 - **Review and undo.** Pending changes show as diffs, and you can roll back to a checkpoint.
 - **Project context.** The agent reads project rules (`AGENTS.md`, `CLAUDE.md`, `.claude/rules/*.md`), keeps a searchable project memory, and connects to MCP servers.
@@ -141,3 +142,12 @@ These are included in `requirements.txt`, and LiveCode works without them:
 ## Contributing
 
 Issues and pull requests are welcome. Please keep changes focused, match the surrounding style, and describe how you tested them.
+
+To run the tests:
+
+```bash
+pip install pytest
+python -m pytest tests
+```
+
+The browser tests need Chromium; they are skipped when it is not installed. The agent-turn tests drive the real harness with a scripted model, so they need no API key.

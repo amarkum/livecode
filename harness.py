@@ -65,6 +65,8 @@ from livecode.prompts import (
     DESIGN_LOOP_FIGMA_NOTE,
     DESIGN_LOOP_PROMPT,
     DESIGN_RECHECK_TEMPLATE,
+    UI_VERIFY_GATE_MAX_FIRES,
+    UI_VERIFY_TEMPLATE,
     TODO_GATE_TEMPLATE,
     TODO_NUDGE_AFTER,
     TODO_NUDGE_COOLDOWN,
@@ -99,7 +101,8 @@ from livecode.routing import (
     user_requests_browser,
     user_requests_design_work,
     user_requests_mcp_or_tool_use,
-    user_requests_site_visit,
+    browse_request,
+    is_ui_file,
     user_requests_web_lookup,
     wants_structured_json,
 )
@@ -149,6 +152,7 @@ from livecode.browser import (
     figma_configured as browser_figma_configured,
     agent_tabs_enabled as browser_agent_tabs_enabled,
     design_gate_enabled as browser_design_gate_enabled,
+    ui_verify_enabled as browser_ui_verify_enabled,
     playwright_installed as browser_playwright_installed,
     release_agent as browser_release_agent,
     shot_data_url as browser_shot_data_url,
@@ -759,6 +763,51 @@ class _DesignRounds:
             return ""
         self.fires += 1
         return text
+
+_UI_LOOK_ACTIONS = frozenset({"navigate", "reload", "screenshot", "compare", "snapshot", "crop", "inspect", "back", "forward",
+                               "new_tab", "switch_tab"})
+
+
+class _UiVerify:
+    """UI code changed in this turn has to be looked at in the browser after its last change."""
+
+    def __init__(self) -> None:
+        self.files: list[str] = []
+        self.edited_at: int | None = None
+        self.looked_at: int | None = None
+        self.blocked = False
+        self.fires = 0
+
+    def observe_edit(self, path: str, iteration: int) -> None:
+        if path and is_ui_file(path):
+            if path not in self.files:
+                self.files.append(path)
+            self.edited_at = iteration
+
+    def observe_browser(self, args: Any, result: Any, iteration: int) -> None:
+        if not isinstance(result, dict):
+            return
+        if result.get("unavailable"):
+            self.blocked = True
+            return
+        if result.get("error"):
+            return
+        args = args if isinstance(args, dict) else {}
+        actions = [str(args.get("action") or "").lower()]
+        if actions[0] == "batch":
+            actions = [str((a or {}).get("action") or "").lower() for a in (args.get("actions") or []) if isinstance(a, dict)]
+        if any(a in _UI_LOOK_ACTIONS for a in actions):
+            self.looked_at = iteration
+
+    def reminder(self) -> str:
+        if not self.files or self.blocked or self.fires >= UI_VERIFY_GATE_MAX_FIRES or self.edited_at is None:
+            return ""
+        if self.looked_at is not None and self.looked_at > self.edited_at:
+            return ""
+        self.fires += 1
+        shown = ", ".join(self.files[:4]) + (f" and {len(self.files) - 4} more" if len(self.files) > 4 else "")
+        return UI_VERIFY_TEMPLATE.format(files=shown)
+
 
 def _is_child_directory(parent: str, child: str) -> bool:
     parent_norm = (parent or "").strip().strip("/")
@@ -2266,6 +2315,7 @@ def run_livecode_turn(
     todo_nudger = _TodoNudgeRun()
     todo_gate_fires = 0
     design_rounds = _DesignRounds()
+    ui_verify = _UiVerify()
     last_diag_sig_by_file: dict[str, str] = {}
     diagnostics_blocked_completion = False
     interjection_extensions = 0
@@ -2336,17 +2386,29 @@ def run_livecode_turn(
             browser_tabs_note = browser_turn_context(state_path, session_id)
         except Exception:
             browser_tabs_note = ""
-        # "Go to github.com", "open localhost:3000": the page opens in the user's Browser tab, which
-        # the UI brings forward as soon as the browser navigates. Without this the model tends to
-        # fetch the page as text, or to open the browser only when told to in so many words.
-        site_to_open = user_requests_site_visit(question)
-        if site_to_open:
-            browser_open_note = (
-                f"The user asked you to open {site_to_open}: open it in the built-in browser now, with browser "
-                "{action: \"navigate\", url} (it appears in their Browser tab, which opens by itself), then read the "
-                "page with snapshot or a screenshot. Do not fetch it as text with web_fetch instead, and do not ask "
-                "whether to open the browser."
-            )
+        # "Go to github.com and …", "open localhost:3000", "check it in the browser": the page opens in the
+        # user's Browser tab, which the UI brings forward as soon as the browser navigates. Without this the
+        # model tends to fetch the page as text, or to open the browser only when told to in so many words.
+        wanted = browse_request(question)
+        if wanted:
+            steps = str(wanted.get("steps") or "")
+            then = (f" Then do what they asked there, in the browser, step by step: {steps} (snapshot to find the "
+                    "controls, then click and type; read the result off the page, and say what you found).") if steps else \
+                " Then read the page with snapshot or a screenshot."
+            if wanted.get("app"):
+                browser_open_note = (
+                    "The user wants to see their app in the built-in browser. Open it there with browser {action: \"navigate\", "
+                    "url}: the URL of its dev server (a background command you started prints it: command_status; a tab "
+                    "may already show it), or start the dev server first (its script in package.json or the like, with "
+                    "run_command background: true) and open the URL it prints." + then +
+                    " Do not ask whether to open the browser."
+                )
+            else:
+                browser_open_note = (
+                    f"The user asked you to open {wanted['site']}: open it in the built-in browser now, with browser "
+                    "{action: \"navigate\", url} (it appears in their Browser tab, which opens by itself)." + then +
+                    " Do not fetch it as text with web_fetch instead, and do not ask whether to open the browser."
+                )
     messages = _build_base_messages(summary)
     tools_result = get_livecode_tools(
         enable_mcp=enable_mcp_for_turn,
@@ -3030,6 +3092,7 @@ def run_livecode_turn(
 
                     if tool_name == "browser":
                         design_rounds.observe(result, iteration)
+                        ui_verify.observe_browser(tool_args, result, iteration)
                     if tool_name == "browser" and result.get("shot_id"):
                         if model_reads_images:
                             browser_shots.append(result)
@@ -3052,6 +3115,7 @@ def run_livecode_turn(
                         fp = result.get("file_path") or tool_args.get("file_path")
                         if fp:
                             record_file_edited(state_path, session_id, str(fp))
+                            ui_verify.observe_edit(str(fp), iteration)
                         _emit_diff(result, tool_call_id)
                         edits_to_verify.append((tool_name, str(fp or ""), result))
 
@@ -3063,6 +3127,7 @@ def run_livecode_turn(
                             last_edit_iteration = iteration
                             edit_completed_this_turn = True
                             record_file_edited(state_path, session_id, fp)
+                            ui_verify.observe_edit(fp, iteration)
                             edits_to_verify.append((tool_name, fp, changed))
 
                     if tool_name == "create_plan" and result.get("success"):
@@ -3405,6 +3470,24 @@ def run_livecode_turn(
                             f"in_progress={_in_prog}",
                             f"fire={todo_gate_fires}",
                         )
+                    continue
+
+            if (mode == "agent" and enable_browser_for_turn and iteration < max_iterations - CLOSURE_ITERATIONS
+                    and any((t.get("function") or {}).get("name") == "browser" for t in tools)
+                    and browser_ui_verify_enabled()):
+                ui_note = ui_verify.reminder()
+                if ui_note:
+                    if content.strip():
+                        step_stream.close_content(role="narration", text=content, thought_content=reasoning_only)
+                        early = {"role": "assistant", "content": content}
+                        messages.append(early)
+                        _persist_msg(early)
+                    gate = {"role": "user", "content": ui_note, "internal": True}
+                    messages.append(gate)
+                    _persist_msg(gate)
+                    force_tool_choice_required = True
+                    if logger:
+                        _ide_log(logger, "info", "ui-verify re-entry", f"fire={ui_verify.fires}", ", ".join(ui_verify.files[:3]))
                     continue
 
             if (design_loop_for_turn and mode == "agent" and iteration < max_iterations - CLOSURE_ITERATIONS

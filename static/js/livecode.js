@@ -17602,6 +17602,8 @@ function _livecodeSettingsAgentHtml() {
   html += _livecodeSettingsMatchRowHtml();
   html += _livecodeSettingsCompareContentRowHtml();
   html += _livecodeSettingsDesignGateRowHtml();
+  html += _livecodeBrowserSwitchRowHtml("ui_verify", "Check UI changes in the browser",
+    "After changing components, pages or styles, the agent opens the page in the Browser tab and looks at the change before it finishes.");
   html += _livecodeSettingsBrowserViewRowsHtml();
   html += _livecodeSettingsAutomationRowHtml();
   html += _livecodeSettingsChromeRowHtml();
@@ -17720,6 +17722,7 @@ const _LIVECODE_BROWSER_SETTING_DEFAULTS = {
   min_design_accuracy: 50,
   design_gate: true,
   compare_content: "layout",
+  ui_verify: true,
   agent_tabs: true,
   view_quality: "sharp",
   default_viewport: "fit",

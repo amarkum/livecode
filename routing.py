@@ -237,7 +237,7 @@ _BROWSER_INTENT_RE = re.compile(
 )
 
 def user_requests_browser(question: str) -> bool:
-    return bool(_BROWSER_INTENT_RE.search(question or "")) or bool(user_requests_site_visit(question))
+    return bool(_BROWSER_INTENT_RE.search(question or "")) or browse_request(question) is not None
 
 # A site the user names: a URL, a local dev server, or a bare domain (github.com, my-app.vercel.app).
 _SITE_PATTERN = (
@@ -259,18 +259,94 @@ _VISIT_RE = re.compile(
 _ANY_SITE_RE = re.compile(_SITE_PATTERN, re.IGNORECASE)
 _ANY_VISIT_VERB_RE = re.compile(_VISIT_VERB + r"|\b(?:see|view|read|screenshot|browse|browser|in the browser)\b", re.IGNORECASE)
 
-def user_requests_site_visit(question: str) -> str:
-    """The site the user asked to open ("go to github.com", "open localhost:3000", "visit https://…"),
-    or "" when the message does not ask for one. A URL with any browsing verb in the message counts too."""
+# Well-known sites asked for by name, without a domain ("go to amazon and search for …").
+KNOWN_SITES = {
+    "google": "google.com", "youtube": "youtube.com", "amazon": "amazon.com", "github": "github.com", "gitlab": "gitlab.com",
+    "gmail": "mail.google.com", "google docs": "docs.google.com", "google drive": "drive.google.com", "google maps": "maps.google.com",
+    "linkedin": "linkedin.com", "twitter": "x.com", "facebook": "facebook.com", "instagram": "instagram.com", "reddit": "reddit.com",
+    "wikipedia": "wikipedia.org", "stackoverflow": "stackoverflow.com", "stack overflow": "stackoverflow.com", "netflix": "netflix.com",
+    "figma": "figma.com", "notion": "notion.so", "chatgpt": "chatgpt.com", "flipkart": "flipkart.com", "bing": "bing.com",
+    "duckduckgo": "duckduckgo.com", "yahoo": "yahoo.com", "npm": "npmjs.com", "npmjs": "npmjs.com", "pypi": "pypi.org",
+    "medium": "medium.com", "dribbble": "dribbble.com", "behance": "behance.net", "canva": "canva.com", "vercel": "vercel.com",
+    "netlify": "netlify.com", "slack": "slack.com", "discord": "discord.com", "hacker news": "news.ycombinator.com",
+    "product hunt": "producthunt.com", "producthunt": "producthunt.com", "myntra": "myntra.com", "swiggy": "swiggy.com",
+    "zomato": "zomato.com", "ebay": "ebay.com", "walmart": "walmart.com", "etsy": "etsy.com", "airbnb": "airbnb.com",
+    "booking.com": "booking.com", "mdn": "developer.mozilla.org", "codepen": "codepen.io", "dev.to": "dev.to",
+}
+_STRONG_VISIT = r"\b(?:go(?:\s+over)?\s+to|goto|visit|open(?:\s+up)?|navigate\s+to|head\s+(?:over\s+)?to|browse\s+to|take\s+me\s+to|pull\s+up|launch|surf\s+to)\b"
+_NAMED_SITE_RE = re.compile(
+    _STRONG_VISIT + r"\s+(?:the\s+)?(?P<name>" + "|".join(sorted((re.escape(k) for k in KNOWN_SITES), key=len, reverse=True)) + r")"
+    r"(?:\s+(?:website|site|web\s*site|home\s*page|page))?(?![\w.-])",
+    re.IGNORECASE,
+)
+# The user's own running app: "check it in the browser", "open my app", "preview the site".
+_APP_STRICT_RE = re.compile(r"\b(?:in|on|with|using)\s+(?:the\s+|a\s+|my\s+)?(?:built[- ]in\s+)?browser\b|"
+                            r"\b(?:open|launch|preview|go\s+to|visit|navigate\s+to)\s+(?:the|my|our)\s+(?:app|site|website|web\s*app|frontend|front-end|ui|dashboard)\b", re.IGNORECASE)
+_STEPS_LEAD_RE = re.compile(r"^\s*(?:[,;:.-]+\s*)?(?:and\s+(?:then\s+)?|then\s+|&\s*|,\s*)", re.IGNORECASE)
+
+
+def _site_steps(text: str, end: int) -> str:
+    """What the user asked to do on the site: the rest of the sentence after it ("and search for …")."""
+    rest = text[end:]
+    lead = _STEPS_LEAD_RE.match(rest)
+    if not lead:
+        return ""
+    steps = re.sub(r"\s+", " ", rest[lead.end():]).strip().rstrip(".")
+    return steps[:400]
+
+
+def browse_request(question: str) -> dict[str, Any] | None:
+    """What the user asked to open in the browser, and what to do there:
+    {"site": "github.com", "steps": "check the latest issues"}, {"app": True, ...} for their own running
+    app ("open my app", "check it in the browser"), or None when the message asks for neither."""
     text = question or ""
     match = _VISIT_RE.search(text)
     if match:
-        return match.group("site").rstrip(".,;:!?)")
+        site = match.group("site").rstrip(".,;:!?)")
+        return {"site": site, "steps": _site_steps(text, match.start("site") + len(site)), "app": False}
+    named = _NAMED_SITE_RE.search(text)
+    if named:
+        return {"site": KNOWN_SITES[named.group("name").lower()], "steps": _site_steps(text, named.end()), "app": False}
     for found in _ANY_SITE_RE.finditer(text):
         site = found.group("site")
-        if (site.lower().startswith(("http://", "https://", "localhost", "127.", "0.0.0.0")) and _ANY_VISIT_VERB_RE.search(text)):
-            return site.rstrip(".,;:!?)")
-    return ""
+        if site.lower().startswith(("http://", "https://", "localhost", "127.", "0.0.0.0")) and _ANY_VISIT_VERB_RE.search(text):
+            site = site.rstrip(".,;:!?)")
+            return {"site": site, "steps": _site_steps(text, found.start("site") + len(site)), "app": False}
+    apps = list(_APP_STRICT_RE.finditer(text))
+    if apps:
+        steps = next((st for st in (_site_steps(text, m.end()) for m in reversed(apps)) if st), "")
+        return {"site": "", "steps": steps, "app": True}
+    return None
+
+
+def user_requests_site_visit(question: str) -> str:
+    """The site the user asked to open ("go to github.com", "open localhost:3000", "visit https://…",
+    "go to amazon"), or "" when the message does not name one."""
+    found = browse_request(question)
+    return str(found.get("site") or "") if found else ""
+
+# Files whose change shows in a browser: components, pages, styles and templates.
+_UI_EXTENSIONS = (".tsx", ".jsx", ".vue", ".svelte", ".astro", ".html", ".htm", ".css", ".scss", ".sass", ".less",
+                  ".styl", ".pcss", ".mdx", ".hbs", ".handlebars", ".ejs", ".njk", ".jinja", ".jinja2", ".j2", ".twig",
+                  ".erb", ".liquid", ".pug", ".razor", ".cshtml")
+_UI_SCRIPT_EXTENSIONS = (".ts", ".js", ".mjs", ".cjs")
+_UI_DIRS = re.compile(r"(^|/)(components?|pages|app|views?|screens|layouts?|ui|widgets|styles?|theme|templates|routes|"
+                      r"features|containers|public|static|assets|src/mfe|microfrontends?|mfe[^/]*)/", re.IGNORECASE)
+_NOT_UI = re.compile(r"(^|/)(__tests__|tests?|spec|e2e|cypress|playwright|__mocks__|stories|node_modules|dist|build)/|"
+                     r"\.(test|spec|stories|story|d)\.[a-z]+$|(^|/)(vite|webpack|jest|vitest|babel|tailwind|postcss|eslint|"
+                     r"prettier|next|nuxt|astro|svelte)\.config\.", re.IGNORECASE)
+
+
+def is_ui_file(path: str) -> bool:
+    """Whether a change to this file shows in the browser (a component, a page, a stylesheet, a template)."""
+    text = str(path or "").replace("\\", "/").strip()
+    low = text.lower()
+    if not low or _NOT_UI.search(low):
+        return False
+    if low.endswith(_UI_EXTENSIONS):
+        return True
+    return low.endswith(_UI_SCRIPT_EXTENSIONS) and bool(_UI_DIRS.search("/" + low))
+
 
 _DESIGN_INTENT_RE = re.compile(
     r"\b(?:figma|canva|sketch (?:app|file|design)|penpot|adobe xd|zeplin|framer|invision|uizard|balsamiq)\b|"

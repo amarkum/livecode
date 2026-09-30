@@ -532,6 +532,8 @@ class _Agent:
         self.downloads_seen = 0
         self.done = False
         self.design_rounds: dict[str, dict[str, str]] = {}
+        # Where each component screenshot (a card, an input) was found on the page: its selector.
+        self.located: dict[str, str] = {}
 
 
 MAX_AGENTS_KEPT = 64
@@ -3067,6 +3069,7 @@ _ELEMENTS_JS = "(root, o) => {" + _DOM_HELPERS_JS + r"""
     }
     if (opaque(f.bg)) st.bg = f.bg;
     if (f.border) { st.border = f.border; st.border_width = round(parseFloat(s.borderTopWidth) || parseFloat(s.borderLeftWidth) || 0); }
+    if (opaque(f.bg) || f.outline || f.shadow || f.control) st.padding = ["Top", "Right", "Bottom", "Left"].map((k) => round(parseFloat(s["padding" + k]) || 0));
     st.radius = round(Math.max(...["TopLeft", "TopRight", "BottomRight", "BottomLeft"].map((k) => parseFloat(s["border" + k + "Radius"]) || 0)));
     return st;
   };
@@ -3124,6 +3127,352 @@ _ELEMENTS_JS = "(root, o) => {" + _DOM_HELPERS_JS + r"""
 }"""
 
 ELEMENTS_MAX = 120
+
+_LOCATE_CANDIDATES_JS = "(o) => {" + _DOM_HELPERS_JS + r"""
+  // Elements shaped like the screenshot (about its aspect ratio, at a size one of its likely scales
+  // gives): the places the part of the design it shows could be.
+  const out = [], vw = document.documentElement.clientWidth, ph = document.documentElement.scrollHeight;
+  const walk = (el, depth, parent) => {
+    if (out.length >= o.max) return;
+    const tag = el.tagName.toLowerCase();
+    if (SKIP.has(tag)) return;
+    const s = getComputedStyle(el);
+    if (s.display === "none") return;
+    let me = parent;
+    if (s.visibility !== "hidden" && Number(s.opacity) > 0.05) {
+      const r = el.getBoundingClientRect(), w = r.width, h = r.height;
+      if (w >= 16 && h >= 10 && !(w >= vw * 0.97 && h >= ph * 0.8)) {
+        const fits = Math.abs(Math.log((w / h) / o.aspect)) <= o.aspectTol && o.widths.some((x) => w >= x * 0.5 && w <= x * 2);
+        if (fits) {
+          out.push({ i: out.length, parent: parent, depth: depth, selector: cssPath(el), name: describe(el),
+                     key: tag + "." + Array.from(el.classList).slice(0, 2).join("."),
+                     box: { x: r.left + scrollX, y: r.top + scrollY, width: w, height: h } });
+          me = out.length - 1;
+        }
+      }
+    }
+    if (tag === "svg") return;
+    for (const child of el.children) walk(child, depth + 1, me);
+  };
+  if (document.body) walk(document.body, 0, -1);
+  return out;
+}"""
+
+_SECTIONS_JS = "(selectors) => {" + _DOM_HELPERS_JS + r"""
+  // The section each element belongs to: the nearest enclosing component (a card, a form, a panel, a
+  // list item, a micro-frontend's root) that is well short of the whole page.
+  const vw = document.documentElement.clientWidth, ph = document.documentElement.scrollHeight, page = vw * ph;
+  const TAGS = new Set(["section", "article", "form", "fieldset", "li", "nav", "header", "footer", "aside", "dialog", "table", "main"]);
+  const NAMES = /(card|panel|tile|widget|modal|dialog|form|section|item|row|block|container|module|mfe|micro|remote|single-spa|app-|-app|shell|region|pane|box|group)/i;
+  const component = (el, s) => {
+    const tag = el.tagName.toLowerCase();
+    const name = (el.id || "") + " " + (typeof el.className === "string" ? el.className : "");
+    const bg = s.backgroundColor && !/rgba\(0, 0, 0, 0\)|transparent/.test(s.backgroundColor);
+    const edge = parseFloat(s.borderTopWidth) > 0 || (s.boxShadow && s.boxShadow !== "none") || parseFloat(s.borderTopLeftRadius) > 0;
+    return TAGS.has(tag) || tag.includes("-") || NAMES.test(name) || bg || edge;
+  };
+  return selectors.map((sel) => {
+    let el = null;
+    try { el = document.querySelector(sel); } catch (e) {}
+    if (!el) return null;
+    // A component that differs itself (a card whose corners changed) is its own section.
+    let pick = null, top = null;
+    const own = el.getBoundingClientRect();
+    if (el.children.length && own.width * own.height >= 5000 && own.width * own.height < 0.45 * page && component(el, getComputedStyle(el))) pick = el;
+    for (let node = el.parentElement; !pick && node && node !== document.body && node !== document.documentElement; node = node.parentElement) {
+      const r = node.getBoundingClientRect();
+      if (r.width * r.height >= 0.45 * page || (r.width >= vw * 0.98 && r.height >= ph * 0.6)) break;
+      top = node;
+      if (component(node, getComputedStyle(node)) && r.width * r.height >= 1600) pick = node;
+    }
+    const sec = pick || top;
+    if (!sec) return null;
+    const r = sec.getBoundingClientRect();
+    const key = sec.tagName.toLowerCase() + "." + Array.from(sec.classList).slice(0, 2).join(".");
+    return { selector: cssPath(sec), name: describe(sec), key: key, parent: sec.parentElement ? cssPath(sec.parentElement) : "",
+             box: { x: Math.round(r.left + scrollX), y: Math.round(r.top + scrollY), width: Math.round(r.width), height: Math.round(r.height) } };
+  });
+}"""
+
+SECTIONS_MIN_DIFFERENCES = 3
+SECTIONS_LISTED = 6
+
+
+def _sections_of(page: Any, elements: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Groups what differs by the section it is in, most differences first."""
+    selectors = [str(e.get("selector") or "") for e in elements]
+    try:
+        found = page.evaluate(_SECTIONS_JS, selectors) or []
+    except Exception:
+        return []
+    # Copies of one component side by side (the cards of a grid, the rows of a list) are one section:
+    # its code is written once, so it is fixed once.
+    instances: dict[tuple[str, str], set[str]] = {}
+    for sec in found:
+        if sec:
+            instances.setdefault((sec.get("parent") or "", sec.get("key") or ""), set()).add(sec["selector"])
+    groups: dict[str, dict[str, Any]] = {}
+    for item, sec in zip(elements, found):
+        if not sec:
+            continue
+        same = instances.get((sec.get("parent") or "", sec.get("key") or ""), set())
+        gid = f"{sec.get('parent')}|{sec.get('key')}" if len(same) > 1 else sec["selector"]
+        group = groups.setdefault(gid, {"element": sec["name"], "selector": sec["selector"], "box": sec["box"], "differ": 0, "items": []})
+        if len(same) > 1:
+            group["instances"] = len(same)
+            group["element"] = f"{sec.get('key') or sec['name']} \u00d7{len(same)} (one component, repeated)"
+            if sec["box"]["y"] < group["box"]["y"] or (sec["box"]["y"] == group["box"]["y"] and sec["box"]["x"] < group["box"]["x"]):
+                group["selector"], group["box"] = sec["selector"], sec["box"]
+        group["differ"] += 1
+        group["items"].append(item.get("n"))
+    return sorted(groups.values(), key=lambda g: (-g["differ"], g["box"]["y"], g["box"]["x"]))[:SECTIONS_LISTED]
+
+
+LOCATE_MAX_CANDIDATES = 700
+LOCATE_PADDING = 72  # past the widest scan for an element's edges (64 px)
+
+_BACKDROP_OF_JS = r"""
+(el) => {
+  for (let node = el.parentElement; node; node = node.parentElement) {
+    const c = getComputedStyle(node).backgroundColor;
+    if (c && !/rgba\(0, 0, 0, 0\)|transparent/.test(c)) return c;
+  }
+  return "#ffffff";
+}
+"""
+
+
+def _pad_image(data: bytes, mime: str, pad: float, fill: str, *, detect: bool) -> bytes | None:
+    with _compare_page() as tools:
+        try:
+            done = _in_background(tools, "evaluate", "o => window.padImage(o)",
+                                  {"src": _data_url(data, mime), "pad": pad, "fallback": fill, "detect": detect})
+        except Exception:
+            return None
+    return base64.b64decode(str(done.get("data") or "").split(",", 1)[-1]) or None
+
+
+def _frame_located(page: Any, reference: _Reference, selector: str, pad: int) -> tuple[_Reference, str]:
+    """A screenshot of one element ends at its edges, so they cannot be measured: it is framed in what
+    was around it (the colour its rounded corners show, else the page's colour behind the element),
+    as wide at its scale as the page's capture of the element will be framed. Returns the framed
+    screenshot and the colour to frame the page's capture in ("" when it could not be framed)."""
+    try:
+        locator = page.locator(selector).first
+        width = float(locator.bounding_box()["width"])
+        fill = str(locator.evaluate(_BACKDROP_OF_JS) or "#ffffff")
+    except Exception:
+        return reference, ""
+    image_w, _image_h = _image_size(reference.data)
+    if not width or not image_w:
+        return reference, ""
+    data = _pad_image(reference.data, reference.mime, pad * image_w / width, fill, detect=True)
+    if not data:
+        return reference, ""
+    framed = _Reference(data, "image/png", reference.label, scale=reference.scale)
+    framed.note = reference.note
+    return framed, fill
+LOCATE_MIN_SCORE = 0.5
+LOCATE_MIN_SCORE_ASKED = 0.3
+
+
+def _reference_key(reference: _Reference) -> str:
+    import hashlib
+
+    digest = hashlib.sha1(reference.data[:65536] + str(len(reference.data)).encode()).hexdigest()[:16]
+    return f"{reference.label}|{digest}"
+
+
+def _wants_locate(args: dict[str, Any], reference: _Reference, layout_width: int) -> bool:
+    """A screenshot of one part of a page (a card, an input box, a form) is looked for on the page,
+    unless the call already says where (a target, a region) or the design is a whole page."""
+    asked = args.get("locate")
+    if asked in (False, 0, "0", "false", "no", "off"):
+        return False
+    if _has_element_target(args) or args.get("width") is not None or args.get("reference_region") not in (None, "", {}, []):
+        return False
+    if reference.figma or reference.layer or not reference.data:
+        return False
+    image_w, image_h = _image_size(reference.data)
+    if not image_w or not image_h:
+        return False
+    if asked not in (None, ""):
+        return True
+    # A design as wide as the page (at 1x, 2x or 3x) is the whole page, not a part of it.
+    if _whole_width_scale(image_w, layout_width):
+        return False
+    scale = float(reference.scale or 0)
+    return image_w / (scale or 1) < 0.9 * layout_width or (not scale and image_w / 2 < 0.9 * layout_width)
+
+
+def _locate_pass(page: Any, reference: _Reference, image_w: int, image_h: int, scales: list[float]) -> list[tuple[float, dict[str, Any]]]:
+    """Every element shaped like the screenshot, scored against it, best first."""
+    options = {"aspect": image_w / image_h, "aspectTol": 0.45, "widths": [image_w / k for k in scales], "max": LOCATE_MAX_CANDIDATES}
+    candidates = page.evaluate(_LOCATE_CANDIDATES_JS, options) or []
+    if not candidates:
+        return []
+    shot = page.screenshot(full_page=True, type="png", timeout=30_000, scale="css")
+    with _compare_page() as tools:
+        try:
+            found = _in_background(tools, "evaluate", "o => window.locateReference(o)", {
+                "ref": _data_url(reference.data, reference.mime), "page": _data_url(shot, "image/png"),
+                "candidates": [{"box": c["box"]} for c in candidates],
+            })
+        except Exception as exc:
+            raise _compare_error(exc) from exc
+    ranked = []
+    for cand, sc in zip(candidates, found.get("scores") or []):
+        box = cand["box"]
+        aspect_off = abs(math.log((box["width"] / box["height"]) / (image_w / image_h)))
+        score = 0.45 * sc["gray"] + 0.35 * sc["edges"] + 0.2 * sc["color"] - 0.5 * aspect_off - 0.2 * _width_off(box["width"], image_w, scales)
+        ranked.append((round(score, 3), cand))
+    # Best first; of an element and a wrapper the same size, the outer one.
+    ranked.sort(key=lambda item: (-item[0], item[1]["depth"]))
+    return ranked
+
+
+def _width_off(width: float, image_w: int, scales: list[float]) -> float:
+    """How far an element's width is from the screenshot's at the nearest of its likely scales (log ratio)."""
+    return min(abs(math.log(max(1.0, width) * k / image_w)) for k in scales)
+
+
+def _fit_viewport(session: _Session, page: Any, reference: _Reference, ranked: list[tuple[float, dict[str, Any]]],
+                  image_w: int, image_h: int, scales: list[float]) -> tuple[list[tuple[float, dict[str, Any]]], int] | None:
+    """A screenshot of a card or a form from a design made at another page width: in a fluid layout the
+    element is wider or narrower here. Measures how its width follows the viewport's, tries the widths at
+    which it is as wide as in the screenshot, and returns the best of those passes and its width."""
+    start = dict(page.viewport_size or session.viewport)
+    v0, height = int(start["width"]), int(start["height"])
+
+    def _set(width: int) -> None:
+        page.set_viewport_size({"width": int(width), "height": height})
+        _pause(page, 250)
+
+    def _width_of(selector: str) -> float:
+        try:
+            box = page.locator(selector).first.bounding_box()
+            return float(box["width"]) if box else 0.0
+        except Exception:
+            return 0.0
+
+    seeds = [c for score, c in ranked[:8] if score >= 0.15][:3] or [c for _s, c in ranked[:2]]
+    widths: dict[int, float] = {}
+    probe = v0 + 160 if v0 + 160 <= MAX_VIEWPORT[0] else v0 - 160
+    try:
+        _set(probe)
+        after = {c["selector"]: _width_of(c["selector"]) for c in seeds}
+    finally:
+        _set(v0)
+    for cand in seeds:
+        w0, w1 = float(cand["box"]["width"]), after.get(cand["selector"]) or 0.0
+        slope = (w1 - w0) / (probe - v0)
+        if abs(slope) < 0.05 or not w1:
+            continue  # a fixed width: the viewport does not change it
+        for k in scales:
+            target = v0 + (image_w / k - w0) / slope
+            if MIN_VIEWPORT[0] <= target <= MAX_VIEWPORT[0] and abs(target - v0) >= 8:
+                widths.setdefault(int(round(target)), k)
+    best: tuple[float, list[tuple[float, dict[str, Any]]], int] | None = None
+    try:
+        for width in sorted(widths, key=lambda w: abs(w - v0))[:4]:
+            _set(width)
+            passed = _locate_pass(page, reference, image_w, image_h, scales)
+            if passed and (best is None or passed[0][0] > best[0]):
+                best = (passed[0][0], passed, width)
+    finally:
+        if best is None:
+            _set(v0)
+    if best is None:
+        return None
+    _set(best[2])
+    return best[1], best[2]
+
+
+def _locate_reference(session: _Session, page: Any, reference: _Reference, args: dict[str, Any],
+                      layout_width: int) -> dict[str, Any] | None:
+    agent = _agent()
+    key = _reference_key(reference)
+    image_w, image_h = _image_size(reference.data)
+    try:
+        forced = float(args.get("reference_scale") or 0)
+    except (TypeError, ValueError):
+        forced = 0.0
+    scales = [forced] if 0 < forced <= 8 else ([float(reference.scale)] if reference.scale else [1.0, 2.0, 3.0])
+    remembered = agent.located.get(key)
+    if remembered:
+        try:
+            if page.locator(remembered).count() == 1 and page.locator(remembered).first.is_visible():
+                return {"selector": remembered, "remembered": True, **_located_scale(page, remembered, image_w, scales)}
+        except Exception:
+            pass
+    asked = args.get("locate") not in (None, "")
+    least = LOCATE_MIN_SCORE_ASKED if asked else LOCATE_MIN_SCORE
+    ranked = _locate_pass(page, reference, image_w, image_h, scales)
+    resized: dict[str, Any] = {}
+    weak = not ranked or ranked[0][0] < least or _width_off(ranked[0][1]["box"]["width"], image_w, scales) > 0.06
+    if weak and ranked and args.get("resize") not in (False, 0, "0", "false", "no"):
+        v0 = int((page.viewport_size or session.viewport)["width"])
+        fitted = _fit_viewport(session, page, reference, ranked, image_w, image_h, scales)
+
+        def _worth(rk: list[tuple[float, dict[str, Any]]]) -> float:
+            # A match the wrong width for the screenshot at any likely scale is no match of its size.
+            return rk[0][0] - 0.6 * max(0.0, _width_off(rk[0][1]["box"]["width"], image_w, scales) - 0.03)
+
+        if fitted and fitted[0] and fitted[0][0][0] >= least and _worth(fitted[0]) > _worth(ranked) + 0.01:
+            ranked, width = fitted
+            # Kept, the way resize keeps it: every tab at the design's width, until changed.
+            _do_resize(session, {"width": width, "height": (page.viewport_size or session.viewport)["height"]})
+            resized = {"from": v0, "to": width}
+            layout_width = width
+        elif fitted:
+            page.set_viewport_size({"width": v0, "height": int((page.viewport_size or session.viewport)["height"])})
+    if not ranked:
+        return {"failed": "nothing on the page has the screenshot's shape"}
+    best_score, best = ranked[0]
+    if best_score < least:
+        return {"failed": f"no part of the page looks enough like it (best: {best['name']}, score {best_score})"}
+    if not asked and best["box"]["width"] >= 0.97 * layout_width:
+        return None
+
+    def _inside(a: dict[str, Any], b: dict[str, Any]) -> bool:
+        return (a["x"] >= b["x"] - 1 and a["y"] >= b["y"] - 1 and a["x"] + a["width"] <= b["x"] + b["width"] + 1
+                and a["y"] + a["height"] <= b["y"] + b["height"] + 1)
+
+    bb = best["box"]
+    similar = [c for s_, c in ranked[1:] if s_ >= best_score - 0.08 and c["key"] == best["key"]
+               and abs(c["box"]["width"] - bb["width"]) <= 0.1 * bb["width"] and abs(c["box"]["height"] - bb["height"]) <= 0.35 * bb["height"]
+               and not _inside(c["box"], bb) and not _inside(bb, c["box"])]
+    agent.located[key] = best["selector"]
+    while len(agent.located) > 40:
+        agent.located.pop(next(iter(agent.located)))
+    out: dict[str, Any] = {"selector": best["selector"], "element": best["name"], "score": best_score,
+                           "box": {k: round(float(v), 1) for k, v in bb.items()},
+                           **_located_scale(page, best["selector"], image_w, scales, width=bb["width"])}
+    if resized:
+        out["resized"] = resized
+    if similar:
+        out["similar"] = 1 + len(similar)
+        out["similar_selectors"] = [c["selector"] for c in similar[:5]]
+    runner = [c for s_, c in ranked[1:6] if c["selector"] != best["selector"] and c not in similar and not _inside(c["box"], bb) and not _inside(bb, c["box"])]
+    if runner:
+        out["next_best"] = {"element": runner[0]["name"], "selector": runner[0]["selector"]}
+    return out
+
+
+def _located_scale(page: Any, selector: str, image_w: int, scales: list[float], width: float = 0.0) -> dict[str, Any]:
+    """The screenshot's scale, when its width is a whole multiple of the element's (a 2x retina crop)."""
+    if not width:
+        try:
+            width = float(page.locator(selector).first.bounding_box()["width"])
+        except Exception:
+            return {}
+    if not width:
+        return {}
+    ratio = image_w / width
+    near = min((1.0, 2.0, 3.0), key=lambda k: abs(ratio - k))
+    if len(scales) == 1:
+        return {"scale": scales[0]}
+    return {"scale": near} if abs(ratio - near) <= 0.2 * near else {}
 
 INSPECT_MAX_LINES = 220
 INSPECT_MAX_CHARS = 14_000
@@ -4240,6 +4589,69 @@ const boardHeader = (h) => {
   return hdr;
 };
 
+// A screenshot of one element ends at its edges, so they cannot be measured. Framed in what was
+// around it (the colour its rounded corners show), or else in the page's colour behind the element,
+// its edges, corners and size can be.
+window.padImage = async function (o) {
+  const img = await load(o.src, "reference");
+  const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height, p = Math.max(1, Math.round(o.pad));
+  const src = make(w, h), sx = ctxOf(src);
+  sx.drawImage(img, 0, 0);
+  const px = (x, y) => Array.from(sx.getImageData(Math.max(0, Math.min(w - 1, x)), Math.max(0, Math.min(h - 1, y)), 1, 1).data).slice(0, 3);
+  const corners = [px(0, 0), px(w - 1, 0), px(0, h - 1), px(w - 1, h - 1)];
+  const inner = px(Math.round(Math.min(12, w / 4)), Math.round(Math.min(12, h / 4)));
+  const close = (a, b, t) => a.every((v, k) => Math.abs(v - b[k]) <= t);
+  const around = o.detect !== false && corners.every((c) => close(c, corners[0], 10)) && !close(corners[0], inner, 8);
+  const color = around ? "rgb(" + corners[0].join(",") + ")" : (o.fallback || "#ffffff");
+  const out = make(w + 2 * p, h + 2 * p), ox = out.getContext("2d");
+  ox.fillStyle = color;
+  ox.fillRect(0, 0, out.width, out.height);
+  ox.drawImage(img, p, p);
+  return { data: out.toDataURL("image/png"), color: color, around: around };
+};
+
+// Where a screenshot of one part of a page (a card, a form, an input box) is on the page: each
+// candidate's crop and the screenshot are drawn as small thumbnails and compared by their light and
+// their edges, which follow the layout (boxes, the avatar, the rows of text) and hardly the words.
+window.locateReference = async function (o) {
+  const ref = await load(o.ref, "reference"), cur = await load(o.page, "page");
+  const rw = ref.naturalWidth || ref.width, rh = ref.naturalHeight || ref.height;
+  const TW = 40, TH = Math.max(8, Math.min(96, Math.round(TW * rh / rw))), N = TW * TH;
+  const thumb = (img, sx, sy, sw, sh) => {
+    const c = make(TW, TH), x = c.getContext("2d", { willReadFrequently: true });
+    x.imageSmoothingEnabled = true; x.imageSmoothingQuality = "high";
+    x.fillStyle = "#ffffff"; x.fillRect(0, 0, TW, TH);
+    x.drawImage(img, sx, sy, sw, sh, 0, 0, TW, TH);
+    const d = x.getImageData(0, 0, TW, TH).data, g = new Float32Array(N), e = new Float32Array(N), mean = [0, 0, 0];
+    for (let i = 0; i < N; i++) { g[i] = 0.299 * d[4 * i] + 0.587 * d[4 * i + 1] + 0.114 * d[4 * i + 2]; for (let k = 0; k < 3; k++) mean[k] += d[4 * i + k] / N; }
+    for (let y = 0; y < TH; y++) for (let xx = 0; xx < TW; xx++) {
+      const gx = g[y * TW + Math.min(TW - 1, xx + 1)] - g[y * TW + Math.max(0, xx - 1)];
+      const gy = g[Math.min(TH - 1, y + 1) * TW + xx] - g[Math.max(0, y - 1) * TW + xx];
+      e[y * TW + xx] = Math.sqrt(gx * gx + gy * gy);
+    }
+    return { g: g, e: e, mean: mean };
+  };
+  const ncc = (a, b) => {
+    let ma = 0, mb = 0;
+    for (let i = 0; i < N; i++) { ma += a[i]; mb += b[i]; }
+    ma /= N; mb /= N;
+    let va = 0, vb = 0, cv = 0;
+    for (let i = 0; i < N; i++) { const p = a[i] - ma, q = b[i] - mb; va += p * p; vb += q * q; cv += p * q; }
+    va /= N; vb /= N; cv /= N;
+    if (va < 16 && vb < 16) return 1 - Math.min(1, Math.abs(ma - mb) / 40);
+    if (va < 16 || vb < 16) return 0;
+    return cv / Math.sqrt(va * vb);
+  };
+  const R = thumb(ref, 0, 0, rw, rh);
+  const scores = (o.candidates || []).map((c) => {
+    const b = c.box, S = thumb(cur, b.x, b.y, Math.max(1, b.width), Math.max(1, b.height));
+    const dc = Math.hypot(R.mean[0] - S.mean[0], R.mean[1] - S.mean[1], R.mean[2] - S.mean[2]) / 255;
+    return { gray: Math.round(ncc(R.g, S.g) * 1000) / 1000, edges: Math.round(ncc(R.e, S.e) * 1000) / 1000,
+             color: Math.round((1 - Math.min(1, 2 * dc)) * 1000) / 1000 };
+  });
+  return { size: [rw, rh], scores: scores };
+};
+
 window.renderCompare = async function (o) {
   const ref = await load(o.ref, "reference");
   const cur = await load(o.page, "page");
@@ -5028,9 +5440,10 @@ const cornerRadius = (R, e, ins, out, thin, bw) => {
       vals.push(thin ? dE94(lab, 0, out, 0) : dE94(lab, 0, out, 0) - dE94(lab, 0, ins, 0));
     }
     if (thin) {
-      let bi = 0;
-      for (let k = 1; k < vals.length; k++) if (vals[k] > vals[bi]) bi = k;
-      if (vals[bi] < least) return null;
+      // The border is the first line in from the corner: text or an icon further in can stand out more.
+      let bi = -1;
+      for (let k = 0; k < vals.length; k++) if (vals[k] >= least && (k + 1 >= vals.length || vals[k] >= vals[k + 1])) { bi = k; break; }
+      if (bi < 0) return null;
       const a = vals[Math.max(0, bi - 1)], c = vals[Math.min(vals.length - 1, bi + 1)], den = a - 2 * vals[bi] + c;
       const t = (bi + (den < 0 ? Math.max(-0.5, Math.min(0.5, (a - c) / (2 * den))) : 0)) * 0.25;
       return Math.max(0, (t - bw / (2 * Math.SQRT2)) / K);
@@ -5060,10 +5473,12 @@ const ringDark = (R, e, out, avoid) => {
 };
 
 // The colour around an element past its shadow: the commonest in a band 26-34 px out.
-const farColor = (ctx, b, dx, dy) => {
+// Not where a neighbour is (another card, the form above): what is past the element, not beside it.
+const farColor = (ctx, b, dx, dy, avoid) => {
   const x = Math.round(b.x + dx - 34), y = Math.round(b.y + dy - 34), w = Math.round(b.width + 68), h = Math.round(b.height + 68);
   const R = { P: ctx.getImageData(x, y, w, h).data, w: w, h: h };
-  return commonColor(R, 0, 0, w - 1, h - 1, (px, py) => px < 8 || py < 8 || px >= w - 8 || py >= h - 8);
+  const clear = (px, py) => !(avoid || []).some((a) => px + x >= a[0] + dx && px + x <= a[2] + dx && py + y >= a[1] + dy && py + y <= a[3] + dy);
+  return commonColor(R, 0, 0, w - 1, h - 1, (px, py) => (px < 8 || py < 8 || px >= w - 8 || py >= h - 8) && clear(px, py));
 };
 
 // Text's ink in a rectangle: pixels at least halfway from the backdrop to the text's own colour,
@@ -5425,7 +5840,9 @@ const measureText = (S, e, off, near, findings, cont) => {
         const soft = (lab) => S.jpeg ? [lab[0], lab[1] / 2, lab[2] / 2] : lab;
         off = dE2000(soft(rgbLab(c)), soft(rgbLab(css)));
       }
-      if (off >= (!css ? 0 : tol(S, (out.resized ? 6 : 4.5) + 0.67 * Math.max(0, 18 - (st.font_size || 16)), 1.5))) {
+      // (Other words, sample data, are read off other strokes: only a clearly other colour counts there.)
+      const colourLimit = !css ? 0 : tol(S, (out.resized ? 6 : 4.5) + 0.67 * Math.max(0, 18 - (st.font_size || 16)), 1.5);
+      if (off >= (S.layout && out.content ? Math.max(12, colourLimit) : colourLimit)) {
         findings.push({ kind: "text_color", text: "text colour " + (st.color || hex(pc)) + "; the design's looks like " + hex(c), page: st.color || hex(pc), design: hex(c), delta_e: r1(off) });
       }
     }
@@ -5525,7 +5942,31 @@ const measureElement = (S, e) => {
     const frameD = (x, y) => (x < 4 || y < 4 || x >= D.w - 4 || y >= D.h - 4) && (x < dx0 - 2 || x > dx1 + 2 || y < dy0 - 2 || y > dy1 + 2);
     const oA = commonColor(A, 0, 0, A.w - 1, A.h - 1, frame), oB = commonColor(D, 0, 0, D.w - 1, D.h - 1, frameD);
     const border = e.flags.outline ? hexLab(e.flags.border) : null;
-    const insA = iA ? rgbLab(iA.rgb) : border, insB = iB ? rgbLab(iB.rgb) : border;
+    // A bordered box the colour of what is around it (a white input on a white form): only its border
+    // shows where it is. Each side's border colour: across each edge, the pixel that stands out most.
+    const strokeOf = (R0, x0, y0, x1, y1, outRgb, reach) => {
+      if (!outRgb) return null;
+      const out = rgbLab(outRgb), cx = Math.round((x0 + x1) / 2), cy = Math.round((y0 + y1) / 2), hits = [];
+      for (const [sx, sy, ux, uy] of [[cx, y0 - reach, 0, 1], [cx, y1 + reach, 0, -1], [x0 - reach, cy, 1, 0], [x1 + reach, cy, -1, 0]]) {
+        let at = -1, far = 0;
+        for (let t = 0; t <= reach + 3; t++) {
+          const x = sx + ux * t, y = sy + uy * t;
+          if (x < 0 || y < 0 || x >= R0.w || y >= R0.h || R0.P[(y * R0.w + x) * 4 + 3] < 128) continue;
+          const d = dE94(R0.X, (y * R0.w + x) * 3, out, 0);
+          if (d > far) { far = d; at = y * R0.w + x; }
+        }
+        if (at >= 0 && far >= 2.5) hits.push([R0.P[at * 4], R0.P[at * 4 + 1], R0.P[at * 4 + 2]]);
+      }
+      return hits.length >= 2 ? [0, 1, 2].map((c) => median(hits.map((h) => h[c]))) : null;
+    };
+    const flat = !!(opaque && e.flags.outline && iA && oA && dE94(rgbLab(iA.rgb), 0, rgbLab(oA.rgb), 0) < 2.5);
+    // (What is around a flat box is its own colour: the far frame can be another box's.)
+    const strokeA = flat ? strokeOf(A, bx0, by0, bx1, by1, iA.rgb, Math.min(6, EM - 2)) : null;
+    // (Near the edge only: further out lies the box it sits in, its edge and shadow.)
+    const strokeB = flat ? strokeOf(D, dx0, dy0, dx1, dy1, (iB || oB || {}).rgb, Math.min(10, M2 - 2)) : null;
+    const aroundA = flat ? iA : oA, aroundB = flat && iB ? iB : oB;
+    const insA = flat ? (strokeA ? rgbLab(strokeA) : border) : iA ? rgbLab(iA.rgb) : border;
+    const insB = flat ? (strokeB ? rgbLab(strokeB) : null) : iB ? rgbLab(iB.rgb) : border;
     // A white card on a light grey page is barely 4 apart: enough, lined up over several scan lines.
     // How far out from each side a scan may go: never past its parent's edge or into a neighbour.
     const room = { l: Infinity, r: Infinity, t: Infinity, b: Infinity };
@@ -5548,8 +5989,8 @@ const measureElement = (S, e) => {
     const reachA = within(room, { x: E, y: E });
     const reachD = within(room, { x: Math.min(M2 - 2, Math.max(E, Math.round(0.25 * b.width))), y: Math.min(M2 - 2, Math.max(E, Math.round(0.25 * b.height))) });
     const roomy = Math.min(reachA.l, reachA.r, reachA.t, reachA.b) >= 3;
-    if (roomy && insA && insB && oA && oB && dE94(insA, 0, rgbLab(oA.rgb), 0) >= 2.5 && dE94(insB, 0, rgbLab(oB.rgb), 0) >= 2.5) {
-      const outA = rgbLab(oA.rgb), outB = rgbLab(oB.rgb);
+    if (roomy && insA && insB && aroundA && aroundB && dE94(insA, 0, rgbLab(aroundA.rgb), 0) >= 2.5 && dE94(insB, 0, rgbLab(aroundB.rgb), 0) >= 2.5) {
+      const outA = rgbLab(aroundA.rgb), outB = rgbLab(aroundB.rgb);
       const innA = { x: E, y: E }, innD = { x: Math.min(Math.round(b.width / 2), reachD.l + reachD.r), y: Math.min(Math.round(b.height / 2), reachD.t + reachD.b) };
       const eA = boxEdges(A, bx0, by0, bx1, by1, insA, outA, reachA, innA), eB = boxEdges(D, dx0, dy0, dx1, dy1, insB, outB, reachD, innD);
       if (eA && eB) {
@@ -5563,7 +6004,7 @@ const measureElement = (S, e) => {
         geo = { dx: D.x + eB.left - (A.x + gA.left), dy: D.y + eB.top - (A.y + gA.top),
                 dw: (eB.right - eB.left) - (gA.right - gA.left), dh: (eB.bottom - eB.top) - (gA.bottom - gA.top) };
         if (b.width >= 12 && b.height >= 12) {
-          const thin = !iA, bw = st.border_width || 1;
+          const thin = !iA || flat, bw = st.border_width || 1;
           const rA = cornerRadius(A, eA, insA, outA, thin, bw), rB = cornerRadius(D, eB, insB, outB, thin, bw);
           if (o.debug) rec.radius = [rA, rB, eA, eB];
           if (rA !== null && rB !== null && Math.abs(rB - rA) >= tol(S, 2, 1)) {
@@ -5572,11 +6013,22 @@ const measureElement = (S, e) => {
             if (want !== Math.round(now)) findings.push({ kind: "radius", text: "corner radius about " + want + "px in the design (" + Math.round(now) + "px here)", page: Math.round(now), design: want });
           }
         }
+        // The border's colour, where only the border sets the box apart: the page's own reading of its CSS
+        // colour corrects the design's for how thin lines are drawn.
+        if (flat && strokeA && strokeB) {
+          const e00 = dE2000(rgbLab(strokeA), rgbLab(strokeB)), css = hexRgb(st.border);
+          if (e00 >= tol(S, 4, 1.5)) {
+            const want = css ? strokeB.map((v, k) => Math.max(0, Math.min(255, v + css[k] - strokeA[k]))) : strokeB;
+            findings.push({ kind: "border_color", text: "border colour " + (st.border || hex(strokeA)) + "; the design's looks like " + hex(want),
+                            page: st.border || hex(strokeA), design: hex(want), delta_e: r1(e00) });
+          }
+        }
         // A shadow darkens what is around the element: measured against the colour further out, past it.
-        const fA = farColor(S.pctx, b, 0, 0), fB = farColor(S.dctx, b, D.x + eB.left - (A.x + eA.left), D.y + eB.top - (A.y + eA.top));
+        const fA = farColor(S.pctx, b, 0, 0, nearPage), fB = farColor(S.dctx, b, D.x + eB.left - (A.x + eA.left), D.y + eB.top - (A.y + eA.top), nearPage);
         const nearD = nearPage.map((a) => [a[0] + offset.dx - D.x, a[1] + offset.dy - D.y, a[2] + offset.dx - D.x, a[3] + offset.dy - D.y]);
         const sA = ringDark(A, eA, fA ? rgbLab(fA.rgb) : outA, near), sB = ringDark(D, eB, fB ? rgbLab(fB.rgb) : outB, nearD);
-        if (sA !== null && sB !== null && Math.abs(sB - sA) >= tol(S, 1.5, 0.5)) {
+        // (A screenshot of the element alone leaves out its shadow: the element it was found at is not held to it.)
+        if (sA !== null && sB !== null && Math.abs(sB - sA) >= tol(S, 1.5, 0.5) && !(o.paddedRef && e.parent < 0)) {
           findings.push({ kind: "shadow", text: sB > sA ? "the design's shadow or outline around it is stronger" : "its shadow or outline is stronger than the design's", page: r1(sA), design: r1(sB) });
         }
       }
@@ -5615,12 +6067,26 @@ const measureElement = (S, e) => {
     if (Math.abs(mx) <= give && !geo) mx = 0;
   }
   if (text && text.missing) mx = my = 0;
+  // Other words (sample data) change a text's width, and with it where centred or right-aligned text,
+  // or a box sized by its text (a pill, a badge), starts: only its vertical place and height count then.
+  const otherWords = S.layout && !!(text && text.content);
+  if (otherWords) {
+    const align = String(st.align || "start"), tw = e.text_box ? e.text_box.width : b.width;
+    // A box sized by its words (a pill, a badge) at its parent's right: where its right edge is counts.
+    const pb = parent && parent.box, rightSide = pb && geo && (pb.x + pb.width - b.x - b.width) < (b.x - pb.x);
+    if (rightSide) mx += geo.dw;
+    else if (!/^(start|left|justify|-webkit-auto)$/.test(align) || Math.abs(mx) > 0.25 * tw + 8 || (geo && Math.abs(mx) <= Math.abs(geo.dw) + 4)) mx = 0;
+    // Other words' ink can be taken for a neighbouring line's: less than a line's move is not trusted.
+    if (!geo && Math.abs(my) <= 1.2 * (st.line_height || 1.25 * (st.font_size || 14))) my = 0;
+    for (let k = findings.length - 1; k >= 0; k--) if (findings[k].kind === "shadow") findings.splice(k, 1);
+  }
   // Only what shows a place of its own moves: a box, text, an image. A bare wrapper (a rule under
   // a bar, a translucent tint) is placed by its children, and they report their own moves.
   if (!boxy && !(text && text.dInk)) mx = my = 0;
   if (Math.abs(mx) >= least || Math.abs(my) >= least) findings.push({ kind: "moved", text: movedText(Math.abs(mx) >= least ? mx : 0, Math.abs(my) >= least ? my : 0), dx: Math.round(mx), dy: Math.round(my) });
   const grown = tol(S, 2, 1);
-  if (geo && (Math.abs(geo.dw) >= grown || Math.abs(geo.dh) >= grown)) findings.push({ kind: "size", text: sizeText(Math.abs(geo.dw) >= grown ? geo.dw : 0, Math.abs(geo.dh) >= grown ? geo.dh : 0), dw: Math.round(geo.dw), dh: Math.round(geo.dh) });
+  const dwKept = geo && !otherWords && Math.abs(geo.dw) >= grown ? geo.dw : 0, dhKept = geo && Math.abs(geo.dh) >= grown ? geo.dh : 0;
+  if (dwKept || dhKept) findings.push({ kind: "size", text: sizeText(dwKept, dhKept), dw: Math.round(dwKept), dh: Math.round(dhKept) });
   // Pixels decide for images, icons and boxes (a real area of them: more than a stray edge); text
   // has its own measures (and renders differently anyway).
   const differing = pm.content * (1 - pm.match / 100) * pm.step * pm.step;
@@ -5738,6 +6204,60 @@ window.elementsFinish = function () {
     const up = moved.dy ? above(r, resized) : null, side = moved.dx ? before(r, resized) : null;
     const cause = Math.abs(moved.dx) > Math.abs(moved.dy) ? side : up;
     if (cause) moved.text += " (" + cause.name.slice(0, 48) + (cause === up ? " above" : " before") + " it differs: fix that first)";
+  }
+  // Where a box's first children all moved alike, its padding changed: say so on the box (the fix is
+  // there), and drop the moves it explains from the children.
+  for (const r of res) {
+    const st = S.items[r.i].style || {}, pad = st.padding;
+    if (!pad || r.status === "missing" || !r.found) continue;
+    const kids = res.filter((q) => q.parent === r.i && q.status !== "missing" && q.rel && q.found);
+    if (!kids.length) continue;
+    const bw = st.border_width || 0, least = tol(S, 2, 1);
+    const left = kids.reduce((a, q) => (q.box.x < a.box.x ? q : a)), top = kids.reduce((a, q) => (q.box.y < a.box.y ? q : a));
+    const atLeft = Math.abs(left.box.x - (r.box.x + bw + pad[3])) <= 2, atTop = Math.abs(top.box.y - (r.box.y + bw + pad[0])) <= 2;
+    const dx = atLeft ? Math.round(left.rel.dx) : 0, dy = atTop ? Math.round(top.rel.dy) : 0;
+    if (Math.abs(dx) < least && Math.abs(dy) < least) continue;
+    const want = pad.slice();
+    if (Math.abs(dx) >= least) want[3] = Math.max(0, pad[3] + dx);
+    if (Math.abs(dy) >= least) {
+      want[0] = Math.max(0, pad[0] + dy);
+      // As much again below it when the box grew by twice as much (the content stayed as tall).
+      if (r.geometry && Math.abs(r.geometry.dh - 2 * dy) <= Math.max(2, 0.2 * Math.abs(dy))) want[2] = Math.max(0, pad[2] + dy);
+    }
+    const same = want[0] === want[3] && (want[2] === want[0] || want[2] === pad[2]) && Math.abs(dx) >= least && Math.abs(dy) >= least;
+    const text = same ? "padding about " + want[0] + "px in the design (" + pad[0] + "px here)" :
+      "padding " + ["top", "right", "bottom", "left"].map((k, i) => want[i] !== pad[i] ? k + " about " + want[i] + "px (" + pad[i] + "px here)" : "").filter(Boolean).join(", ") + " in the design";
+    r.findings = (r.findings || []).filter((f) => !(f.kind === "size" && Math.abs((f.dh || 0) - 2 * dy) <= 2 && !(f.dw || 0)));
+    r.findings.unshift({ kind: "padding", text: text, page: pad, design: want });
+    r.status = "different";
+    for (const q of kids) {
+      const f = (q.findings || []).find((x) => x.kind === "moved");
+      if (!f) continue;
+      // (A child at the box's right moves the other way when both sides' padding changed alike.)
+      const ex = Math.abs(Math.abs(f.dx || 0) - Math.abs(dx)) <= 1.5, ey = Math.abs((f.dy || 0) - dy) <= 1.5;
+      if (ex && ey) {
+        q.findings = q.findings.filter((x) => x !== f);
+        if (!q.findings.length) q.status = "matches";
+      } else if (ex || ey) {
+        f.text += " (partly the " + r.name.split(/[\s"]/)[0] + "'s padding)";
+      }
+    }
+  }
+  if (S.layout) {
+    // More copies of a repeated component than the design shows (another order card, a longer list)
+    // are the app's data, not its layout: one of them not in the design is noted, not a finding.
+    const kind = (name) => String(name || "").split(/[\s"]/)[0];
+    const extra = new Set();
+    for (const r of res) {
+      const inExtra = r.parent >= 0 && extra.has(r.parent);
+      const twins = r.status === "missing" ? res.filter((q) => q !== r && q.parent === r.parent && q.status !== "missing" && kind(q.name) === kind(r.name)).length : 0;
+      const itemLike = /^(li|tr|article)\b|[.](card|item|row|tile|entry|result|order|product)/i.test(kind(r.name));
+      const twin = twins >= 2 || (twins >= 1 && itemLike);
+      if (inExtra || twin) {
+        extra.add(r.i);
+        r.status = "matches"; r.content = true; r.extraCopy = true; r.findings = [];
+      }
+    }
   }
   const bad = res.filter((r) => r.status === "different" || r.status === "missing").sort((p, q) => (p.box.y - q.box.y) || (p.box.x - q.box.x));
   bad.forEach((r, k) => { r.n = k + 1; });
@@ -6015,6 +6535,10 @@ def design_gate_enabled() -> bool:
     return _saved_flag("design_gate", True)
 
 
+def ui_verify_enabled() -> bool:
+    return _saved_flag("ui_verify", True)
+
+
 def compare_content() -> str:
     return _saved_choice("compare_content", COMPARE_CONTENTS, DEFAULT_COMPARE_CONTENT)
 
@@ -6054,6 +6578,7 @@ def browser_settings() -> dict[str, Any]:
         "reduce_automation_signals": automation_signals_reduced(),
         "design_gate": design_gate_enabled(),
         "compare_content": compare_content(),
+        "ui_verify": ui_verify_enabled(),
         "agent_tabs": agent_tabs_enabled(),
         "view_quality": view_quality(),
         "default_viewport": default_viewport(),
@@ -6077,6 +6602,8 @@ def save_browser_settings(data: dict[str, Any]) -> dict[str, Any]:
         updates["design_accuracy"] = _accuracy_from_threshold(data.get("match_threshold"))
     if "design_gate" in data:
         updates["design_gate"] = _flag(data.get("design_gate"), "design_gate")
+    if "ui_verify" in data:
+        updates["ui_verify"] = _flag(data.get("ui_verify"), "ui_verify")
     if "compare_content" in data:
         updates["compare_content"] = _choice(data.get("compare_content"), COMPARE_CONTENTS, "compare_content")
     if "agent_tabs" in data:
@@ -6280,9 +6807,11 @@ def _data_url(data: bytes, mime: str) -> str:
 def _compare_options(reference: _Reference, page_png: bytes, page_label: str, *, mode: str = "view",
                      region: dict[str, int] | None = None, layout_width: int = 0, ref_crop: dict[str, float] | None = None,
                      ref_scale: float = 0.0, auto_region: bool = True, target_kind: str = "element",
-                     text_target: bool = False, snap: bool = False, content: str = DEFAULT_COMPARE_CONTENT) -> dict[str, Any]:
+                     text_target: bool = False, snap: bool = False, content: str = DEFAULT_COMPARE_CONTENT,
+                     padded_ref: bool = False) -> dict[str, Any]:
     return {
         "content": content,
+        "paddedRef": padded_ref,
         "ref": _data_url(reference.data, reference.mime),
         "page": _data_url(page_png, _sniff_image_mime(page_png) or "image/png"),
         "refLabel": reference.label,
@@ -6342,10 +6871,11 @@ def _render_comparison(reference: _Reference, page_png: bytes, page_label: str, 
                        region: dict[str, int] | None = None, layout_width: int = 0, ref_crop: dict[str, float] | None = None,
                        ref_scale: float = 0.0, auto_region: bool = True, target_kind: str = "element",
                        text_target: bool = False, snap: bool = False, content: str = DEFAULT_COMPARE_CONTENT,
+                       padded_ref: bool = False,
                        name_areas: Callable[[dict[str, Any]], list[str]] | None = None) -> tuple[bytes, dict[str, Any]]:
     options = _compare_options(reference, page_png, page_label, mode=mode, region=region, layout_width=layout_width,
                                ref_crop=ref_crop, ref_scale=ref_scale, auto_region=auto_region, target_kind=target_kind,
-                               text_target=text_target, snap=snap, content=content)
+                               text_target=text_target, snap=snap, content=content, padded_ref=padded_ref)
     with _compare_page() as tools:
         try:
             stats = _in_background(tools, "evaluate", "o => window.renderCompare(o)", options)
@@ -6480,11 +7010,32 @@ def _do_compare(session: _Session, page: Any, args: dict[str, Any], reference: _
     base = dict(reference.crop) if reference.crop else None
     reference = _cut_out(reference)
     capture = {"type": "jpeg", "quality": 75} if reference.mime == "image/jpeg" else {"type": "png"}
+    located: dict[str, Any] | None = None
+    frame_fill = ""
+    view_width = int(round(_page_geometry(page).get("layoutWidth") or VIEWPORT["width"]))
+    if _wants_locate(args, reference, view_width):
+        # A screenshot of a card or an input box: compare it with the element it shows, not the page.
+        located = _locate_reference(session, page, reference, args, view_width)
+        if located and located.get("selector"):
+            args = {**args, "selector": located["selector"]}
+            args.pop("full_page", None)
+            if located.get("scale") and not reference.scale and not args.get("reference_scale"):
+                reference.scale = float(located["scale"])
+            reference, frame_fill = _frame_located(page, reference, located["selector"], LOCATE_PADDING)
     if _has_element_target(args) or args.get("width") is not None:
         mode = "element"
         text_layer = bool(reference.layer and reference.layer.get("type") == "TEXT")
         rect, target, geo = _target_rect(page, args, default_padding=0, text_box=text_layer)
         page_png = _capture(page, rect, geo, **capture)
+        if frame_fill:
+            # Framed like the design's screenshot of it: the element alone, on the colour behind it.
+            framed_png = _pad_image(page_png, _sniff_image_mime(page_png) or "image/png", LOCATE_PADDING, frame_fill, detect=False)
+            if framed_png:
+                page_png = framed_png
+                rect = {"x": rect["x"] - LOCATE_PADDING, "y": rect["y"] - LOCATE_PADDING,
+                        "width": rect["width"] + 2 * LOCATE_PADDING, "height": rect["height"] + 2 * LOCATE_PADDING}
+            else:
+                frame_fill = ""
     else:
         geo = _page_geometry(page)
         if args.get("full_page"):
@@ -6515,10 +7066,12 @@ def _do_compare(session: _Session, page: Any, args: dict[str, Any], reference: _
         page_label += " · " + (target if len(target) <= 40 else target[:38].rstrip() + "…")
     geometry = {
         "mode": mode, "region": rect, "layout_width": layout_width, "ref_crop": crop, "ref_scale": scale,
-        "auto_region": not chosen, "target_kind": "region" if not _has_element_target(args) else "element",
+        # A located component's screenshot is that element, never a region of a whole-page design.
+        "auto_region": not chosen and not (located and located.get("selector")), "target_kind": "region" if not _has_element_target(args) else "element",
         "text_target": mode == "element" and (bool(geo.get("textOnly")) or bool(reference.layer and reference.layer.get("type") == "TEXT")),
         "snap": (chosen or reference.cut) and (mode == "page" or (mode == "view" and rect["y"] == 0)),
         "content": _compare_content_arg(args),
+        "padded_ref": bool(frame_fill),
     }
     # Element by element is the default: each element is measured on its own (place, size, colours,
     # type), so sample data that differs between the page and the design does not drown the layout.
@@ -6556,6 +7109,15 @@ def _do_compare(session: _Session, page: Any, args: dict[str, Any], reference: _
     if by_element:
         out.update(_elements_result(reference, target, rect, stats, total=int(found.get("total") or len(items)),
                                     content=geometry["content"]))
+        differing = [e for e in stats.get("elements") or [] if e.get("status") in _BAD_STATUSES]
+        if len(differing) >= SECTIONS_MIN_DIFFERENCES:
+            sections = _sections_of(page, differing)
+            if len(sections) >= 2 or (sections and mode != "element" and sections[0]["differ"] < len(differing)):
+                out["sections"] = sections
+                worst = sections[0]
+                out["summary"] = (str(out.get("summary") or "") + f" What differs falls in {len(sections)} section"
+                                  f"{'s' if len(sections) != 1 else ''}; the most is {worst['element'][:60]} ({worst['differ']}): "
+                                  f"work on one section at a time with compare {{selector: {worst['selector']!r}}}, then the next.")
     else:
         for key in ("similarity", "structure", "diff_pct", "verdict", "page_size", "reference_size", "reference_scale", "offset",
                     "size_diff", "shifts", "differences", "threshold"):
@@ -6577,6 +7139,24 @@ def _do_compare(session: _Session, page: Any, args: dict[str, Any], reference: _
         notes.insert(0, no_elements + " The two images were compared pixel by pixel instead.")
     if reference.note:
         notes.insert(0, reference.note)
+    if located:
+        out["located"] = {k: v for k, v in located.items() if k not in ("similar_selectors",)}
+        if located.get("selector"):
+            text = (f"The design shows one part of a page: it was found at {located.get('element') or located['selector']} "
+                    f"(selector {located['selector']!r}" + (f", match {located['score']}" if located.get("score") is not None else "") + ")"
+                    + (" as in the last compare" if located.get("remembered") else "") + ", and compared with that element alone.")
+            if located.get("resized"):
+                rz = located["resized"]
+                text += (f" It is a fluid element, as wide as in the design at a {rz['to']} px wide page, so the browser was resized "
+                         f"from {rz['from']} to {rz['to']} px wide (the design was made at about that width); resize it back when done.")
+            if located.get("similar"):
+                text += (f" The page has {located['similar']} elements like it (a list or grid of the same component): fixing the "
+                         "component's code fixes them all, so compare this one.")
+            text += " If it picked the wrong element, pass its selector (or locate: false for the whole view)."
+            notes.insert(0, text)
+        elif located.get("failed"):
+            notes.insert(0, f"The design looks like one part of a page, but it could not be found on this page: {located['failed']}. "
+                            "It was compared with the view instead; pass the matching element's selector to compare it with that.")
     if notes:
         out["notes"] = " ".join(notes)
     if out.get("differences"):
@@ -7231,7 +7811,7 @@ _SHOT_RESULT_KEYS = ("region", "target", "source", "mode", "reference", "similar
                      "reference_size", "reference_scale", "reference_region", "reference_image_size", "offset", "size_diff",
                      "shifts", "differences", "notes", "coords", "reference_tab", "opened_tab", "tab_id", "threshold", "marks",
                      "compare", "summary", "elements_compared", "elements", "missing_on_page", "background", "progress", "accuracy",
-                     "content")
+                     "content", "located", "sections")
 
 
 FAIL_STREAK_SHOT = 2
