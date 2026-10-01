@@ -10642,8 +10642,6 @@ body.pink-theme #ide-plan-view {
 	from { opacity: 0; transform: translateY(4px); }
 	to { opacity: 1; transform: none; }
 }
-/* The card rebuilds on every click; a question fades in only when it first shows, not on each click. */
-.livecode-questions-bar.is-settled .livecode-questions-question { animation: none; }
 @media (prefers-reduced-motion: reduce) {
 	.livecode-questions-bar .livecode-questions-question { animation: none; }
 }

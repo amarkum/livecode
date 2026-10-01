@@ -7932,10 +7932,6 @@ function _livecodeIsGenericStatusMessage(msg) {
   return !t || /^Working/i.test(t) || /^Explored project/i.test(t);
 }
 
-function _livecodeEscapeHtml(text) {
-  return String(text || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
 function _livecodeTypingMarkup() {
   return typeof window.livecodeChatWaitingMarkup === "function"
     ? window.livecodeChatWaitingMarkup()
@@ -11124,7 +11120,7 @@ function _livecodeRenderQuestionsBar() {
       '<textarea class="livecode-questions-freeform" rows="' + (q.options.length ? 1 : 2) + '" placeholder="' +
         (q.options.length ? "Other..." : "Type your answer…") + '" data-q="' + qIndex + '"></textarea>');
     const hint = q.options.length ? (q.allow_multiple ? '<span class="livecode-questions-hint">Pick any that apply</span>' : "") : "";
-    return '<div class="livecode-questions-question' + (qIndex === state.active ? " is-active" : "") + '" data-q="' + qIndex + '">' +
+    return '<div class="livecode-questions-question' + (qIndex === state.active ? " is-active" : "") + '" data-q="' + qIndex + '" data-key="q' + qIndex + '">' +
       '<div class="livecode-questions-prompt"><span class="livecode-questions-number">' + (qIndex + 1) + ".</span>" +
       '<span class="livecode-questions-prompt-text">' + _livecodeEscapeHtml(q.prompt) + "</span>" + hint + "</div>" +
       '<div class="livecode-questions-options">' + rows + "</div></div>";
@@ -11132,10 +11128,7 @@ function _livecodeRenderQuestionsBar() {
 
   bar.hidden = false;
   bar.classList.toggle("is-collapsed", !!state.collapsed);
-  bar.classList.toggle("is-settled", !!state.shown && state.shownActive === state.active);
-  state.shown = true;
-  state.shownActive = state.active;
-  bar.innerHTML =
+  _livecodeMorph(bar,
     '<div class="livecode-questions-header" data-questions-action="' + (state.collapsed ? "expand" : "") + '">' +
       _LIVECODE_QUESTION_ICON_SVG +
       '<span class="livecode-questions-title">Questions</span>' +
@@ -11150,17 +11143,21 @@ function _livecodeRenderQuestionsBar() {
       '<div class="livecode-questions-actions">' +
         '<button type="button" class="livecode-btn is-text" data-questions-action="skip"' + (state.submitting ? " disabled" : "") + '>Skip<span class="livecode-kbd">Esc</span></button>' +
         '<button type="button" class="livecode-btn is-yellow" data-questions-action="continue"' + (canContinue ? "" : " disabled") + ">" + continueLabel + '<span class="livecode-kbd">⏎</span></button>' +
-      "</div>");
+      "</div>"));
 
   bar.querySelectorAll(".livecode-questions-freeform").forEach(function(ta) {
     const q = state.questions[Number(ta.getAttribute("data-q"))];
-    ta.value = (q && state.other[q.id]) || "";
+    const value = (q && state.other[q.id]) || "";
+    if (document.activeElement !== ta && ta.value !== value) ta.value = value;
     _livecodeAutosizeQuestionFreeform(ta);
   });
   const scroll = bar.querySelector(".livecode-questions-scroll");
   if (scroll) {
-    scroll.scrollTop = scrollTop;
-    scroll.addEventListener("scroll", function() { _livecodeSyncQuestionsScrollMask(scroll); });
+    if (Math.abs(scroll.scrollTop - scrollTop) > 1) scroll.scrollTop = scrollTop;
+    if (!scroll.dataset.maskBound) {
+      scroll.dataset.maskBound = "1";
+      scroll.addEventListener("scroll", function() { _livecodeSyncQuestionsScrollMask(scroll); });
+    }
     _livecodeSyncQuestionsScrollMask(scroll);
   }
   if (composer) composer.classList.add("has-pending-questionnaire");
@@ -17735,9 +17732,10 @@ function _livecodeRenderSettings() {
   const query = String(window._livecodeSettingsQuery || "");
   const search = '<div class="livecode-settings-search"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>' +
     '<input type="search" data-settings-search placeholder="Search settings" value="' + _livecodeEscapeHtml(query).replace(/"/g, "&quot;") + '" aria-label="Search settings" spellcheck="false" autocomplete="off"></div>';
-  view.innerHTML =
+  const pageHtml = view.querySelector("#livecode-settings-page") ? view.querySelector("#livecode-settings-page").innerHTML : "";
+  _livecodeMorph(view,
     '<nav class="livecode-settings-nav" aria-label="Settings sections"><div class="livecode-settings-nav-title">Settings</div>' + search + nav + "</nav>" +
-    '<div class="livecode-settings-main"><div class="livecode-settings-page" id="livecode-settings-page"></div></div>';
+    '<div class="livecode-settings-main"><div class="livecode-settings-page" id="livecode-settings-page">' + pageHtml + "</div></div>");
   _livecodeRenderSettingsPage();
 }
 
@@ -17767,8 +17765,8 @@ function _livecodeRenderSettingsPage() {
   const render = query && window._livecodeSettingsSearchHtml
     ? function() { return window._livecodeSettingsSearchHtml(query); }
     : _livecodeSettingsRenderers()[_livecodeSettingsSection] || _livecodeSettingsGeneralHtml;
-  page.innerHTML = render();
-  if (main) main.scrollTop = keepScroll;
+  _livecodeMorph(page, render());
+  if (main && Math.abs(main.scrollTop - keepScroll) > 1) main.scrollTop = keepScroll;
   if (_livecodeSettingsSection === "rules" && _livecodeSettingsRules === null) _livecodeLoadSettingsRules();
   if (_livecodeSettingsSection === "mcp" && _livecodeSettingsMcpFocus) {
     const card = page.querySelector('[data-mcp-card="' + CSS.escape(_livecodeSettingsMcpFocus) + '"]');
@@ -19053,4 +19051,113 @@ function _livecodeRenderWelcomeRecents() {
       _livecodeOpenProjectOrWorkspace(item.getAttribute("data-path"));
     });
   }
+}
+
+
+// ---------------------------------------------------------------------------------------------------
+// In-place DOM patching. Re-rendering a panel by replacing its innerHTML throws away focus, the caret,
+// a half-typed value, scroll positions and running animations, and makes the whole panel flash. These
+// patch the existing nodes to match the new markup instead: same tag at the same place is updated,
+// anything else is inserted or removed. Elements with data-key are matched by key, so a list that gains
+// or loses an item keeps the other items' nodes.
+function _livecodeMorph(target, html) {
+  if (!target) return;
+  const tpl = document.createElement("template");
+  tpl.innerHTML = String(html == null ? "" : html);
+  _livecodeMorphChildren(target, tpl.content);
+}
+
+function _livecodeMorphKey(node) {
+  return node.nodeType === 1 ? (node.getAttribute("data-key") || node.id || "") : "";
+}
+
+function _livecodeMorphCompatible(a, b) {
+  if (a.nodeType !== b.nodeType) return false;
+  if (a.nodeType !== 1) return true;
+  if (a.tagName !== b.tagName) return false;
+  if (a.tagName === "INPUT" && (a.getAttribute("type") || "text") !== (b.getAttribute("type") || "text")) return false;
+  return true;
+}
+
+function _livecodeMorphChildren(fromEl, toEl) {
+  if (fromEl.hasAttribute && fromEl.hasAttribute("data-morph-skip")) return;
+  const byKey = new Map();
+  for (let n = fromEl.firstChild; n; n = n.nextSibling) {
+    const k = _livecodeMorphKey(n);
+    if (k && !byKey.has(k)) byKey.set(k, n);
+  }
+  let cursor = fromEl.firstChild;
+  const wanted = Array.from(toEl.childNodes);
+  for (let i = 0; i < wanted.length; i++) {
+    const want = wanted[i];
+    const key = _livecodeMorphKey(want);
+    let have = null;
+    if (key) {
+      if (byKey.has(key)) { have = byKey.get(key); byKey.delete(key); }
+    } else if (cursor && !_livecodeMorphKey(cursor) && _livecodeMorphCompatible(cursor, want)) {
+      have = cursor;
+    }
+    if (have) {
+      if (have !== cursor) fromEl.insertBefore(have, cursor);
+      else cursor = have.nextSibling;
+      _livecodeMorphNode(have, want);
+    } else {
+      fromEl.insertBefore(document.importNode(want, true), cursor);
+    }
+  }
+  // Whatever was not matched is gone from the new markup.
+  const keep = new Set();
+  for (let n = toEl.firstChild, m = fromEl.firstChild; n && m; n = n.nextSibling, m = m.nextSibling) keep.add(m);
+  Array.from(fromEl.childNodes).forEach(function(n) { if (!keep.has(n)) fromEl.removeChild(n); });
+}
+
+const _LIVECODE_MORPH_LIVE_PROPS = { value: true, checked: true, selected: true };
+
+function _livecodeMorphNode(from, to) {
+  if (from.nodeType === 3 || from.nodeType === 8) {
+    if (from.data !== to.data) from.data = to.data;
+    return;
+  }
+  if (from.nodeType !== 1) return;
+  const focused = document.activeElement === from;
+  // Attributes: add or update what the new markup has, drop what it lacks.
+  const seen = new Set();
+  for (let i = 0; i < to.attributes.length; i++) {
+    const attr = to.attributes[i];
+    seen.add(attr.name);
+    if (focused && (attr.name === "value" || attr.name === "checked")) continue;
+    if (from.getAttribute(attr.name) !== attr.value) from.setAttribute(attr.name, attr.value);
+  }
+  for (let i = from.attributes.length - 1; i >= 0; i--) {
+    const name = from.attributes[i].name;
+    if (!seen.has(name) && !(focused && (name === "value" || name === "checked"))) from.removeAttribute(name);
+  }
+  // Form state follows the markup unless the user is in that control right now.
+  if (!focused) {
+    if (from.tagName === "INPUT") {
+      const type = (from.getAttribute("type") || "text").toLowerCase();
+      if (type === "checkbox" || type === "radio") {
+        const checked = to.hasAttribute("checked");
+        if (from.checked !== checked) from.checked = checked;
+      } else {
+        const value = to.getAttribute("value") || "";
+        if (from.value !== value) from.value = value;
+      }
+    } else if (from.tagName === "TEXTAREA") {
+      if (from.value !== to.textContent) from.value = to.textContent;
+      return;
+    } else if (from.tagName === "SELECT") {
+      _livecodeMorphChildren(from, to);
+      const chosen = to.querySelector("option[selected]");
+      if (chosen && from.value !== chosen.value) from.value = chosen.value;
+      return;
+    }
+  } else if (from.tagName === "TEXTAREA" || from.tagName === "INPUT") {
+    return;
+  }
+  if (from.tagName === "SCRIPT" || from.tagName === "STYLE") {
+    if (from.textContent !== to.textContent) from.textContent = to.textContent;
+    return;
+  }
+  _livecodeMorphChildren(from, to);
 }

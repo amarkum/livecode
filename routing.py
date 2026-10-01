@@ -46,6 +46,20 @@ _GREETING_RE = re.compile(
     r"^\s*(hi|hello|hey|thanks|thank you|thx|ok|okay|yo|cool|great|nice)(?:\s+(?:there|so much|a lot|again))?[\s!.?,:)]*$",
     re.IGNORECASE,
 )
+# "thanks, it works", "perfect, looks good now": the user is closing the loop, not asking for more.
+_ACKNOWLEDGEMENT_RE = re.compile(
+    r"^\s*(?:(?:ok(?:ay)?|thanks?|thank you|thx|great|perfect|awesome|nice|cool|good|sweet|brilliant|excellent|lgtm|yep|yes|got it|all good)[\s,.!]*)+"
+    r"(?:(?:it|that|this|everything|the\s+\w+)\s+(?:works?|worked|looks?\s+good|fixed\s+it|did\s+it|solved\s+it|is\s+(?:fixed|working|fine|good|done|better))(?:\s+now)?|"
+    r"(?:looks?|working)\s+(?:good|fine|great)(?:\s+now)?|works?(?:\s+now)?|fixed|done|all\s+good|no\s+more\s+(?:questions|changes))?[\s!.,:)]*$",
+    re.IGNORECASE,
+)
+# A question about the code, not an instruction to change it: "why is the implementation slow?".
+_QUESTION_RE = re.compile(
+    r"^\s*(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?(?:tell|explain|show|describe|help\s+me\s+understand)\b|"
+    r"(?:why|what|how|is|are|does|do|did|where|which|who|when|whose|whom)\b)",
+    re.IGNORECASE,
+)
+_POLITE_LEAD_RE = re.compile(r"^\s*(?:please\s+)?(?:can|could|would|will)\s+you\s+(?:please\s+)?", re.IGNORECASE)
 _META_RE = re.compile(
     r"\b(what can you do|your capabilities|how do you work|who are you)\b",
     re.IGNORECASE,
@@ -74,8 +88,21 @@ _BULK_TASK_RE = re.compile(
 )
 
 
+def is_question(question: str) -> bool:
+    """A request for an explanation rather than a change ("why is X slow?", "could you explain Y?")."""
+    q = (question or "").strip()
+    if not q:
+        return False
+    if _QUESTION_RE.match(q):
+        return True
+    stripped = _POLITE_LEAD_RE.sub("", q)
+    return bool(_QUESTION_RE.match(stripped)) and not _CODE_CHANGE_RE.match(stripped)
+
+
 def is_hard_task(question: str) -> bool:
     q = question or ""
+    if is_question(q) and not _BULK_TASK_RE.search(q):
+        return False
     if _HARD_TASK_RE.search(q):
         return True
     return len(q) > 600 and bool(_CODE_CHANGE_RE.search(q))
@@ -105,8 +132,11 @@ def bump_for_hard_task(question: str, classification: dict[str, Any]) -> dict[st
     return out
 
 
+# "bump the version to 2.1", "set version = '1.4.0'": an instruction with a target number, not a question
+# about versions ("what version of node do I need?").
 _VERSION_BUMP_RE = re.compile(
-    r"\b(bump|update|change|set|increment)\b.*\bversion\b|\bversion\b.*\b(to|=\s*['\"]?\d)",
+    r"\b(bump|update|change|set|increment|raise|upgrade)\b[^.?!]{0,40}\bversion\b|"
+    r"\bversion\b[^.?!]{0,30}\b(?:to|=)\s*['\"]?v?\d",
     re.IGNORECASE,
 )
 
@@ -140,7 +170,7 @@ def heuristic_classification(question: str, *, has_prior_turns: bool) -> dict[st
             edit_scope="none",
             needs_flagship_model=False,
         )
-    if not has_prior_turns and _GREETING_RE.match(q):
+    if _GREETING_RE.match(q) or _ACKNOWLEDGEMENT_RE.match(q):
         return _intelligent_defaults(
             is_meta=False,
             is_actionable=False,
@@ -155,7 +185,7 @@ def heuristic_classification(question: str, *, has_prior_turns: bool) -> dict[st
             prior_context_hint="",
             goal_kind="meta",
         )
-    if _VERSION_BUMP_RE.search(q):
+    if _VERSION_BUMP_RE.search(q) and not is_question(q):
         return _intelligent_defaults(
             is_meta=False,
             is_actionable=True,
@@ -204,12 +234,17 @@ def get_session_chat_history_for_classify(
         return projected[:-1]
     return projected
 
+def is_acknowledgement(question: str) -> bool:
+    return bool(_GREETING_RE.match(question or "") or _ACKNOWLEDGEMENT_RE.match(question or ""))
+
+
 def needs_codebase_evidence(question: str, *, has_prior_turns: bool = False) -> bool:
     q = (question or "").strip()
-    if not q:
+    if not q or is_acknowledgement(q):
         return False
     if _CODEBASE_EVIDENCE_RE.search(q):
         return True
+    # A follow-up ("do the same for that one") needs the code; a closing remark ("thanks, it works") was ruled out above.
     return bool(has_prior_turns and _FOLLOW_UP_RE.search(q))
 
 def wants_structured_json(question: str) -> bool:
@@ -241,35 +276,105 @@ def user_requests_browser(question: str) -> bool:
 
 _UI_CHECK_RE = re.compile(
     r"\b(?:verify|check|test|confirm|look\s+at|see|show\s+me)\b[^.;!?]{0,40}\b(?:visually|in\s+the\s+(?:built[- ]in\s+)?browser|"
-    r"on\s+(?:the\s+)?(?:page|screen)|how\s+it\s+looks|the\s+(?:ui|page|screen))\b",
+    r"on\s+(?:the\s+)?(?:page|screen)|how\s+it\s+looks|the\s+(?:ui|page|screen))\b|"
+    r"\b(?:take\s+a\s+screenshot|screenshot\s+(?:it|the\s+(?:page|result|change))|open\s+(?:it|the\s+page)\s+in\s+the\s+browser|"
+    r"in\s+the\s+(?:built[- ]in\s+)?browser)\b",
     re.IGNORECASE,
 )
 
 
+_NEGATED_BEFORE_RE = re.compile(
+    r"\b(?:don'?t|do\s+not|dont|never|no\s+need\s+to|without|skip|not|avoid|instead\s+of|rather\s+than|wait\s+(?:for|until|before)|"
+    r"before\s+you|until\s+i|hold\s+off(?:\s+on)?|hold\s+(?:it|that)|leave\s+it|unless\s+i|only\s+if\s+i)\b",
+    re.IGNORECASE,
+)
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.;!?\n])\s+|\s+(?=\bbut\b)", re.IGNORECASE)
+
+
+def _negated(sentence: str, start: int) -> bool:
+    """Whether a negation or a hold-off word comes earlier in the same sentence as the match at start."""
+    return bool(_NEGATED_BEFORE_RE.search(sentence[:start]))
+
+
+def _sentences(text: str) -> list[tuple[int, str]]:
+    """(offset, sentence) pairs: sentences split at . ; ! ? and before "but", so a negation is judged within its clause."""
+    out: list[tuple[int, str]] = []
+    pos = 0
+    for part in _SENTENCE_SPLIT_RE.split(text or ""):
+        if part is None:
+            continue
+        idx = text.find(part, pos)
+        if idx < 0:
+            idx = pos
+        out.append((idx, part))
+        pos = idx + len(part)
+    return out
+
+
 def user_requests_ui_check(question: str) -> bool:
-    """The request itself asks to see the result in the browser, so checking a UI change needs no question first."""
-    return user_requests_browser(question) or bool(_UI_CHECK_RE.search(question or ""))
+    """The request itself asks to see the result in the browser, so checking a UI change needs no question first.
+    A negated ask ("don't check the page visually") is not one."""
+    if browse_request(question) is not None:
+        return True
+    for offset, sentence in _sentences(question or ""):
+        for match in _UI_CHECK_RE.finditer(sentence):
+            if not _negated(sentence, match.start()):
+                return True
+    return False
 
 
 # A site the user names: a URL, a local dev server, or a bare domain (github.com, my-app.vercel.app).
+# Bare domains ending in a TLD that is also a file extension or a word (deploy.sh, config.in, notion.so) count
+# only after a strong visit verb, so "test deploy.sh" is a script and "go to notion.so" is a site.
+_WEB_TLDS = r"com|org|net|io|dev|app|ai|co|uk|de|fr|es|nl|ca|au|edu|gov|xyz|info|site|tech|cloud|store|shop|page|tv|ly"
+_AMBIGUOUS_TLDS = r"in|me|us|it|to|so|sh"
 _SITE_PATTERN = (
     r"(?P<site>https?://[^\s<>\"']+|(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d{2,5})?(?:/[^\s<>\"']*)?|"
     r"(?<![\w./-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
-    r"(?:com|org|net|io|dev|app|ai|co|in|me|us|uk|de|fr|es|it|nl|ca|au|edu|gov|xyz|info|site|tech|cloud|store|shop|page|to|tv|ly|so|sh)"
+    r"(?:" + _WEB_TLDS + r")"
     r"(?![\w-])(?:/[^\s<>\"']*)?)"
 )
+_AMBIGUOUS_SITE_PATTERN = (
+    r"(?P<site>(?<![\w./-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:" + _AMBIGUOUS_TLDS + r")(?![\w-])(?:/[^\s<>\"']*)?)"
+)
+_STRONG_VISIT_SOURCE = r"\b(?:go(?:\s+over)?\s+to|goto|visit|open(?:\s+up)?|navigate\s+to|head\s+(?:over\s+)?to|browse\s+to|take\s+me\s+to|pull\s+up|launch|surf\s+to|log\s*in\s+to|sign\s+in\s+to)\b"
 _VISIT_VERB = (
     r"\b(?:go(?:\s+over)?\s+to|goto|visit|open(?:\s+up)?|navigate\s+to|head\s+(?:over\s+)?to|browse\s+(?:to\s+)?|"
     r"check(?:\s+out)?|pull\s+up|load|look\s+at|show\s+me|take\s+me\s+to|test|try|preview|launch|hit|surf\s+to|"
     r"log\s*in\s+to|sign\s+in\s+to)\b"
 )
-_VISIT_RE = re.compile(
-    _VISIT_VERB + r"\s+(?:the\s+|this\s+|my\s+|our\s+|that\s+)?(?:(?:web)?site|web\s*page|page|website|app|url|link|dashboard|home\s*page|server)?"
-    r"\s*(?:at\s+|on\s+|of\s+|:\s*)?" + _SITE_PATTERN,
+_SITE_LEAD = r"\s+(?:the\s+|this\s+|my\s+|our\s+|that\s+)?(?:(?:web)?site|web\s*page|page|website|app|url|link|dashboard|home\s*page|server)?\s*(?:at\s+|on\s+|of\s+|:\s*)?"
+_VISIT_RE = re.compile(_VISIT_VERB + _SITE_LEAD + _SITE_PATTERN, re.IGNORECASE)
+_STRONG_VISIT_AMBIGUOUS_RE = re.compile(_STRONG_VISIT_SOURCE + _SITE_LEAD + _AMBIGUOUS_SITE_PATTERN, re.IGNORECASE)
+_ANY_SITE_RE = re.compile(_SITE_PATTERN, re.IGNORECASE)
+# A URL quoted as evidence ("calling https://api.example.com/users returns 500") is not a place to go.
+_URL_AS_EVIDENCE_BEFORE_RE = re.compile(
+    r"\b(?:calling|called|call|GET|POST|PUT|PATCH|DELETE|fetch(?:ing|es)?|curl|wget|request(?:s|ing)?(?:\s+to)?|hitting|hit|"
+    r"endpoint|returns?|response\s+from|error\s+(?:from|at|on)|failed\s+(?:on|at)|url\s*[:=]|href=|src=|base_?url)\s*[\"'`(]*$",
     re.IGNORECASE,
 )
-_ANY_SITE_RE = re.compile(_SITE_PATTERN, re.IGNORECASE)
-_ANY_VISIT_VERB_RE = re.compile(_VISIT_VERB + r"|\b(?:see|view|read|screenshot|browse|browser|in the browser)\b", re.IGNORECASE)
+_URL_AS_EVIDENCE_AFTER_RE = re.compile(
+    r"^[\"'`)]*\s*(?:returns?|returned|responds?|responded|fails?|failed|gives?|gave|throws?|threw|is\s+returning|times?\s+out|timed\s+out|"
+    r"\d{3}\b|->|=>|:\s*\d{3}\b)",
+    re.IGNORECASE,
+)
+_ERROR_REPORT_RE = re.compile(r"\b(?:traceback|stack\s*trace|exception|error|errors|failed|fails|failing|crash(?:es|ed)?|bug|[45]\d\d\b)", re.IGNORECASE)
+_CODE_SPAN_RE = re.compile(r"`[^`\n]*`|```.*?```", re.S)
+
+
+def _url_is_evidence(text: str, start: int, end: int) -> bool:
+    """A URL inside a code span, or framed as what was called and what came back, is being reported, not visited."""
+    for span in _CODE_SPAN_RE.finditer(text):
+        if span.start() <= start and end <= span.end():
+            return True
+    before = text[max(0, start - 40):start]
+    after = text[end:end + 40]
+    if _URL_AS_EVIDENCE_BEFORE_RE.search(before) or _URL_AS_EVIDENCE_AFTER_RE.match(after):
+        return True
+    return False
+
+
+_URL_FALLBACK_VERB_RE = re.compile(_STRONG_VISIT_SOURCE + r"|\b(?:check(?:\s+out)?|look\s+at|show\s+me|preview|screenshot|browse|browser|in\s+the\s+browser)\b", re.IGNORECASE)
 
 # Well-known sites asked for by name, without a domain ("go to amazon and search for …").
 KNOWN_SITES = {
@@ -285,7 +390,7 @@ KNOWN_SITES = {
     "zomato": "zomato.com", "ebay": "ebay.com", "walmart": "walmart.com", "etsy": "etsy.com", "airbnb": "airbnb.com",
     "booking.com": "booking.com", "mdn": "developer.mozilla.org", "codepen": "codepen.io", "dev.to": "dev.to",
 }
-_STRONG_VISIT = r"\b(?:go(?:\s+over)?\s+to|goto|visit|open(?:\s+up)?|navigate\s+to|head\s+(?:over\s+)?to|browse\s+to|take\s+me\s+to|pull\s+up|launch|surf\s+to)\b"
+_STRONG_VISIT = _STRONG_VISIT_SOURCE
 _NAMED_SITE_RE = re.compile(
     _STRONG_VISIT + r"\s+(?:the\s+)?(?P<name>" + "|".join(sorted((re.escape(k) for k in KNOWN_SITES), key=len, reverse=True)) + r")"
     r"(?:\s+(?:website|site|web\s*site|home\s*page|page))?(?![\w.-])",
@@ -312,18 +417,27 @@ def browse_request(question: str) -> dict[str, Any] | None:
     {"site": "github.com", "steps": "check the latest issues"}, {"app": True, ...} for their own running
     app ("open my app", "check it in the browser"), or None when the message asks for neither."""
     text = question or ""
-    match = _VISIT_RE.search(text)
-    if match:
-        site = match.group("site").rstrip(".,;:!?)")
-        return {"site": site, "steps": _site_steps(text, match.start("site") + len(site)), "app": False}
+    for pattern in (_VISIT_RE, _STRONG_VISIT_AMBIGUOUS_RE):
+        for match in pattern.finditer(text):
+            if _url_is_evidence(text, match.start("site"), match.end("site")):
+                continue
+            site = match.group("site").rstrip(".,;:!?)")
+            return {"site": site, "steps": _site_steps(text, match.start("site") + len(site)), "app": False}
     named = _NAMED_SITE_RE.search(text)
     if named:
         return {"site": KNOWN_SITES[named.group("name").lower()], "steps": _site_steps(text, named.end()), "app": False}
+    # A URL or local address without a verb right before it still counts when the message asks to look at
+    # something in the browser, unless it reads as an error report quoting the URL.
     for found in _ANY_SITE_RE.finditer(text):
         site = found.group("site")
-        if site.lower().startswith(("http://", "https://", "localhost", "127.", "0.0.0.0")) and _ANY_VISIT_VERB_RE.search(text):
-            site = site.rstrip(".,;:!?)")
-            return {"site": site, "steps": _site_steps(text, found.start("site") + len(site)), "app": False}
+        if not site.lower().startswith(("http://", "https://", "localhost", "127.", "0.0.0.0")):
+            continue
+        if _url_is_evidence(text, found.start("site"), found.end("site")):
+            continue
+        if not _URL_FALLBACK_VERB_RE.search(text) or _ERROR_REPORT_RE.search(text):
+            continue
+        site = site.rstrip(".,;:!?)")
+        return {"site": site, "steps": _site_steps(text, found.start("site") + len(site)), "app": False}
     apps = list(_APP_STRICT_RE.finditer(text))
     if apps:
         steps = next((st for st in (_site_steps(text, m.end()) for m in reversed(apps)) if st), "")
@@ -338,38 +452,88 @@ def user_requests_site_visit(question: str) -> str:
     return str(found.get("site") or "") if found else ""
 
 # The final steps a request itself asks for: "send him a message saying …" is the go-ahead to press Send.
-_ACTION_VERBS = {
-    "send": r"send|sending|reply|respond|dm|ping|e-?mail|message\s+(?:him|her|them|[A-Z][\w.-]+)|text\s+(?:him|her|them|[A-Z][\w.-]+)|invite|connect\s+with",
-    "post": r"post|publish|tweet|comment\s+on|share\s+(?:it|this|the\s+post)",
-    "submit": r"submit|apply(?:\s+(?:for|to))?|sign\s*up|register",
-    "buy": r"buy|purchase|(?<!in\s)order(?!\s+(?:of|by|to|in)\b)|pay(?:\s+for)?|check\s*out\s+(?:the\s+)?(?:cart|basket)|checkout",
-    "book": r"book|reserve",
-    "confirm": r"confirm",
+# Each kind needs the verb and a real target in the user's words, so that coding vocabulary ("a POST /users
+# endpoint", "the email validation", "the order status", "register the route") never counts as one.
+_NAME = r"(?-i:[A-Z][\w.'-]*)"  # a capitalised name even though the patterns ignore case
+_PERSON = r"(?:him|her|them|me|us|" + _NAME + r")"
+_OBJ = r"(?:it|this|that|them|the|a|an|my|our|your|his|her|their|this\s+\w+|these|those|one|two|three|\d+|some)"
+_MESSAGE_WORDS = r"(?:message|messages|msg|email|e-mail|mail|note|reply|response|text|dm|invite|invitation|request|greeting|reminder|follow[- ]up|thank[- ]you)"
+_ACTION_PATTERNS: dict[str, list[str]] = {
+    "send": [
+        r"\bsend(?:ing)?\s+" + _PERSON + r"\b",
+        r"\bsend(?:ing)?\s+(?:" + _OBJ + r"\s+)?(?:\w+\s+){0,2}" + _MESSAGE_WORDS + r"\b",
+        r"\bsend\s+(?:it|this|that|them)\b",
+        r"\b(?:reply|respond)\s+(?:to\s+" + _PERSON + r"|to\s+(?:the|his|her|their|that|this)\s+(?:\w+\s+){0,2}" + _MESSAGE_WORDS + r"|with\b|saying\b)",
+        r"\b(?:message|text|dm|ping|e-?mail)\s+" + _PERSON + r"\b(?!\s+(?:validation|address|field|input|format|template|regex|column|model|type|class|service|provider))",
+        r"\b(?:e-?mail|dm|message)\s+(?:it|this|that)\s+to\b",
+        r"\binvite\s+" + _PERSON + r"\b",
+        r"\bconnect\s+with\s+" + _PERSON + r"\b",
+    ],
+    "post": [
+        r"(?<![/@\w])post\s+(?:it|this|that|them|the\s+(?:update|post|photo|picture|image|video|comment|thread|article|story|reply|link)|a\s+(?:comment|reply|status|photo|story|thread|tweet|note)|my\s+\w+|an?\s+update)\b(?!\s*(?:request|method|route|endpoint|handler|body|data|params|hook|call|/))",
+        r"\bpublish\s+(?:it|this|that|the\s+(?:post|article|story|page|release|update|draft)|my\s+\w+)\b",
+        r"\btweet\b(?!\s*(?:id|url|embed|component|model))",
+        r"\bcomment\s+on\s+(?:his|her|their|the|this|that|" + _NAME + r")\b",
+        r"\bshare\s+(?:it|this|that|the\s+post)\s+(?:on|to|with)\b",
+    ],
+    "submit": [
+        r"\bsubmit\s+(?:it|this|that|the|my|our|a|an)\b(?!\s*(?:button|handler|event|hook|callback|action|function|method))",
+        r"\bapply\s+(?:for|to)\s+(?:the\s+|this\s+|that\s+)?(?:job|role|position|opening|vacancy|grant|visa|program|programme|internship|course|scholarship|loan|card|" + _NAME + r")",
+        r"\bsign\s*up\b(?!\s*(?:page|form|flow|button|component|screen|route|endpoint|handler|modal|view))",
+        r"\bregister\s+(?:for|on|at|with)\s+(?:the\s+|this\s+|that\s+)?(?:event|course|site|service|webinar|conference|meetup|newsletter|account|" + _NAME + r")",
+        r"\b(?:create|open)\s+an?\s+account\s+(?:on|at|with)\b",
+    ],
+    "buy": [
+        r"\b(?:buy|purchase)\s+" + _OBJ + r"\b(?!\s*(?:button|flow|page|form|component|screen|modal|now\s+button))",
+        r"\border\s+(?:it|this|that|them|me|a|an|one|two|three|\d+|some|the\s+(?:\w+\s+)?(?:book|cable|charger|phone|laptop|item|product|parts?|food|pizza|groceries|same))\b(?!\s*(?:status|history|id|number|details|list|table|page|model|form|summary|by|of|type))",
+        r"\bplace\s+(?:the|an|my|this|that)\s+order\b",
+        r"\bpay\s+(?:for\s+(?:it|this|that|them|the)|the\s+(?:bill|invoice|fee|balance|amount|order)|it\s+now|now)\b",
+        r"\b(?:proceed\s+to|go\s+to|complete|finish|do)\s+(?:the\s+)?check\s*out\b",
+        r"\bcheck\s*out\s+(?:now|the\s+(?:cart|basket))\b",
+    ],
+    "book": [
+        r"\b(?:book|reserve)\s+(?:me\s+)?(?:a|an|the|one|two|three|\d+|this|that|it|my|our)\b(?!\s*(?:component|page|model|form|flow|table\s+(?:schema|model|component)|list))",
+    ],
+    "confirm": [
+        r"\bconfirm\s+(?:it|the|my|our|this|that)\s*(?:order|booking|reservation|purchase|payment|appointment|subscription|request|transfer)?\b(?!\s+(?:that|whether|if|the\s+(?:test|tests|build|fix|change|behaviou?r|output|result)))",
+        r"\bconfirm\s+(?:it|the\s+(?:order|booking|reservation|purchase|payment|appointment|subscription))\b",
+    ],
 }
-_NEGATION_RE = re.compile(r"\b(?:don'?t|do\s+not|never|without|not|no\s+need\s+to|avoid|instead\s+of|before\s+you|until\s+i|wait\s+(?:for|until))\b[^.;!?]{0,24}$", re.I)
-_DRAFT_RE = re.compile(r"\b(?:draft|prepare|write\s+up|compose)\b[^.;!?]{0,60}\b(?:but|and)\s+(?:don'?t|do\s+not|not)\b|\bjust\s+(?:draft|prepare|fill)\b|\bfor\s+me\s+to\s+(?:review|check)\b", re.I)
+_ACTION_RES = {kind: [re.compile(p, re.IGNORECASE) for p in patterns] for kind, patterns in _ACTION_PATTERNS.items()}
+# "draft it for me to review", "write it up but wait for my OK": prepare, do not send.
+_DRAFT_RE = re.compile(
+    r"\b(?:draft|prepare|write\s+up|compose|type\s+(?:up|out))\b[^.;!?]{0,80}\b(?:but|and)\s+(?:don'?t|do\s+not|not|wait|hold|let\s+me|check\s+with\s+me|ask\s+me)\b|"
+    r"\bjust\s+(?:draft|prepare|fill|type|write)\b|\bfor\s+me\s+to\s+(?:review|check|approve|read|look\s+at|send)\b|"
+    r"\bwait\s+for\s+my\s+(?:ok|okay|approval|go[- ]ahead|confirmation|review|sign[- ]off)\b|\bbefore\s+(?:you\s+)?(?:send|post|submit|buy|book)(?:ing)?\b|"
+    r"\bi(?:'ll|\s+will)\s+(?:send|post|submit|review|check)\s+(?:it|them|that|this)\b|\bdon'?t\s+(?:actually\s+)?(?:send|post|submit|buy|book|order|pay)\b",
+    re.IGNORECASE,
+)
 
 
 def authorized_final_actions(question: str) -> list[str]:
     """The kinds of final step the request itself asks for ("send", "post", "submit", "buy", "book",
-    "confirm"): the user asked, so doing it needs no second yes. A negated one ("don't send it yet", "just
-    draft it") is left out."""
+    "confirm"), in the order they appear: the user asked, so doing it needs no second yes. The verb must
+    come with its target in the user's words, and a negated or held-off one ("don't send it yet", "draft it
+    for me to review", "wait for my OK before sending") is left out: when in doubt, nothing is authorized."""
     text = question or ""
     if _DRAFT_RE.search(text):
         return []
-    kinds = []
-    for kind, verbs in _ACTION_VERBS.items():
-        for match in re.finditer(r"\b(?:" + verbs + r")\b", text, re.I if kind != "send" else 0):
-            if not _NEGATION_RE.search(text[: match.start()]):
+    kinds: list[str] = []
+    for kind, patterns in _ACTION_RES.items():
+        for offset, sentence in _sentences(text):
+            matched = False
+            for pattern in patterns:
+                match = pattern.search(sentence)
+                while match:
+                    if not _negated(sentence, match.start()):
+                        matched = True
+                        break
+                    match = pattern.search(sentence, match.end())
+                if matched:
+                    break
+            if matched:
                 kinds.append(kind)
                 break
-        else:
-            # "send" matched case-sensitively above only for "message Name": try the verbs in any case.
-            if kind == "send":
-                for match in re.finditer(r"\b(?:send|sending|reply|respond|dm|ping|e-?mail|invite|connect\s+with)\b", text, re.I):
-                    if not _NEGATION_RE.search(text[: match.start()]):
-                        kinds.append(kind)
-                        break
     return kinds
 
 
@@ -421,7 +585,7 @@ def is_ui_file(path: str) -> bool:
 _DESIGN_INTENT_RE = re.compile(
     r"\b(?:figma|canva|sketch (?:app|file|design)|penpot|adobe xd|zeplin|framer|invision|uizard|balsamiq)\b|"
     r"\b(?:mock-?ups?|wireframes?|pixel[- ](?:perfect|by[- ]pixel))\b|"
-    r"\b(?:the|this|that|my|our|a) (?:ui |visual |web |page )?designs?\b|\bdesign (?:file|image|mock|spec|screenshot|export|link)s?\b|"
+    r"\b(?:the|this|that|my|our|a) (?:ui |visual |web |page )?designs?\b(?!\s*(?:pattern|system|token|decision|doc|document|principle|review|discussion|approach|choice|philosophy|language|guideline|goal|problem|flaw|smell|question|of\s+the\s+(?:api|schema|database|db|class|module|code)))|\bdesign (?:file|image|mock|spec|screenshot|export|link)s?\b|"
     r"\blooks? (?:exactly )?(?:like|the same as) (?:the |this |my )?(?:design|image|screenshot|mock|picture)\b|"
     r"\bmatch(?:es|ing)? (?:the |this |my )?(?:design|mock|mockup|screenshot|image)\b",
     re.IGNORECASE,
@@ -433,6 +597,8 @@ _UI_BUILD_RE = re.compile(
 )
 
 def user_requests_design_work(question: str, has_images: bool = False) -> bool:
+    """Building or fixing a page to look like a design (a Figma file, a mockup, an attached screenshot).
+    A question about a design pattern or a design decision is not design work."""
     text = question or ""
     if _DESIGN_INTENT_RE.search(text):
         return True

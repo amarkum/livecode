@@ -75,8 +75,14 @@ class ScriptedModel:
 
 
 class _Socket:
-    def emit(self, *args: Any, **kwargs: Any) -> None:
-        pass
+    """Records what the harness would send to the page: the progress events (tool calls, results, status)."""
+
+    def __init__(self) -> None:
+        self.progress: list[dict[str, Any]] = []
+
+    def emit(self, event: str, payload: Any = None, *args: Any, **kwargs: Any) -> None:
+        if event == "livecode_progress" and isinstance(payload, dict):
+            self.progress.append(payload)
 
 
 def run_turn(project: str, question: str, model: ScriptedModel, *, images: list[str] | None = None,
@@ -89,12 +95,13 @@ def run_turn(project: str, question: str, model: ScriptedModel, *, images: list[
     if images:
         content = [{"type": "text", "text": question}] + [{"type": "image_url", "image_url": {"url": u}} for u in images]
     events: list[dict[str, Any]] = []
+    socket = _Socket()
     for chunk in run_livecode_turn(
         project, question, [], user_content=content, user_model="test-model", call_with_tools=model,
         is_azure_model=lambda m: True, repo_grep_fn=helpers._repo_grep, repo_read_fn=helpers._repo_read_file,
         repo_list_fn=helpers._repo_list_dir, repo_ast_fn=helpers._repo_ast_symbols,
         create_diff_html_fn=helpers.create_diff_html, execute_command_pty_fn=lambda *a, **k: None,
-        socketio=_Socket(), session_id=session_id or f"test-{uuid.uuid4().hex[:8]}",
+        socketio=socket, session_id=session_id or f"test-{uuid.uuid4().hex[:8]}",
         enable_browser_tools=browser, supports_images_fn=lambda m: True, mode=mode,
     ):
         if chunk.startswith("data: "):
@@ -103,5 +110,5 @@ def run_turn(project: str, question: str, model: ScriptedModel, *, images: list[
             except ValueError:
                 pass
     done = [e for e in events if e.get("done")]
-    return {"answer": (done[-1].get("answer") if done else ""), "events": events,
+    return {"answer": (done[-1].get("answer") if done else ""), "events": events, "progress": socket.progress,
             "errors": [e["error"] for e in events if e.get("error")]}

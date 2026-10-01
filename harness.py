@@ -23,6 +23,7 @@ from livecode.activity_log import (
 from livecode import agent_settings
 from livecode.model_pricing import estimate_usage_cost_usd
 from livecode.compaction.full_replace import fit_messages_for_summarizer
+from livecode.compaction.intra import estimate_tools_tokens
 from livecode.context import (
     build_turn_activity_summary,
     compact_stale_tool_messages,
@@ -63,8 +64,14 @@ from livecode.prompts import (
     DESIGN_LOOP_FIGMA_NOTE,
     DESIGN_LOOP_PROMPT,
     DESIGN_RECHECK_TEMPLATE,
+    ASK_IN_CARD_TEMPLATE,
+    AUTO_CHECK_FAILED_TEMPLATE,
+    GO_AHEAD_TEMPLATE,
+    AUTO_CHECK_MAX_RUNS,
+    EXPLORATION_STREAK_LATE_NUDGE_TEMPLATE,
     PERMISSION_GATE_MAX_FIRES,
     PERMISSION_GATE_TEMPLATE,
+    TEST_STILL_FAILING_TEMPLATE,
     UI_VERIFY_ASK_TEMPLATE,
     UI_VERIFY_DECLINED_NOTE,
     UI_VERIFY_GATE_MAX_FIRES,
@@ -95,6 +102,7 @@ from livecode.intelligent_classifier import (
     describe_intelligent_classification,
     intelligent_classify_turn,
 )
+from livecode.verification import detect_check_command, failure_tail
 from livecode.routing import (
     get_session_chat_history_for_classify,
     needs_code_change,
@@ -170,6 +178,8 @@ from livecode.tools import (
     READ_ONLY_TOOL_NAMES,
     STRUCTURED_OUTPUT_MAX_RETRIES,
     STRUCTURED_OUTPUT_TOOL,
+    _livecode_run_command,
+    _selected_workspace_root,
     compact_tool_result_for_llm,
     dispatch_tool,
     edit_target_path,
@@ -1009,6 +1019,39 @@ def _run_exhaustion_summarize(
         return text
 
     return _build_exhaustion_partial_summary(tool_events)
+
+_PERMISSION_VERB_KINDS = {"send": "send", "post": "post", "publish": "post", "submit": "submit", "apply": "submit",
+                          "book": "book", "buy": "buy", "purchase": "buy", "pay": "buy", "place": "buy"}
+_GENERIC_PERMISSION_VERBS = frozenset({"proceed", "go ahead", "continue", "do it", "do that", "do this", "do so", "click", "press", "hit"})
+_ROUTINE_VERBS = frozenset({"proceed", "go ahead", "continue", "do it", "do that", "do this", "do so"})
+# What makes "shall I proceed?" the user's call rather than a routine step: the question is about something
+# hard to undo, or about money, production or other people.
+_RISKY_ASK_RE = re.compile(
+    r"\b(?:drop|delete|remove|wipe|erase|truncate|reset\s+--hard|force[- ]push|rm\s+-rf|overwrite|destroy|purge|revoke|"
+    r"cancel|refund|charge|pay|transfer|deploy|release|publish|migrat(?:e|ion)|rotate|revert|roll\s*back|uninstall|"
+    r"format|kill|terminate|shut\s*down|production|prod\b|live\b|customers?|users?\s+table|billing|credentials?|"
+    r"secrets?|passwords?|irreversibl\w*|permanent\w*|cannot\s+be\s+undone|data\s+loss)\b",
+    re.IGNORECASE,
+)
+
+
+def _asked_step_authorized(verb: str, authorized_kinds: list[str]) -> bool:
+    """Whether the step the model stopped to ask about is one the user's request already asks for
+    ("send", "post", …, or a generic "go ahead" when such a step was asked for)."""
+    if not authorized_kinds:
+        return False
+    if verb in _GENERIC_PERMISSION_VERBS:
+        return True
+    return _PERMISSION_VERB_KINDS.get(verb) in authorized_kinds
+
+
+def _asked_step_is_routine(verb: str, answer: str, classification: dict[str, Any]) -> bool:
+    """A "shall I go ahead?" in the middle of ordinary requested work, about nothing risky: the request was
+    the go-ahead. A question about a destructive or outward-facing step is never routine."""
+    if verb not in _ROUTINE_VERBS or not classification.get("is_actionable"):
+        return False
+    return not _RISKY_ASK_RE.search((answer or "")[-600:])
+
 
 def _tool_call_signature(tool_name: str, tool_args: dict) -> str:
     try:
@@ -2003,6 +2046,8 @@ def run_livecode_turn(
             session_id,
             model=compact_model,
             call_summarize=call_summarize,
+            context_window=working_context_tokens(compact_model),
+            threshold_ratio=max(0.5, min(0.95, in_turn_compact_ratio + 0.1)),
             force=force,
         )
         if record:
@@ -2107,7 +2152,7 @@ def run_livecode_turn(
                 if any((item.get("function") or {}).get("name") == name for item in child_tools)
             }
             enabled_servers = {str(server) for server in (mcp_servers or []) if str(server).strip()}
-            budget = int(working_context_tokens(sub_model) * in_turn_compact_ratio)
+            budget = max(8_000, int(working_context_tokens(sub_model) * in_turn_compact_ratio) - estimate_tools_tokens(child_tools))
             steps = max(1, min(int(max_iterations or subagent_max_iterations), subagent_max_iterations))
             answer = ""
             sub_usage_by_model: dict[str, dict[str, int]] = {}
@@ -2360,6 +2405,8 @@ def run_livecode_turn(
         system_content = build_system_prompt(
             project_path,
             has_project_rules=bool(rules_reminder),
+            mode=mode,
+            tool_names=[str((t.get("function") or {}).get("name") or "") for t in tools if (t.get("function") or {}).get("name")],
         )
         custom = str(cfg["custom_instructions"] or "").strip()
         if custom:
@@ -2462,6 +2509,14 @@ def run_livecode_turn(
     post_edit_nudged = False
     consecutive_test_failures = 0
     test_failure_nudged = False
+    last_test_run_iteration: int | None = None
+    last_test_passed: bool | None = None
+    last_test_command = ""
+    auto_check: dict[str, Any] | None | bool = None  # None: not looked up yet; False: the project has no check
+    auto_check_runs = 0
+    auto_check_note = ""
+    test_still_failing_fires = 0
+    stop_reason = ""
     files_read_this_turn: set[str] = set()
     edit_completed_this_turn = False
 
@@ -2567,7 +2622,6 @@ def run_livecode_turn(
                 )
     # A request that already asks to see it in the browser (or a design compare) needs no question first.
     ui_verify.requested = bool(design_loop_for_turn) or user_requests_ui_check(question)
-    messages = _build_base_messages(summary)
     tools_result = get_livecode_tools(
         enable_mcp=enable_mcp_for_turn,
         enable_web=enable_web_for_turn,
@@ -2601,6 +2655,7 @@ def run_livecode_turn(
         for name, binding in allowed_mcp_tools.items()
         if any((item.get("function") or {}).get("name") == name for item in tools)
     }
+    messages = _build_base_messages(summary)
     if use_structured_output and messages:
         messages[0] = {
             "role": "system",
@@ -2644,6 +2699,130 @@ def run_livecode_turn(
         yield f"data: {json.dumps({'error': err_msg, 'turn_summary': turn_summary, 'turn_messages': turn_messages})}\n\n"
 
     try:
+        def _with_check_note(text: str) -> str:
+            return (text.rstrip() + "\n\n" + auto_check_note) if auto_check_note and text else text
+
+        def _run_auto_check() -> str:
+            """Runs the project's own check once the agent has edited code without checking it. Returns a
+            gate message when the check fails, else "" (and notes a pass for the summary)."""
+            nonlocal auto_check, auto_check_runs, auto_check_note, consecutive_test_failures
+            nonlocal last_test_run_iteration, last_test_passed, last_test_command
+            if auto_check is None:
+                try:
+                    root = _selected_workspace_root(project_path, {}, active_workspace)["root"]
+                except Exception:
+                    root = project_path
+                auto_check = detect_check_command(root) or False
+            if not auto_check:
+                return ""
+            command = str(auto_check["command"])
+            auto_check_runs += 1
+            tool_call_id = f"auto-check-{auto_check_runs}"
+            args = {"command": command, "description": str(auto_check["label"])}
+            label = human_tool_label("run_command", args)
+            tool_events.append({"tool": "run_command", "label": label, "detail": "exit pending"})
+            _emit_progress("tool_call", label, tool="run_command", args=args, tool_call_id=tool_call_id)
+            messages.append({"role": "assistant", "content": "", "tool_calls": [
+                {"id": tool_call_id, "type": "function", "function": {"name": "run_command", "arguments": json.dumps(args)}}]})
+            try:
+                root = _selected_workspace_root(project_path, {}, active_workspace)["root"]
+            except Exception:
+                root = project_path
+            try:
+                result = _livecode_run_command(
+                    root, command, execute_command_pty_fn, socketio, session_id, emit_room or "",
+                    timeout_seconds=min(int(cfg.get("command_timeout_s") or 600), 900), cancel_check=_turn_cancelled,
+                )
+            except Exception as exc:
+                result = {"error": f"Could not run the project's checks: {exc}", "command": command}
+            compacted = compact_tool_result_for_llm("run_command", result)
+            summary_msg, is_error = _tool_summary("run_command", result)
+            if tool_events and tool_events[-1].get("detail") == "exit pending":
+                tool_events[-1]["detail"] = summary_msg
+            _emit_progress("tool_result", summary_msg, tool="run_command", tool_call_id=tool_call_id,
+                           success=not is_error and result.get("exit_code") == 0, args=args, result=result)
+            messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": json.dumps(compacted, default=str)})
+            exit_code = result.get("exit_code")
+            passed = not result.get("error") and exit_code == 0
+            last_test_run_iteration, last_test_passed, last_test_command = iteration, passed, command
+            if passed:
+                consecutive_test_failures = 0
+                auto_check_note = f"Checks: `{command}` passed."
+                if logger:
+                    _ide_log(logger, "info", "auto-check passed", command)
+                return ""
+            consecutive_test_failures += 1
+            auto_check_note = f"Checks: `{command}` failed (exit {exit_code if exit_code is not None else '?'})."
+            if logger:
+                _ide_log(logger, "warning", "auto-check failed", command, f"exit={exit_code}")
+            return AUTO_CHECK_FAILED_TEMPLATE.format(
+                command=command, exit_code=exit_code if exit_code is not None else "with an error",
+                tail=failure_tail(str(result.get("output") or result.get("error") or "")),
+            )
+
+        def _closing_gate(content: str) -> str:
+            """Whether the turn may end now. Every way of finishing (a text answer, attempt_completion) goes
+            through this, so no gate can be skipped: open to-do items, a question the user never authorized,
+            a UI change not yet looked at, a design not yet matched, failing checks. Returns the reminder to
+            send the model, or "" when the turn may end."""
+            nonlocal todo_gate_fires, permission_gate_fires, test_still_failing_fires
+            closing = iteration >= max_iterations - CLOSURE_ITERATIONS
+            if closing or _turn_cancelled():
+                return ""
+            if LIVECODE_TODO_GATE_ENABLED and cfg["todo_gate"] and mode == "agent" and todo_gate_fires < LIVECODE_TODO_GATE_MAX_FIRES:
+                _todos = load_todo_state(state_path, session_id)
+                _pending, _in_prog = todo_pending_count(_todos)
+                if _pending + _in_prog > 0:
+                    _open_items = "\n".join(
+                        f"- [{t.get('status', 'pending')}] {t.get('content') or t.get('id')}"
+                        for t in _todos
+                        if str(t.get("status") or "pending").lower() not in ("completed", "cancelled")
+                    )
+                    todo_gate_fires += 1
+                    if logger:
+                        _ide_log(logger, "warning", "todo-gate re-entry", f"pending={_pending}", f"in_progress={_in_prog}", f"fire={todo_gate_fires}")
+                    return TODO_GATE_TEMPLATE.format(count=_pending + _in_prog, items=_open_items)
+            asked_for = asks_permission(content) if mode == "agent" else ""
+            if asked_for and permission_gate_fires < PERMISSION_GATE_MAX_FIRES:
+                permission_gate_fires += 1
+                if _asked_step_authorized(asked_for, authorized_kinds):
+                    if logger:
+                        _ide_log(logger, "info", "permission-gate re-entry", asked_for)
+                    what = " (" + ", ".join(authorized_kinds) + ")"
+                    return PERMISSION_GATE_TEMPLATE.format(verb=asked_for, what=what)
+                if _asked_step_is_routine(asked_for, content, classification):
+                    if logger:
+                        _ide_log(logger, "info", "go-ahead re-entry", asked_for)
+                    return GO_AHEAD_TEMPLATE.format(verb=asked_for)
+                if logger:
+                    _ide_log(logger, "info", "ask-in-card re-entry", asked_for)
+                return ASK_IN_CARD_TEMPLATE.format(verb=asked_for)
+            if (mode == "agent" and enable_browser_for_turn
+                    and any((t.get("function") or {}).get("name") == "browser" for t in tools)
+                    and browser_ui_verify_enabled()):
+                ui_note = ui_verify.reminder()
+                if ui_note:
+                    if logger:
+                        _ide_log(logger, "info", "ui-verify re-entry", f"fire={ui_verify.fires}", ", ".join(ui_verify.files[:3]))
+                    return ui_note
+            if design_loop_for_turn and mode == "agent" and browser_design_gate_enabled():
+                design_note = design_rounds.reminder(last_edit_iteration)
+                if design_note:
+                    if logger:
+                        _ide_log(logger, "info", "design-gate re-entry", f"fire={design_rounds.fires}",
+                                 f"differences={design_rounds.counts[-1] if design_rounds.counts else 0}")
+                    return design_note
+            if mode == "agent" and edit_completed_this_turn and last_edit_iteration is not None and cfg.get("auto_checks", True):
+                checked_since_edit = last_test_run_iteration is not None and last_test_run_iteration >= last_edit_iteration
+                if checked_since_edit and last_test_passed is False and test_still_failing_fires < 1:
+                    test_still_failing_fires += 1
+                    if logger:
+                        _ide_log(logger, "warning", "tests-still-failing re-entry", last_test_command)
+                    return TEST_STILL_FAILING_TEMPLATE.format(command=last_test_command or "the tests")
+                if not checked_since_edit and auto_check_runs < AUTO_CHECK_MAX_RUNS:
+                    return _run_auto_check()
+            return ""
+
         for iteration in range(1, max_iterations + 1):
             if _turn_cancelled():
                 yield from _cancelled_finish()
@@ -2685,132 +2864,63 @@ def run_livecode_turn(
                 )
 
             if stationarity.should_hard_stop():
-                full_answer = (
-                    f"Stopped after {stationarity.run_len} identical calls to "
-                    f"`{stationarity.tool_name}` with the same arguments. "
-                    "Try a different approach or ask a more specific question."
+                stop_reason = (
+                    f"Stopped after {stationarity.run_len} identical calls to `{stationarity.tool_name}` with the "
+                    "same arguments. Here is where things stand."
                 )
                 if logger:
-                    _ide_log(
-                        logger,
-                        "info",
-                        "nudge stationarity-stop",
-                        f"tool={stationarity.tool_name}",
-                        f"run={stationarity.run_len}",
-                    )
-                turn_summary = build_turn_activity_summary(tool_events)
-                turn_messages = _finalize_turn_persist(full_answer)
-                yield f"data: {json.dumps({'done': True, 'answer': full_answer, 'turn_summary': turn_summary, 'turn_messages': turn_messages})}\n\n"
-                _emit_answer_done(full_answer)
-                _emit_complete(len(full_answer), turn_summary)
-                return
+                    _ide_log(logger, "info", "nudge stationarity-stop", f"tool={stationarity.tool_name}", f"run={stationarity.run_len}")
+                break
 
+            # One reminder per step, the most pressing first, so the model never gets two that pull
+            # different ways (one saying "start implementing", another "do not start new exploration").
+            nudge_text = ""
+            nudge_kind = ""
+            budget_due = [p for p in budget_nudge_points if p <= iteration and p not in iteration_budget_nudges_sent]
+            late_in_turn = bool(budget_nudge_points) and iteration >= budget_nudge_points[0]
             if cfg["loop_guard"] and stationarity.take_nudge():
-                nudge_text = STATIONARITY_NUDGE_TEMPLATE.format(
-                    tool_name=stationarity.tool_name,
-                    run_len=stationarity.run_len,
-                )
-                nudge = {"role": "user", "content": nudge_text, "internal": True}
-                messages.append(nudge)
-                _persist_msg(nudge)
-                escalate = True
-                if logger:
-                    _ide_log(
-                        logger,
-                        "info",
-                        "nudge stationarity",
-                        f"tool={stationarity.tool_name}",
-                        f"run={stationarity.run_len}",
-                    )
-
-            if nudges_on and search_scatter.take_nudge():
-                nudge_text = SEARCH_SCATTER_NUDGE_TEMPLATE.format(run_len=search_scatter.run_len)
-                nudge = {"role": "user", "content": nudge_text, "internal": True}
-                messages.append(nudge)
-                _persist_msg(nudge)
-                if logger:
-                    _ide_log(logger, "info", "nudge search-scatter", f"run={search_scatter.run_len}")
-
-            if nudges_on and directory_drill.take_nudge():
-                nudge_text = DIRECTORY_DRILL_NUDGE_TEMPLATE.format(run_len=directory_drill.run_len)
-                nudge = {"role": "user", "content": nudge_text, "internal": True}
-                messages.append(nudge)
-                _persist_msg(nudge)
-                if logger:
-                    _ide_log(logger, "info", "nudge directory-drill", f"run={directory_drill.run_len}")
-
-            if nudges_on and exploration_streak.take_nudge():
-                streak_template = (
-                    EXPLORATION_STREAK_NUDGE_TEMPLATE if mode == "agent"
-                    else EXPLORATION_STREAK_READ_ONLY_NUDGE_TEMPLATE
-                )
-                nudge_text = streak_template.format(
-                    run_len=exploration_streak.run_len,
-                )
-                nudge = {"role": "user", "content": nudge_text, "internal": True}
-                messages.append(nudge)
-                _persist_msg(nudge)
-                if logger:
-                    _ide_log(logger, "info", "nudge exploration-streak", f"run={exploration_streak.run_len}")
-
-            if nudges_on and edit_no_match.take_nudge():
+                nudge_kind, escalate = "stationarity", True
+                nudge_text = STATIONARITY_NUDGE_TEMPLATE.format(tool_name=stationarity.tool_name, run_len=stationarity.run_len)
+            elif budget_due:
+                nudge_kind = "iteration-budget"
+                iteration_budget_nudges_sent.update(budget_due)
+                nudge_text = ITERATION_BUDGET_NUDGE_TEMPLATE.format(remaining=max(1, max_iterations - iteration + 1))
+            elif nudges_on and edit_no_match.take_nudge():
+                nudge_kind, escalate = "edit-no-match", True
                 nudge_text = EDIT_NO_MATCH_NUDGE_TEMPLATE.format(run_len=edit_no_match.run_len)
-                nudge = {"role": "user", "content": nudge_text, "internal": True}
-                messages.append(nudge)
-                _persist_msg(nudge)
-                escalate = True
-                if logger:
-                    _ide_log(logger, "info", "nudge edit-no-match", f"run={edit_no_match.run_len}")
-
-            if nudges_on and mode == "agent" and todo_nudger.iters_since >= TODO_NUDGE_AFTER:
-                _multistep = (
-                    needs_code_change(question, classification)
-                    or not classification.get("chat_only")
+            elif nudges_on and consecutive_test_failures >= TEST_FAILURE_NUDGE_AFTER and not test_failure_nudged:
+                nudge_kind, test_failure_nudged = "test-failure", True
+                nudge_text = TEST_FAILURE_NUDGE_TEMPLATE
+            elif nudges_on and exploration_streak.take_nudge():
+                nudge_kind = "exploration-streak"
+                template = (
+                    EXPLORATION_STREAK_READ_ONLY_NUDGE_TEMPLATE if mode != "agent"
+                    else EXPLORATION_STREAK_LATE_NUDGE_TEMPLATE if late_in_turn
+                    else EXPLORATION_STREAK_NUDGE_TEMPLATE
                 )
+                nudge_text = template.format(run_len=exploration_streak.run_len)
+            elif nudges_on and search_scatter.take_nudge():
+                nudge_kind = "search-scatter"
+                nudge_text = SEARCH_SCATTER_NUDGE_TEMPLATE.format(run_len=search_scatter.run_len)
+            elif nudges_on and directory_drill.take_nudge():
+                nudge_kind = "directory-drill"
+                nudge_text = DIRECTORY_DRILL_NUDGE_TEMPLATE.format(run_len=directory_drill.run_len)
+            elif (nudges_on and last_edit_iteration is not None and not post_edit_nudged
+                    and iteration - last_edit_iteration >= POST_EDIT_COMPLETION_NUDGE_AFTER):
+                nudge_kind, post_edit_nudged = "post-edit", True
+                nudge_text = POST_EDIT_COMPLETION_NUDGE_TEMPLATE
+            elif nudges_on and mode == "agent" and not late_in_turn and todo_nudger.iters_since >= TODO_NUDGE_AFTER:
+                _multistep = needs_code_change(question, classification) or not classification.get("chat_only")
                 _todos_empty = _multistep and not load_todo_state(state_path, session_id)
                 if todo_nudger.take_nudge(iteration, multistep=_multistep, todo_list_empty=_todos_empty):
-                    nudge = {"role": "user", "content": TODO_NUDGE_TEMPLATE, "internal": True}
-                    messages.append(nudge)
-                    _persist_msg(nudge)
-                    if logger:
-                        _ide_log(logger, "info", "nudge todo-list", f"iters_since={todo_nudger.iters_since}")
-
-            if iteration in budget_nudge_points and iteration not in iteration_budget_nudges_sent:
-                remaining = max_iterations - iteration + 1
-                nudge_text = ITERATION_BUDGET_NUDGE_TEMPLATE.format(remaining=remaining)
+                    nudge_kind = "todo-list"
+                    nudge_text = TODO_NUDGE_TEMPLATE
+            if nudge_text:
                 nudge = {"role": "user", "content": nudge_text, "internal": True}
                 messages.append(nudge)
                 _persist_msg(nudge)
-                iteration_budget_nudges_sent.add(iteration)
                 if logger:
-                    _ide_log(
-                        logger,
-                        "info",
-                        "nudge iteration-budget",
-                        f"iter={iteration}",
-                        f"remaining={remaining}",
-                    )
-
-            if (
-                nudges_on
-                and last_edit_iteration is not None
-                and not post_edit_nudged
-                and iteration - last_edit_iteration >= POST_EDIT_COMPLETION_NUDGE_AFTER
-            ):
-                nudge = {"role": "user", "content": POST_EDIT_COMPLETION_NUDGE_TEMPLATE, "internal": True}
-                messages.append(nudge)
-                _persist_msg(nudge)
-                post_edit_nudged = True
-                if logger:
-                    _ide_log(logger, "info", "nudge post-edit", f"iter={iteration}")
-
-            if nudges_on and consecutive_test_failures >= TEST_FAILURE_NUDGE_AFTER and not test_failure_nudged:
-                nudge = {"role": "user", "content": TEST_FAILURE_NUDGE_TEMPLATE, "internal": True}
-                messages.append(nudge)
-                _persist_msg(nudge)
-                test_failure_nudged = True
-                if logger:
-                    _ide_log(logger, "info", "nudge test-failure", f"failures={consecutive_test_failures}")
+                    _ide_log(logger, "info", f"nudge {nudge_kind}", f"iter={iteration}")
 
             iteration_tools = tools
             if iteration > max_iterations - CLOSURE_ITERATIONS:
@@ -2838,7 +2948,7 @@ def run_livecode_turn(
                 yield f"data: {json.dumps({'error': err})}\n\n"
                 return
 
-            budget = int(working_context_tokens(iteration_model) * in_turn_compact_ratio)
+            budget = max(8_000, int(working_context_tokens(iteration_model) * in_turn_compact_ratio) - estimate_tools_tokens(tools))
             messages = compact_stale_tool_messages(messages, max_input_tokens=budget)
 
             pending = drain_interjections(session_id)
@@ -3265,6 +3375,7 @@ def run_livecode_turn(
                     nonlocal last_edit_iteration, full_answer, completed
                     nonlocal structured_output_retries, consecutive_test_failures
                     nonlocal consecutive_tool_errors, escalate, edit_completed_this_turn
+                    nonlocal last_test_run_iteration, last_test_passed, last_test_command
 
                     tool_name = item["tool_name"]
                     result = item["result"]
@@ -3442,8 +3553,10 @@ def run_livecode_turn(
                     if tool_name == "run_command":
                         cmd = str(tool_args.get("command") or "")
                         exit_code = result.get("exit_code")
-                        if _is_test_command(cmd):
-                            if exit_code not in (0, None) and not result.get("error"):
+                        if _is_test_command(cmd) and not result.get("background"):
+                            failed = exit_code not in (0, None) or bool(result.get("timed_out")) or bool(result.get("error"))
+                            last_test_run_iteration, last_test_passed, last_test_command = iteration, not failed, cmd
+                            if failed:
                                 consecutive_test_failures += 1
                             else:
                                 consecutive_test_failures = 0
@@ -3571,6 +3684,20 @@ def run_livecode_turn(
                     completed = False
                     full_answer = ""
                 if completed:
+                    gate_text = _closing_gate(full_answer)
+                    if gate_text:
+                        completed = False
+                        full_answer = ""
+                        gate = {"role": "user", "content": gate_text, "internal": True}
+                        messages.append(gate)
+                        _persist_msg(gate)
+                        force_tool_choice_required = True
+                        if _turn_cancelled():
+                            yield from _cancelled_finish()
+                            return
+                        continue
+                if completed:
+                    full_answer = _with_check_note(full_answer)
                     turn_summary = build_turn_activity_summary(tool_events)
                     turn_messages = _finalize_turn_persist(full_answer)
                     yield f"data: {json.dumps({'done': True, 'answer': full_answer, 'turn_summary': turn_summary, 'turn_messages': turn_messages})}\n\n"
@@ -3660,101 +3787,18 @@ def run_livecode_turn(
                     _ide_log(logger, "info", "interjection re-entry", f"n={interjection_extensions}")
                 continue
 
-            if (
-                LIVECODE_TODO_GATE_ENABLED
-                and cfg["todo_gate"]
-                and mode == "agent"
-                and todo_gate_fires < LIVECODE_TODO_GATE_MAX_FIRES
-            ):
-                _todos = load_todo_state(state_path, session_id)
-                _pending, _in_prog = todo_pending_count(_todos)
-                if _pending + _in_prog > 0:
-                    if content.strip():
-                        step_stream.close_content(role="narration", text=content, thought_content=reasoning_only)
-                        early = {"role": "assistant", "content": content}
-                        messages.append(early)
-                        _persist_msg(early)
-                    _open_items = "\n".join(
-                        f"- [{t.get('status', 'pending')}] {t.get('content') or t.get('id')}"
-                        for t in _todos
-                        if str(t.get("status") or "pending").lower() not in ("completed", "cancelled")
-                    )
-                    gate = {
-                        "role": "user",
-                        "content": TODO_GATE_TEMPLATE.format(
-                            count=_pending + _in_prog, items=_open_items
-                        ),
-                        "internal": True,
-                    }
-                    messages.append(gate)
-                    _persist_msg(gate)
-                    todo_gate_fires += 1
-                    force_tool_choice_required = True
-                    if logger:
-                        _ide_log(
-                            logger,
-                            "warning",
-                            "todo-gate re-entry",
-                            f"pending={_pending}",
-                            f"in_progress={_in_prog}",
-                            f"fire={todo_gate_fires}",
-                        )
-                    continue
-
-            # "Shall I send it?" after the user said to send it: do it instead of asking.
-            asked_for = asks_permission(content) if mode == "agent" else ""
-            if (asked_for and permission_gate_fires < PERMISSION_GATE_MAX_FIRES and iteration < max_iterations - CLOSURE_ITERATIONS
-                    and (authorized_kinds or asked_for in ("proceed", "go ahead", "continue", "do it", "do that", "do this", "do so"))):
-                permission_gate_fires += 1
+            gate_text = _closing_gate(content)
+            if gate_text:
                 if content.strip():
                     step_stream.close_content(role="narration", text=content, thought_content=reasoning_only)
                     early = {"role": "assistant", "content": content}
                     messages.append(early)
                     _persist_msg(early)
-                what = (" (" + ", ".join(authorized_kinds) + ")") if authorized_kinds else ""
-                gate = {"role": "user", "content": PERMISSION_GATE_TEMPLATE.format(verb=asked_for, what=what), "internal": True}
+                gate = {"role": "user", "content": gate_text, "internal": True}
                 messages.append(gate)
                 _persist_msg(gate)
                 force_tool_choice_required = True
-                if logger:
-                    _ide_log(logger, "info", "permission-gate re-entry", asked_for)
                 continue
-
-            if (mode == "agent" and enable_browser_for_turn and iteration < max_iterations - CLOSURE_ITERATIONS
-                    and any((t.get("function") or {}).get("name") == "browser" for t in tools)
-                    and browser_ui_verify_enabled()):
-                ui_note = ui_verify.reminder()
-                if ui_note:
-                    if content.strip():
-                        step_stream.close_content(role="narration", text=content, thought_content=reasoning_only)
-                        early = {"role": "assistant", "content": content}
-                        messages.append(early)
-                        _persist_msg(early)
-                    gate = {"role": "user", "content": ui_note, "internal": True}
-                    messages.append(gate)
-                    _persist_msg(gate)
-                    force_tool_choice_required = True
-                    if logger:
-                        _ide_log(logger, "info", "ui-verify re-entry", f"fire={ui_verify.fires}", ", ".join(ui_verify.files[:3]))
-                    continue
-
-            if (design_loop_for_turn and mode == "agent" and iteration < max_iterations - CLOSURE_ITERATIONS
-                    and browser_design_gate_enabled()):
-                design_note = design_rounds.reminder(last_edit_iteration)
-                if design_note:
-                    if content.strip():
-                        step_stream.close_content(role="narration", text=content, thought_content=reasoning_only)
-                        early = {"role": "assistant", "content": content}
-                        messages.append(early)
-                        _persist_msg(early)
-                    gate = {"role": "user", "content": design_note, "internal": True}
-                    messages.append(gate)
-                    _persist_msg(gate)
-                    force_tool_choice_required = True
-                    if logger:
-                        _ide_log(logger, "info", "design-gate re-entry", f"fire={design_rounds.fires}",
-                                 f"differences={design_rounds.counts[-1] if design_rounds.counts else 0}")
-                    continue
 
             final_model = _pick_iteration_model(
                 user_model,
@@ -3780,6 +3824,7 @@ def run_livecode_turn(
                     session_id=session_id,
                     log_label="final answer",
                 )
+            full_answer = _with_check_note(full_answer)
             if step_stream.content_started:
                 step_stream.close_content(role="answer", text=full_answer, thought_content=reasoning_only)
             turn_summary = build_turn_activity_summary(tool_events)
@@ -3807,6 +3852,9 @@ def run_livecode_turn(
             logger=logger,
             session_id=session_id,
         )
+        if stop_reason:
+            full_answer = stop_reason + "\n\n" + full_answer
+        full_answer = _with_check_note(full_answer)
         turn_summary = build_turn_activity_summary(tool_events)
         turn_messages = _finalize_turn_persist(full_answer)
         yield f"data: {json.dumps({'done': True, 'answer': full_answer, 'turn_summary': turn_summary, 'turn_messages': turn_messages})}\n\n"

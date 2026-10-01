@@ -69,9 +69,36 @@ def test_shall_i_send_it_is_answered_by_doing_it(site, browser_ready):
 
 
 def test_should_i_go_ahead_is_not_a_place_to_stop():
+    """A check-in in the middle of the very work that was asked for: the request was the go-ahead."""
     model = ScriptedModel([lambda c: reply("I found the helper. Should I go ahead?"), lambda c: reply("Renamed it.")])
-    run_turn(_project(), "rename the helper in utils.py to clean_name", model)
-    assert "You stopped to ask the user whether to go ahead" in model.calls[1].text()
+    out = run_turn(_project(), "rename the helper in utils.py to clean_name", model)
+    text = model.calls[1].text()
+    assert "whether to go ahead" in text and "request is the go-ahead" in text
+    assert "already asks for it" not in text, "nothing in the request names a send/post/buy step"
+    assert out["answer"] == "Renamed it."
+
+
+def test_a_risky_step_the_user_never_asked_for_is_asked_in_the_card():
+    """"Should I proceed?" before dropping a table is the user's call: no invented go-ahead, ask in the card."""
+    model = ScriptedModel([
+        lambda c: reply("Option B drops the users table and cannot be undone. Should I proceed?"),
+        lambda c: reply("Holding off on dropping the table; the index change is in place."),
+    ])
+    out = run_turn(_project(), "speed up the users query", model)
+    text = model.calls[1].text()
+    assert "Nothing in the user's request says to" in text and "ask_question" in text
+    assert "request is the go-ahead" not in text and "already asks for it" not in text
+    assert out["answer"].startswith("Holding off")
+
+
+def test_an_unauthorized_send_is_asked_not_assumed():
+    model = ScriptedModel([
+        lambda c: reply("I drafted the reply. Shall I send it?"),
+        lambda c: reply("The draft is ready; it has not been sent."),
+    ])
+    run_turn(_project(), "look at Sam's email and draft a reply", model)
+    text = model.calls[1].text()
+    assert "whether to send" in text and "Nothing in the user's request says to" in text
 
 
 def test_an_offer_of_more_work_is_fine():

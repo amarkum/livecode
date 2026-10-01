@@ -13,10 +13,14 @@ from typing import Any, Callable, TypeVar
 
 import requests
 
-RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 529})
+# 409 is left out: a conflict is the request's fault and comes back the same every time.
+RETRYABLE_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504, 529})
 MAX_BACKOFF_S = 30.0
 DEFAULT_RETRIES = 4
-_RETRYABLE_STREAM_ERRORS = ("overloaded", "rate_limit", "internal_server_error", "api_error", "timeout", "unavailable")
+_RETRYABLE_STREAM_KINDS = ("overloaded", "rate_limit", "internal_server_error", "api_error", "timeout", "unavailable", "server_error")
+# Without a typed error, only wording that clearly means "try again later" counts.
+_RETRYABLE_STREAM_WORDS = ("overloaded", "rate limit", "rate_limit", "too many requests", "temporarily", "timed out", "timeout",
+                           "service unavailable", "internal server error", "server error", "try again")
 
 T = TypeVar("T")
 
@@ -66,7 +70,11 @@ def stream_error(provider: str, error: Any) -> Exception:
     """The exception for an error event inside a stream: retryable when it is transient."""
     text = str(error)
     kind = str(error.get("type") or "") if isinstance(error, dict) else ""
-    if any(word in (kind or text).lower() for word in _RETRYABLE_STREAM_ERRORS):
+    if kind:
+        transient = any(word in kind.lower() for word in _RETRYABLE_STREAM_KINDS)
+    else:
+        transient = any(word in text.lower() for word in _RETRYABLE_STREAM_WORDS)
+    if transient:
         return RetryableStreamError(f"{provider} stream error: {text[:500]}")
     return Exception(f"{provider} stream error: {text[:2000]}")
 

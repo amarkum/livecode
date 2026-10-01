@@ -6,20 +6,74 @@ from typing import Any
 
 from livecode.prompts import LIVECODE_CONTEXT_WINDOW, LIVECODE_IN_TURN_COMPACT_RATIO, LIVECODE_KEEP_RECENT_TOOL_MSGS
 
+# What one image costs in the prompt. Providers bill a screenshot at roughly its pixel area / 750 tokens
+# (a 1280x800 frame is about 1,400); without the dimensions this is the working figure.
+IMAGE_TOKENS = 1_400
+_IMAGE_BLOCK_TYPES = frozenset({"image_url", "image", "input_image"})
+
+
+def _image_tokens(block: dict[str, Any]) -> int:
+    source = block.get("image_url") if isinstance(block.get("image_url"), dict) else block.get("source")
+    width = height = 0
+    if isinstance(source, dict):
+        width = int(source.get("width") or 0)
+        height = int(source.get("height") or 0)
+    if isinstance(block.get("width"), (int, float)) and isinstance(block.get("height"), (int, float)):
+        width, height = int(block["width"]), int(block["height"])
+    if width and height:
+        return max(100, (width * height) // 750)
+    return IMAGE_TOKENS
+
+
 def estimate_messages_tokens(messages: list[dict[str, Any]]) -> int:
-    parts: list[str] = []
+    """About how many prompt tokens these messages take: text at four characters a token, images at
+    their pixel area (or a working figure), tool calls as their JSON."""
+    chars = 0
+    images = 0
     for msg in messages:
         content = msg.get("content")
         if isinstance(content, str):
-            parts.append(content)
+            chars += len(content)
         elif isinstance(content, list):
             for block in content:
-                if isinstance(block, dict) and block.get("text"):
-                    parts.append(str(block["text"]))
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") in _IMAGE_BLOCK_TYPES or block.get("image_url") or block.get("source"):
+                    images += _image_tokens(block)
+                elif block.get("text"):
+                    chars += len(str(block["text"]))
         tool_calls = msg.get("tool_calls")
         if tool_calls:
-            parts.append(json.dumps(tool_calls, default=str))
-    return sum(len(p) for p in parts) // 4
+            chars += len(json.dumps(tool_calls, default=str))
+    return chars // 4 + images
+
+
+def estimate_tools_tokens(tools: list[dict[str, Any]] | None) -> int:
+    """The prompt tokens the tool definitions take: they go in every request, so they come off the budget."""
+    if not tools:
+        return 0
+    try:
+        return len(json.dumps(tools, default=str)) // 4
+    except (TypeError, ValueError):
+        return 0
+
+
+_FAILURE_LINE_RE = re.compile(r"\b(?:error|fail(?:ed|ure|ing)?|exception|traceback|assert(?:ion)?|panic|FAIL|✗|not found|denied|refused|timed out)\b", re.IGNORECASE)
+
+
+def command_output_digest(output: str, *, head: int, tail: int, failure_lines: int) -> str:
+    """The parts of command output worth keeping when it is compacted: how it started, the lines that
+    name a failure, and how it ended (where the result and the exit are)."""
+    text = str(output or "")
+    if len(text) <= head + tail:
+        return text
+    lines = text.splitlines()
+    marked = [line for line in lines if _FAILURE_LINE_RE.search(line)][:failure_lines]
+    pieces = [text[:head].rstrip()]
+    if marked:
+        pieces.append("…\n" + "\n".join(line[:200] for line in marked))
+    pieces.append("…\n" + text[-tail:].lstrip())
+    return "\n".join(pieces)
 
 def compact_tool_payload(raw: str, *, tier: str = "fitted") -> str:
     try:
@@ -42,6 +96,16 @@ def compact_tool_payload(raw: str, *, tier: str = "fitted") -> str:
     if tier == "lossy":
         if "match_count" in parsed:
             return json.dumps({"_compacted": True, "match_count": parsed.get("match_count")}, default=str)
+        if "command" in parsed or "exit_code" in parsed:
+            # A command's exit and its last lines stay: that is where a failure says what went wrong.
+            return json.dumps({
+                "_compacted": True,
+                "command": str(parsed.get("command") or "")[:120],
+                "exit_code": parsed.get("exit_code"),
+                "output_tail": str(parsed.get("output") or "")[-400:],
+            }, default=str)
+        if parsed.get("action") and ("url" in parsed or "title" in parsed):
+            return json.dumps({"_compacted": True, "action": parsed.get("action"), "url": str(parsed.get("url") or "")[:160]}, default=str)
         if parsed.get("file_path"):
             return json.dumps({
                 "_compacted": True,
@@ -102,13 +166,24 @@ def compact_tool_payload(raw: str, *, tier: str = "fitted") -> str:
 
     if "command" in parsed or "exit_code" in parsed:
         output = str(parsed.get("output") or "")
-        out_len = 100 if tier == "lossy" else 300
         return json.dumps({
             "_compacted": True,
             "command": (parsed.get("command") or "")[:120],
             "exit_code": parsed.get("exit_code"),
-            "output_preview": output[:out_len],
+            "output_digest": command_output_digest(output, head=300, tail=1200, failure_lines=10),
         }, default=str)
+
+    if parsed.get("action") and ("url" in parsed or "title" in parsed or "outline" in parsed or "elements" in parsed):
+        # A browser step: what it did and where it ended up; the snapshot text itself is dropped.
+        slim = {"_compacted": True, "action": parsed.get("action")}
+        for key in ("url", "title", "verdict", "accuracy", "clicked", "typed_into"):
+            if parsed.get(key) not in (None, ""):
+                slim[key] = str(parsed.get(key))[:160]
+        for key in ("outline", "result", "elements"):
+            value = parsed.get(key)
+            if value:
+                slim[key + "_summary"] = f"{len(value)} items" if isinstance(value, list) else f"{len(str(value))} chars (dropped)"
+        return json.dumps(slim, default=str)
 
     if parsed.get("success") is not None or parsed.get("completed"):
         return json.dumps({
@@ -118,10 +193,16 @@ def compact_tool_payload(raw: str, *, tier: str = "fitted") -> str:
             "action": parsed.get("action"),
         }, default=str)
 
-    slim = {k: parsed[k] for k in list(parsed.keys())[:6]}
-    slim["_compacted"] = True
+    slim: dict[str, Any] = {"_compacted": True}
     limit = 300 if tier == "lossy" else 800
-    return json.dumps(slim, default=str)[:limit]
+    for key in list(parsed.keys())[:6]:
+        value = parsed[key]
+        text = json.dumps(value, default=str)
+        slim[key] = value if len(text) <= 160 else (str(value)[:160] + "…")
+    out = json.dumps(slim, default=str)
+    if len(out) > limit:
+        out = json.dumps({"_compacted": True, "keys": list(parsed.keys())[:8]}, default=str)
+    return out
 
 _SHOWING_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)")
 

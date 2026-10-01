@@ -31,6 +31,7 @@ SCHEMA: dict[str, dict[str, Any]] = {
     "loop_guard": {"kind": "bool", "default": True, "group": "harness"},
     "loop_hard_stop": {"kind": "int", "default": 10, "min": 4, "max": 50, "group": "harness"},
     "verify_after_edit": {"kind": "bool", "default": True, "group": "harness"},
+    "auto_checks": {"kind": "bool", "default": True, "group": "harness"},
     "todo_gate": {"kind": "bool", "default": True, "group": "harness"},
     "nudges": {"kind": "bool", "default": True, "group": "harness"},
     "command_timeout_s": {"kind": "int", "default": 600, "min": 10, "max": 3600, "group": "harness"},

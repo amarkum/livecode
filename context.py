@@ -12,7 +12,7 @@ from livecode.compaction.intra import (
 )
 from livecode.memory.flush import maybe_flush_session
 from livecode.prompts import LIVECODE_AUTO_COMPACT_RATIO, LIVECODE_CONTEXT_WINDOW
-from livecode.session import load_session, save_compaction
+from livecode.session import _valid_compaction, load_session, save_compaction
 
 __all__ = [
     "build_turn_activity_summary",
@@ -32,6 +32,11 @@ def maybe_compact_session(
     threshold_ratio: float = LIVECODE_AUTO_COMPACT_RATIO,
     force: bool = False,
 ) -> dict[str, Any] | None:
+    """Compacts the session's history when what the model would be sent is near the window.
+
+    The size measured is the projected history (the previous summary plus the messages after its
+    boundary), not the raw file, so a session that was compacted once is not summarised from the start
+    again on every later turn; the next compaction folds the previous summary and the messages since it."""
     session = load_session(project_path, session_id)
     messages = session.get("messages") or []
     if len(messages) < 4 and not force:
@@ -40,19 +45,26 @@ def maybe_compact_session(
     if not force and count_user_turns(messages) < 2:
         return None
 
-    token_est = estimate_messages_tokens(messages)
+    compaction = session.get("compaction")
+    previous_boundary = 0
+    projected: list[dict[str, Any]] = messages
+    if _valid_compaction(messages, compaction):
+        previous_boundary = int(compaction["boundary_index"])
+        projected = [{"role": "user", "content": str(compaction.get("summary") or "")}] + list(messages[previous_boundary:])
+
+    token_est = estimate_messages_tokens(projected)
     threshold = int(context_window * threshold_ratio)
     if not force and token_est < threshold:
-        if not force:
-            inter = maybe_inter_turn_compact(
-                project_path,
-                session_id,
-                model=model,
-                call_summarize=call_summarize,
-                context_window=context_window,
-            )
-            if inter:
-                return inter
+        inter = maybe_inter_turn_compact(
+            project_path,
+            session_id,
+            model=model,
+            call_summarize=call_summarize,
+            context_window=context_window,
+            full_threshold_ratio=threshold_ratio,
+        )
+        return inter or None
+    if len(projected) < 2:
         return None
 
     try:
@@ -69,12 +81,15 @@ def maybe_compact_session(
 
     try:
         summary, boundary, attempts = apply_full_replace_compaction(
-            messages,
+            projected,
             call_summarize=call_summarize,
             model=model,
         )
     except ValueError:
         return None
+    if previous_boundary:
+        # The first projected message stood for everything before the previous boundary.
+        boundary = previous_boundary + max(0, boundary - 1)
 
     return save_compaction(
         project_path,

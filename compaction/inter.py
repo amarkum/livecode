@@ -33,6 +33,7 @@ def maybe_inter_turn_compact(
     call_summarize: Callable[[str, list[dict[str, str]]], str],
     context_window: int = LIVECODE_CONTEXT_WINDOW,
     threshold_ratio: float = LIVECODE_INTER_COMPACT_RATIO,
+    full_threshold_ratio: float = 0.85,
 ) -> dict[str, Any] | None:
     session = load_session(project_path, session_id)
     messages = session.get("messages") or []
@@ -40,10 +41,13 @@ def maybe_inter_turn_compact(
         return None
     if count_user_turns(messages) < _INTER_MIN_USER_TURNS:
         return None
+    if session.get("compaction") and session["compaction"].get("summary"):
+        # Already compacted once: the full compaction folds the summary forward when it is needed again.
+        return None
 
     token_est = estimate_messages_tokens(messages)
     threshold = int(context_window * threshold_ratio)
-    full_threshold = int(context_window * 0.85)
+    full_threshold = int(context_window * full_threshold_ratio)
     if token_est < threshold or token_est >= full_threshold:
         return None
 
