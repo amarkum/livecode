@@ -1,0 +1,107 @@
+# LiveCode model catalog: providers and the models the chat menu offers.
+# Edit this file to add a provider or change a model list. LiveCode reloads it
+# on the next request, so no restart is needed.
+#
+# Each provider has either:
+#   discover: <rules>   Pick the newest flagship models the API key can use, by
+#                       name. Rules: gemini, openai, anthropic, xai, openrouter.
+#                       `fallback` is shown until the key's model list is fetched.
+#                       `extra_models` are added when the key can use them.
+#   models:             A fixed list, best first. The first ones the key can use
+#                       are shown.
+#
+# Model flags (for `models` and `extra_models`):
+#   fast: true      Auto uses it for quick tasks.
+#   vision: false   It cannot read images. Auto sends requests with images to a
+#                   model that can; if you pick it yourself, another model
+#                   describes the images in text for it.
+#   code: true      Tuned for code. Auto prefers it for code changes without images.
+#
+# kind: which API the provider speaks (gemini, anthropic, or openai for any
+# OpenAI-compatible API).
+
+max_models: 6
+
+# Best model auto pick: which provider with a key is used for each kind of task.
+best_auto_order:
+  large: [anthropic, openai, gemini, xai, openrouter, mistral, groq]
+  fast: [gemini, openai, anthropic, xai, groq, mistral, openrouter]
+
+providers:
+  gemini:
+    label: Google Gemini
+    kind: gemini
+    base_url: https://generativelanguage.googleapis.com/v1beta
+    key_hint: AIza…
+    key_url: https://aistudio.google.com/apikey
+    discover: gemini
+    fallback: [gemini-2.5-pro, gemini-2.5-flash]
+
+  openai:
+    label: OpenAI
+    kind: openai
+    base_url: https://api.openai.com/v1
+    key_hint: sk-…
+    key_url: https://platform.openai.com/api-keys
+    discover: openai
+    min_version: 5
+    fallback: [gpt-5, gpt-5-mini]
+
+  anthropic:
+    label: Anthropic
+    kind: anthropic
+    base_url: https://api.anthropic.com/v1
+    key_hint: sk-ant-…
+    key_url: https://console.anthropic.com/settings/keys
+    discover: anthropic
+    fallback: [claude-opus-5-5, claude-sonnet-5-5, claude-haiku-4-5-20251001]
+
+  xai:
+    label: xAI (Grok)
+    kind: openai
+    base_url: https://api.x.ai/v1
+    key_hint: xai-…
+    key_url: https://console.x.ai
+    discover: xai
+    min_version: 4
+    fallback: [grok-4]
+    extra_models:
+      - {id: grok-code-fast-1, label: Grok Code Fast, fast: true, vision: false, code: true}
+
+  mistral:
+    label: Mistral
+    kind: openai
+    base_url: https://api.mistral.ai/v1
+    key_url: https://console.mistral.ai/api-keys
+    models:
+      - {id: mistral-medium-latest, label: Mistral Medium}
+      - {id: pixtral-large-latest, label: Pixtral Large}
+      - {id: mistral-small-latest, label: Mistral Small, fast: true}
+      - {id: devstral-medium-latest, label: Devstral Medium, vision: false, code: true}
+      - {id: codestral-latest, label: Codestral, fast: true, vision: false, code: true}
+
+  groq:
+    label: Groq
+    kind: openai
+    base_url: https://api.groq.com/openai/v1
+    key_hint: gsk_…
+    key_url: https://console.groq.com/keys
+    models:
+      - {id: qwen/qwen3.8-27b, label: Qwen3.8 27B}
+      - {id: meta-llama/llama-4-maverick-17b-128e-instruct, label: Llama 4 Maverick}
+      - {id: meta-llama/llama-4-scout-17b-16e-instruct, label: Llama 4 Scout, fast: true}
+      - {id: openai/gpt-oss-120b, label: GPT-OSS 120B, vision: false, code: true}
+      - {id: openai/gpt-oss-20b, label: GPT-OSS 20B, fast: true, vision: false, code: true}
+
+  openrouter:
+    label: OpenRouter
+    kind: openai
+    base_url: https://openrouter.ai/api/v1
+    key_hint: sk-or-…
+    key_url: https://openrouter.ai/keys
+    discover: openrouter
+    # OpenRouter vendor prefix -> provider whose naming rules rank that vendor's models.
+    vendors: {anthropic: anthropic, openai: openai, google: gemini, x-ai: xai}
+    fallback: [anthropic/claude-opus-5.5, openai/gpt-5, google/gemini-2.5-pro, google/gemini-2.5-flash]
+    extra_models:
+      - {id: qwen/qwen3-coder, label: Qwen3 Coder, vision: false, code: true}
