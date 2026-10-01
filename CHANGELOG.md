@@ -2,6 +2,17 @@
 
 Notes for the agent harness: what was added, and which files changed. Newest first.
 
+## Merged with main's settings and harness work, October 2026
+
+Main was rewritten to its own history with a large Settings and harness commit. Both sides are merged here:
+
+- **Settings UI:** main's pages are kept (General, Appearance, Agent, Harness, Plan mode, Memory, Browser, with search, backup and reset). This branch's Editor, Browser, Design and Memory tabs were dropped for them; its Terminal tab stays, and main's Design checks gain the Compare and UI check rows. Preferences are stored in `~/.livecode/settings.json`, which Reset all also clears.
+- **Memory:** main's Memory page and routes, plus this branch's read and save of MEMORY.md and session logs on `/livecode/memory/file` when a path is given.
+- **Chrome:** main's probe, detect and launch, with one launcher underneath that reuses a running Chrome or starts one it closes on disconnect.
+- **Harness:** main's retries, streaming, settings-disabled tools and parse-error guard, together with this branch's gates, transcripts and removals.
+
+The section below describes this branch's own Settings tabs; where it differs, this note wins.
+
 ## Settings, memory, transcripts and Chrome launch, October 2026
 
 Ported from IntelIDE's change list, saved in `docs/ports/intelide-2026-10.md`. Its Files/S3 and Workbench shell sections have no counterpart in LiveCode and were not ported.
