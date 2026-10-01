@@ -1452,16 +1452,38 @@ def register_livecode_routes(app, socketio, rt):
             return jsonify({"error": f"Could not reset settings: {e.strerror or e}"}), 500
         return jsonify({"success": True, "settings": {}, "browser": browser})
 
+    def _browser_connection_update(data):
+        """One place for the three ways to change the connection: {launch, port} starts Chrome with remote
+        debugging and attaches to it, {cdp_url} attaches to a running one, {disconnect} goes back to the
+        built-in browser (and closes a Chrome LiveCode started)."""
+        if data.get("launch"):
+            return livecode_browser.launch_chrome_and_attach(data.get("port") or 9222)
+        return livecode_browser.set_cdp_endpoint("" if data.get("disconnect") else str(data.get("cdp_url") or ""))
+
     @app.route("/livecode/browser/connection", methods=["GET", "POST"])
     def livecode_browser_connection():
+        # Status: {success, engine, endpoint, source?, connected?, version?, managed_launch, pid?, profile_dir?, port?}.
         if request.method == "GET":
             return jsonify({"success": True, **livecode_browser.connection_status()})
         data = request.get_json(silent=True) or {}
         try:
-            status = livecode_browser.set_cdp_endpoint("" if data.get("disconnect") else str(data.get("cdp_url") or ""))
+            status = _browser_connection_update(data)
         except Exception as e:
             return _browser_failure(e)
         return jsonify({"success": True, **status})
+
+    @socketio.on("livecode_browser_connection")
+    def livecode_browser_connection_socket(data=None):
+        # Same as POST /livecode/browser/connection; the reply comes back as livecode_browser_connection_result,
+        # tagged with the request_id the client sent.
+        data = data if isinstance(data, dict) else {}
+        reply = {"request_id": data.get("request_id")}
+        try:
+            reply.update({"success": True, **_browser_connection_update(data)})
+        except Exception as e:
+            body, status = _browser_failure(e)
+            reply.update({"success": False, "status": status, **(body.get_json() or {})})
+        socketio.emit("livecode_browser_connection_result", reply, to=request.sid)
 
     @app.route("/livecode/browser/shot/<storage_key>/<shot_file>", methods=["GET"])
     def livecode_browser_shot(storage_key, shot_file):

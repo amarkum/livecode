@@ -16594,6 +16594,8 @@ body.dark-theme .livecode-dialog-overlay {
 	cursor: default;
 }
 #ide-editor-inner #ide-browser-view .ide-browser-engine-chip[hidden] { display: none; }
+#ide-editor-inner #ide-browser-view .ide-browser-engine-chip.is-chrome { border-color: rgb(66 133 244 / 0.45); color: var(--livecode-text-primary); }
+#ide-editor-inner #ide-browser-view .ide-browser-size-chip:not(.is-fixed) { color: var(--livecode-text-tertiary); }
 #ide-editor-inner #ide-browser-view .nav-button .ui-icon { --icon-size: 16px; }
 #ide-editor-inner #ide-browser-view .url-input-container { display: flex; flex: 1; min-width: 0; }
 #ide-editor-inner #ide-browser-view .ide-browser-url { position: relative; flex: 1; min-width: 0; }
@@ -16768,7 +16770,12 @@ body.dark-theme .livecode-dialog-overlay {
 	outline: none !important;
 }
 #ide-editor-inner #ide-browser-view .ide-browser-stage { position: relative; flex-shrink: 0; }
-#ide-editor-inner #ide-browser-view .browser-frame-container[data-loaded] .ide-browser-stage { background: #fff; }
+/* Behind the page until it paints, and in a letterbox: the theme's page colour, not a white flash in dark themes. */
+#ide-editor-inner #ide-browser-view { --ide-browser-stage-bg: #ffffff; }
+body.dark-theme #ide-editor-inner #ide-browser-view { --ide-browser-stage-bg: #1b1f27; }
+body.black-theme #ide-editor-inner #ide-browser-view { --ide-browser-stage-bg: #0b0b0b; }
+body.pink-theme #ide-editor-inner #ide-browser-view { --ide-browser-stage-bg: #fff7fb; }
+#ide-editor-inner #ide-browser-view .browser-frame-container[data-loaded] .ide-browser-stage { background: var(--ide-browser-stage-bg); }
 #ide-editor-inner #ide-browser-view .browser-frame-container.is-device .ide-browser-stage {
 	border: 1px solid var(--livecode-stroke-secondary);
 	border-radius: 18px;

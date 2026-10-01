@@ -14949,13 +14949,30 @@ function _livecodeBrowserRender() {
   const fixed = _livecodeBrowser.viewportMode === "fixed";
   const vp = state.viewport || {};
   view.querySelector(".ide-browser-resolution-toggle").classList.toggle("is-active", fixed);
+  // Resolution chip: the page's size, fixed or fitted to the pane, so it is always clear what the page is laid
+  // out at. Engine chip: which browser the tabs are in.
   const chip = view.querySelector(".ide-browser-size-chip");
-  const chipText = fixed && vp.width ? vp.width + " × " + vp.height : "";
+  const size = (_livecodeBrowser.streaming && state.frame_size && state.frame_size.width) ? state.frame_size : vp;
+  const chipText = hasPage && size.width ? size.width + " × " + size.height : "";
   chip.hidden = !chipText;
+  chip.classList.toggle("is-fixed", fixed);
+  chip.title = fixed ? "Fixed resolution: click to change" : "Fits the pane: click to pick a fixed resolution";
   if (chip.textContent !== chipText) chip.textContent = chipText;
   const engine = view.querySelector(".ide-browser-engine-chip");
-  engine.hidden = state.engine !== "chrome";
-  engine.title = "The tabs are in your own Chrome, attached over CDP (Settings > Browser)";
+  const conn = _livecodeBrowserConnection || {};
+  const chrome = state.engine === "chrome";
+  if (chrome && !_livecodeBrowserConnection && !_livecodeBrowser._connectionAsked) {
+    _livecodeBrowser._connectionAsked = true;
+    _livecodeLoadBrowserConnection().then(function() { _livecodeBrowserRender(); });
+  }
+  const engineText = chrome ? (conn.managed_launch ? "Chrome · launched" : "Chrome") : "Chromium";
+  engine.hidden = !hasPage && !chrome;
+  engine.classList.toggle("is-chrome", chrome);
+  if (engine.textContent !== engineText) engine.textContent = engineText;
+  engine.title = chrome
+    ? (conn.managed_launch ? "The tabs are in a Chrome LiveCode started with a profile of its own (Settings > Browser)"
+                           : "The tabs are in your own Chrome, attached over CDP (Settings > Browser)")
+    : "The tabs are in the built-in browser (Chromium). Attach or launch Chrome in Settings > Browser";
   view.querySelector(".ide-browser-compare-toggle").classList.toggle("is-active", compare.on);
   view.classList.toggle("is-maximized", _livecodeBrowser.maximized);
   const max = view.querySelector(".ide-browser-maximize");
@@ -18084,6 +18101,7 @@ function _livecodeSettingsAgentHtml() {
 }
 
 let _livecodeBrowserConnection = null;
+let _livecodeChromeLaunching = false;
 
 function _livecodeLoadBrowserConnection() {
   return fetch("/livecode/browser/connection")
@@ -18104,6 +18122,12 @@ function _livecodeSettingsChromeRowHtml() {
   const isEnv = c.source === "env";
   const toggleHtml = '<label class="lc-switch"><input type="checkbox" data-chrome-toggle' + (c.engine === "chrome" ? " checked" : "") +
     (isEnv ? " disabled" : "") + ' aria-label="Use your Chrome"><span class="lc-switch-track"><span class="lc-switch-thumb"></span></span></label>';
+  if (c.engine === "chrome" && c.managed_launch) {
+    const desc = "The agent's tabs open in a Chrome LiveCode started" + (c.version ? " (" + _livecodeEscapeHtml(c.version) + ")" : "") +
+      " on port " + _livecodeEscapeHtml(String(c.port || "")) + ", with a profile of its own at " + _livecodeSettingsPathHtml(c.profile_dir || "") +
+      ". Sign in there to what the agent should see. Turning this off closes that Chrome.";
+    return _livecodeSettingsRowHtml("Use your Chrome", desc, toggleHtml);
+  }
   if (c.engine === "chrome") {
     const where = _livecodeEscapeHtml(String(c.endpoint || "").replace(/^https?:\/\//, ""));
     const desc = "The agent's tabs open in the Chrome at " + where + (c.version ? " (" + _livecodeEscapeHtml(c.version) + ")" : "") +
@@ -18112,8 +18136,8 @@ function _livecodeSettingsChromeRowHtml() {
     return _livecodeSettingsRowHtml("Use your Chrome", desc, toggleHtml);
   }
   return _livecodeSettingsRowHtml("Use your Chrome",
-    "Attach a Chrome you started with remote debugging (chrome --remote-debugging-port=9222 --user-data-dir=&lt;a profile folder&gt;), so the agent's tabs open there, signed in to your design tools and sites. The built-in browser is used otherwise.",
-    toggleHtml);
+    "Launch Chrome for the agent (a profile of its own, remote debugging on port 9222), or attach a Chrome you started with chrome --remote-debugging-port=9222 --user-data-dir=&lt;a profile folder&gt;, so the agent's tabs open there, signed in to your design tools and sites. The built-in browser is used otherwise. Chrome runs on the machine LiveCode runs on.",
+    (isEnv ? "" : _livecodeSettingsButton(_livecodeChromeLaunching ? "Launching…" : "Launch Chrome", "chrome-launch", _livecodeChromeLaunching ? " disabled" : "") + " ") + toggleHtml);
 }
 
 let _livecodeFigmaStatus = null;
@@ -18293,9 +18317,31 @@ function _livecodeSaveFigmaToken(body) {
     });
 }
 
+function _livecodeBrowserConnectionRequest(body) {
+  const sock = typeof io !== "undefined" ? _livecodeGetIdeSocket() : null;
+  if (!sock || !sock.connected) {
+    return fetch("/livecode/browser/connection", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+      .then(function(resp) { return resp.json().then(function(data) { return { ok: resp.ok, data: data || {} }; }); });
+  }
+  return new Promise(function(resolve) {
+    const requestId = "bc-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+    const timer = setTimeout(function() { done({ ok: false, data: { error: "The browser did not answer in time." } }); }, 70000);
+    function done(res) {
+      clearTimeout(timer);
+      sock.off("livecode_browser_connection_result", onResult);
+      resolve(res);
+    }
+    function onResult(data) {
+      if (!data || data.request_id !== requestId) return;
+      done({ ok: !!data.success, data: data });
+    }
+    sock.on("livecode_browser_connection_result", onResult);
+    sock.emit("livecode_browser_connection", Object.assign({}, body, { request_id: requestId }));
+  });
+}
+
 function _livecodeSetBrowserConnection(body) {
-  return fetch("/livecode/browser/connection", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
-    .then(function(resp) { return resp.json().then(function(data) { return { ok: resp.ok, data: data || {} }; }); })
+  return _livecodeBrowserConnectionRequest(body)
     .then(function(res) {
       if (!res.ok || res.data.error) throw new Error(res.data.error || "Could not change the browser.");
       _livecodeBrowserConnection = res.data;
@@ -18762,6 +18808,14 @@ function _livecodeBindSettingsOnce(view) {
       if (key && value && String(_livecodeBrowserSetting(key)) !== value) _livecodeSaveBrowserSetting(key, value);
     } else if (action === "match-threshold-reset") {
       _livecodeSaveMatchThreshold((_livecodeBrowserSettings && _livecodeBrowserSettings.default_design_accuracy) || 90);
+    } else if (action === "chrome-launch") {
+      _livecodeChromeLaunching = true;
+      _livecodeRenderSettingsPage();
+      _livecodeShowIdeToast("Launching Chrome…");
+      _livecodeSetBrowserConnection({ launch: true, port: 9222 })
+        .then(function(data) { _livecodeShowIdeToast("Chrome is running" + (data.version ? " (" + data.version + ")" : "") + "; the agent's tabs open there"); })
+        .catch(function(err) { _livecodeShowIdeToast(err.message || String(err)); })
+        .finally(function() { _livecodeChromeLaunching = false; _livecodeRenderSettingsPage(); });
     } else if (action === "browser-cookies") {
       openLiveCodeBrowserCookies();
     } else if (action === "open-browser") {

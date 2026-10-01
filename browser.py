@@ -8,11 +8,13 @@ import json
 import math
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
 import threading
 import time
+import urllib.request
 import uuid
 from collections import deque
 from concurrent.futures import Future
@@ -426,9 +428,136 @@ def cdp_endpoint() -> str:
     return (os.environ.get("LIVECODE_BROWSER_CDP_URL", "").strip() or str(_saved_config().get("cdp_url") or "").strip())
 
 
+# A Chrome that LiveCode started itself for the agent (Settings > Browser > Launch Chrome): its own profile, so
+# it never touches the user's everyday one, and remote debugging on a local port. Runs on the LiveCode host,
+# so it is for a LiveCode running on the user's own machine.
+CHROME_DEBUG_PROFILE = os.path.expanduser("~/.livecode/chrome-debug-profile")
+CHROME_DEBUG_LOG = os.path.expanduser("~/.livecode/chrome-debug.log")
+CHROME_LAUNCH_WAIT_S = 12.0
+_managed_chrome: dict[str, Any] = {}
+_managed_lock = threading.Lock()
+
+
+def find_chrome_executable() -> str:
+    """Chrome (or Chromium) on this machine: LIVECODE_CHROME_EXECUTABLE, else the usual places on mac, Windows and Linux."""
+    given = os.environ.get("LIVECODE_CHROME_EXECUTABLE", "").strip()
+    if given:
+        if os.path.isfile(given) and os.access(given, os.X_OK):
+            return given
+        raise BrowserUnavailable(f"LIVECODE_CHROME_EXECUTABLE ({given}) is not an executable file.")
+    candidates: list[str] = []
+    if sys.platform == "darwin":
+        for root in ("/Applications", os.path.expanduser("~/Applications")):
+            candidates += [os.path.join(root, "Google Chrome.app/Contents/MacOS/Google Chrome"),
+                           os.path.join(root, "Chromium.app/Contents/MacOS/Chromium"),
+                           os.path.join(root, "Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary")]
+    elif os.name == "nt":
+        for var in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+            base = os.environ.get(var)
+            if base:
+                candidates.append(os.path.join(base, "Google", "Chrome", "Application", "chrome.exe"))
+    else:
+        for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome"):
+            found = shutil.which(name)
+            if found:
+                candidates.append(found)
+    for path in candidates:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    raise BrowserUnavailable("Chrome is not installed where LiveCode looks for it. Install Google Chrome, or set "
+                             "LIVECODE_CHROME_EXECUTABLE to its path on the LiveCode server.")
+
+
+def _debug_port_answers(port: int, timeout: float = 1.0) -> bool:
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=timeout) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+def _log_tail(path: str, lines: int = 6) -> str:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            tail = [line.strip() for line in handle.read().splitlines() if line.strip()][-lines:]
+    except OSError:
+        return ""
+    return " ".join(tail)[:400]
+
+
+def launch_chrome_and_attach(port: int = 9222) -> dict[str, Any]:
+    """Start Chrome with remote debugging and a profile of its own, wait for it, then attach the agent's tabs to it."""
+    if os.environ.get("LIVECODE_BROWSER_CDP_URL", "").strip():
+        raise BrowserError("LIVECODE_BROWSER_CDP_URL is set on the LiveCode server; change it there.")
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        raise BrowserError("The debugging port is a number from 1024 to 65535.") from None
+    if not 1024 <= port <= 65535:
+        raise BrowserError("The debugging port is a number from 1024 to 65535.")
+    endpoint = f"http://127.0.0.1:{port}"
+    with _managed_lock:
+        managed = dict(_managed_chrome)
+        running = managed.get("process") is not None and managed["process"].poll() is None
+        if not (running and managed.get("port") == port):
+            if _debug_port_answers(port):
+                raise BrowserError(f"Something already answers on port {port}. Attach to it with “Use your Chrome”, "
+                                   "or pick another port.")
+            executable = find_chrome_executable()
+            os.makedirs(CHROME_DEBUG_PROFILE, exist_ok=True)
+            log = open(CHROME_DEBUG_LOG, "ab")
+            try:
+                process = subprocess.Popen(
+                    [executable, f"--remote-debugging-port={port}", f"--user-data-dir={CHROME_DEBUG_PROFILE}",
+                     "--no-first-run", "--no-default-browser-check", "about:blank"],
+                    stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
+                )
+            except OSError as exc:
+                raise BrowserUnavailable(f"Could not start Chrome at {executable} ({_first_line(exc)}).") from exc
+            finally:
+                log.close()
+            deadline = time.monotonic() + CHROME_LAUNCH_WAIT_S
+            while not _debug_port_answers(port, timeout=0.5):
+                if process.poll() is not None:
+                    raise BrowserUnavailable(f"Chrome quit as it started (exit {process.returncode}). "
+                                             f"{_log_tail(CHROME_DEBUG_LOG)}".strip())
+                if time.monotonic() > deadline:
+                    process.terminate()
+                    raise BrowserUnavailable(f"Chrome did not open its debugging port {port} within "
+                                             f"{int(CHROME_LAUNCH_WAIT_S)} s. {_log_tail(CHROME_DEBUG_LOG)}".strip())
+                time.sleep(0.2)
+            _managed_chrome.clear()
+            _managed_chrome.update({"process": process, "pid": process.pid, "port": port, "endpoint": endpoint,
+                                    "profile_dir": CHROME_DEBUG_PROFILE, "executable": executable})
+    try:
+        return set_cdp_endpoint(endpoint)
+    except Exception:
+        _stop_managed_chrome()
+        raise
+
+
+def _stop_managed_chrome() -> None:
+    with _managed_lock:
+        process = _managed_chrome.get("process")
+        _managed_chrome.clear()
+    if process is not None and process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+
+
 def connection_status() -> dict[str, Any]:
     endpoint = cdp_endpoint()
     out: dict[str, Any] = {"engine": "chrome" if endpoint else "builtin", "endpoint": endpoint}
+    managed = dict(_managed_chrome)
+    alive = managed.get("process") is not None and managed["process"].poll() is None
+    out["managed_launch"] = bool(alive and endpoint and managed.get("endpoint") == endpoint)
+    if out["managed_launch"]:
+        out["pid"] = managed.get("pid")
+        out["profile_dir"] = managed.get("profile_dir")
+        out["port"] = managed.get("port")
     if os.environ.get("LIVECODE_BROWSER_CDP_URL", "").strip():
         out["source"] = "env"
     elif endpoint:
@@ -463,6 +592,8 @@ def set_cdp_endpoint(url: str) -> dict[str, Any]:
 
     _reset_everywhere()
     _write({**previous, "cdp_url": url})
+    if not url or url != _managed_chrome.get("endpoint"):
+        _stop_managed_chrome()
     if url:
         try:
             _shared_worker.call(_shared_worker.chromium, label="connect", timeout=40)
