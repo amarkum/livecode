@@ -68,57 +68,6 @@ def _resolve_flexible_project_path(project_path: str, rel_path: str) -> str | No
             return candidate
     return scoped_path
 
-LIVECODE_COAUTHOR_NAME = "LiveCode"
-LIVECODE_COAUTHOR_EMAIL = "committer@livecode.ai"
-LIVECODE_COAUTHOR_TRAILER = (
-    f"Co-authored-by: {LIVECODE_COAUTHOR_NAME} <{LIVECODE_COAUTHOR_EMAIL}>"
-)
-
-def _segment_looks_like_git_commit(segment: str) -> bool:
-    low = (segment or "").lower()
-    if not re.search(r"\bgit\b", low):
-        return False
-    if not re.search(r"\bcommit\b", low):
-        return False
-    if re.search(r"\bcommit-(tree|graph)\b", low):
-        return False
-    if re.search(r"\bcommit\b[^\n]*--help\b", low):
-        return False
-    return True
-
-def _inject_livecode_coauthor_into_commit_segment(segment: str) -> str:
-    if not _segment_looks_like_git_commit(segment):
-        return segment
-    if LIVECODE_COAUTHOR_EMAIL.lower() in segment.lower():
-        return segment
-    if re.search(r"co-authored-by:\s*livecode\b", segment, re.I):
-        return segment
-
-    has_message_flag = bool(
-        re.search(r"(?:^|[\s])(-m|--message|--file|-F)\b", segment)
-        or "<<" in segment
-    )
-    trailer = LIVECODE_COAUTHOR_TRAILER
-    if has_message_flag:
-        suffix = f' -m "{trailer}"'
-    else:
-        suffix = f' --trailer "{trailer}"'
-    return segment.rstrip() + suffix
-
-def inject_livecode_commit_coauthor(command: str) -> str:
-    cmd = command or ""
-    if not re.search(r"\bgit\b", cmd, re.I) or not re.search(r"\bcommit\b", cmd, re.I):
-        return cmd
-
-    parts = re.split(r"(&&|\|\||;)", cmd)
-    out: list[str] = []
-    for part in parts:
-        if part in ("&&", "||", ";"):
-            out.append(part)
-            continue
-        out.append(_inject_livecode_coauthor_into_commit_segment(part))
-    return "".join(out)
-
 LIVECODE_TOOLS = [
     {
         "type": "function",
@@ -465,8 +414,7 @@ LIVECODE_TOOLS = [
                 "long builds). For dev servers, watchers, and other processes that keep running, set "
                 "background=true: it returns a command_id right away, then use command_status to read "
                 "output and kill_command to stop it. stdin is closed, so pass non-interactive flags "
-                "(e.g. --yes). Do NOT use for git history — use git_log instead. Every git commit is "
-                "automatically tagged with Co-authored-by: LiveCode <committer@livecode.ai>."
+                "(e.g. --yes). Do NOT use for git history — use git_log instead."
             ),
             "parameters": {
                 "type": "object",
@@ -520,6 +468,31 @@ LIVECODE_TOOLS = [
                     "command_id": {"type": "string", "description": "The command_id run_command returned"},
                 },
                 "required": ["command_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "restart_command",
+            "description": (
+                "Restart a dev server or watcher: stop the background command (and whatever is still "
+                "listening on its port, so a leftover process cannot keep the port), start it again with the "
+                "same command, and return the new command_id with its first output. Use it when a code change "
+                "does not show after reloading the page (a hard reload included), when the page stops loading, "
+                "or when command_status shows the server exited or is stuck. Without command_id, pass command "
+                "to start a server that was started outside LiveCode after freeing its port. wait_seconds and "
+                "until wait for it to come up (e.g. until: \"localhost:\\d+\")."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command_id": {"type": "string", "description": "The background command to restart (its command_id from run_command)"},
+                    "command": {"type": "string", "description": "Without command_id: the command to start (a dev server), after freeing its port"},
+                    "port": {"type": "integer", "description": "The port it listens on, when the command or its output does not show it; whatever listens there is stopped first"},
+                    "wait_seconds": {"type": "integer", "description": "Wait up to this long for it to come up, 0-120 (default 0)"},
+                    "until": {"type": "string", "description": "Optional regex; stop waiting once the output matches (e.g. its URL)"},
+                },
             },
         },
     },
@@ -810,10 +783,13 @@ ASK_QUESTION_TOOL = {
     "function": {
         "name": "ask_question",
         "description": (
-            "Ask the user multiple-choice clarifying questions while plan mode is active. The turn "
-            "pauses and the user picks answers in a questions card (a free-text 'Other' row is always "
-            "added, so do not include an 'Other' option). Use it only for decisions that change the "
-            "plan and that the code cannot answer. Ask everything you need in one call."
+            "Ask the user what only they can decide, in a questions card: the turn pauses and continues "
+            "with their answers, in this same turn. Give options for a choice (allow_multiple when several "
+            "can apply together, else one is picked); a free-text 'Other' row is always added, so do not "
+            "include an 'Other' option. Give no options for an open answer (what a message should say, a "
+            "name, an address): the card shows a text box. Use it instead of ending your turn with a "
+            "question, only for what the request, the code and the page cannot answer, never to confirm "
+            "what the user already asked for. Ask everything you need in one call."
         ),
         "parameters": {
             "type": "object",
@@ -828,7 +804,7 @@ ASK_QUESTION_TOOL = {
                             "prompt": {"type": "string", "description": "The question, one or two sentences"},
                             "options": {
                                 "type": "array",
-                                "description": "2-4 distinct choices, recommended first.",
+                                "description": "2-5 distinct choices, recommended first; leave out for an open answer (a text box)",
                                 "items": {
                                     "type": "object",
                                     "properties": {
@@ -843,7 +819,7 @@ ASK_QUESTION_TOOL = {
                                 "description": "True when several options can be picked together.",
                             },
                         },
-                        "required": ["id", "prompt", "options"],
+                        "required": ["id", "prompt"],
                     },
                 },
             },
@@ -937,21 +913,28 @@ BROWSER_TOOL = {
             "- inspect {ref | selector | text}: an element's box and computed styles (font, colours, padding, radius, "
             "layout, shadow) with an outline of what is inside it; without a target, the page outlined the way a "
             "design tool lists layers. Boxes are page coordinates: CSS px from the page's top-left\n"
-            "- compare {reference?, elements?, full_page? | ref | selector | text | x, y, width, height, reference_region?, "
-            "reference_scale?}: the view, the page or one element beside the design, with a difference map: "
-            "similarity (the share of the design's content that matches), structure (how alike the shapes and layout "
-            "are, 0-100: it stays high when only colours differ), a verdict (identical, nearly identical, different), the "
-            "differing areas with the page element at each and their kind: missing (in the design, not on the page), "
-            "extra (on the page only), moved (the design's content moved.dx, moved.dy px away), color (the same shape in "
-            "another colour: design_color, page_color, delta_e), content (other text or shapes), size (past the other "
-            "image's edge) or edges (only outlines differ; minor ones are anti-aliasing or sub-pixel rendering), an element's size and "
-            "position difference, and bands of the page that sit higher or lower than the design. elements: true compares "
-            "element by element instead: every element of the page (or of the selector) is cropped with its place in the "
-            "design, lined up on its own and measured, and each one that differs says what to change: where it sits "
-            "(px, against its parent), its size, background and text colour, font size, letter spacing, line height or "
-            "wrapping, corner radius, shadow, or that it is not in the design; missing_on_page lists parts of the design "
-            "the page lacks, and progress what changed since the last such compare. Fix them top to bottom (a size change "
-            "moves what follows it). The board numbers them on the design and the page, with a close-up of each. "
+            "- compare {reference?, content?, elements?, full_page? | ref | selector | text | x, y, width, height, reference_region?, "
+            "reference_scale?}: the view, the page or one element against the design, element by element: every element "
+            "of the page (or of the selector) is cropped with its place in the design, lined up on its own and measured, "
+            "and each one that differs says what to change: where it sits (px, against its parent), its size, background "
+            "and text colour, font size, letter spacing, line height or wrapping, corner radius, shadow, or that it is not "
+            "in the design; missing_on_page lists parts of the design the page lacks, and progress what changed since the "
+            "last compare. A screenshot of one part of a page (a card, an input box, a form) is found on the page by itself "
+            "(located: the element, its selector, similar copies in a list or grid) and compared with that element alone; "
+            "a whole-page compare with many differences groups them into sections (a card, a form, a micro-frontend's root; "
+            "copies of one component as one) to work through one at a time with compare {selector}. "
+            "What an element shows is judged by content: layout (the default) ignores other words, numbers "
+            "and images (a design's sample data never matches a running app's: a card's name, price or photo) and counts "
+            "them separately; content: \"exact\" holds other text, images and pixels against the page too. Fix findings top "
+            "to bottom (a size change moves what follows it). The board numbers them on the design and the page, with a "
+            "close-up of each. elements: false compares the two images pixel by pixel instead (for screenshots and "
+            "images rather than a page): similarity (the share of the design's content that matches), structure (how alike "
+            "the shapes and layout are, 0-100: it stays high when only colours differ), a verdict (identical, nearly "
+            "identical, different), the differing areas with the page element at each and their kind: missing (in the "
+            "design, not on the page), extra (on the page only), moved (the design's content moved.dx, moved.dy px away), "
+            "color (the same shape in another colour: design_color, page_color, delta_e), content (other text or shapes), "
+            "size (past the other image's edge) or edges (only outlines differ; minor ones are anti-aliasing or sub-pixel "
+            "rendering), and bands of the page that sit higher or lower than the design. "
             "reference: attachment:N (the Nth image the user attached: a screenshot from Figma, Canva or "
             "any design tool), tab:<id> (a tab showing the design, captured now), a design link (a page opens in a "
             "background tab and is captured; an image is downloaded), shot:<id> (an earlier screenshot or crop), "
@@ -974,12 +957,16 @@ BROWSER_TOOL = {
             "Results also flag new console errors and downloads\n"
             "- batch {actions: [{action, ...}, ...]}: up to 8 actions in one call, in order, stopping at the first failure; "
             "use it for known sequences (open, type, submit) to save round trips. Any action also takes timeout (seconds)\n"
-            "- back, forward, reload\n"
+            "- back, forward, reload {hard?}: hard clears the cache and reloads from the server, for a page that keeps "
+            "showing old code after a change. If a hard reload still shows the old code, or the page will not load "
+            "(connection refused, a blank or error page), the dev server needs a restart: restart_command\n"
             "Forms that submit, send, buy, apply or post something: fill in only what the user told you or what the page "
             "pre-filled from their own profile; do not answer personal, legal or screening questions (work authorization, "
-            "salary, availability, demographics, willingness to relocate) on their behalf, list them and ask; and ask for a "
-            "clear yes before pressing the final Submit, Send, Apply or Pay button: the browser holds those clicks back (and Enter in "
-            "a form whose button is one of them) until you pass confirm: true, so pass it only when the user asked for exactly that.\n"
+            "salary, availability, demographics, willingness to relocate) on their behalf, ask them with ask_question. The "
+            "final Submit, Send, Apply or Pay button is held back (and Enter in a form whose button is one of them) unless the "
+            "user's request already asked for exactly that step (\"send her a message saying …\", \"submit it\"): then it goes "
+            "through, so do it and do not ask again. Otherwise ask for a clear yes with ask_question, and pass confirm: true "
+            "once they said yes.\n"
             "When actions keep failing or the page will not move, the result carries a screenshot: look at it and act on "
             "what it shows instead of repeating the same call: its pink numbered boxes are refs for click and type (screenshot "
             "{marks: true} draws them on any screenshot), or click x, y, or press Escape.\n"
@@ -1018,7 +1005,9 @@ BROWSER_TOOL = {
                 "reference_scale": {"type": "number", "description": "compare/crop: the design image's scale (2 for a 2x export or a retina screenshot) when it is not 1"},
                 "script": {"type": "string", "description": "javascript_exec: the code to run in the page"},
                 "full_page": {"type": "boolean", "description": "screenshot/compare: the whole page instead of the view; crop/compare region: x and y are page coordinates"},
-                "elements": {"type": "boolean", "description": "compare: element by element, each element cropped and measured against its place in the design"},
+                "elements": {"type": "boolean", "description": "compare: element by element (the default), each element cropped and measured against its place in the design; false compares the two images pixel by pixel instead"},
+                "locate": {"type": "boolean", "description": "compare: find the element a screenshot of one part of the page shows (a card, a form, an input box) and compare with it (automatic when the design is narrower than the page; true forces it, false compares with the view)"},
+                "content": {"type": "string", "enum": ["layout", "exact"], "description": "compare: layout (the default, or the user's setting) measures each element's place, size, colours and type and ignores what it shows (other words, numbers or images: a design's sample data); exact counts other text, images and pixels as differences too"},
                 "seconds": {"type": "number", "description": "wait: how long, at most 30"},
                 "tab_id": {"type": "string", "description": "the tab to act on, from tabs (default: the current tab); switch_tab/close_tab: the tab"},
                 "query": {"type": "string", "description": "snapshot: keep only elements and text lines containing this word"},
@@ -1040,6 +1029,7 @@ BROWSER_TOOL = {
                 "status": {"type": "string", "description": "network: failed, errors, or a status code such as 404"},
                 "type": {"type": "string", "description": "network: resource type such as xhr, fetch, document, script"},
                 "clear": {"type": "boolean", "description": "console/network/find: clear the entries or highlights"},
+                "hard": {"type": "boolean", "description": "reload: clear the cache first and reload from the server (a page that still shows old code)"},
                 "timeout": {"type": "number", "description": "seconds to wait for this action (1-120) instead of the default"},
                 "confirm": {"type": "boolean", "description": "click/type: set true only when the user clearly asked for exactly this final step (a Submit, Send, Post, Pay or Apply button is held back otherwise)"},
                 "change": {"type": "boolean", "description": "wait: wait until the page's content changes (seconds is the limit, default 8)"},
@@ -1229,7 +1219,7 @@ READ_ONLY_TOOL_NAMES = frozenset({
 
 LIVECODE_MODES = ("agent", "plan", "ask")
 
-MUTATING_TOOL_NAMES = frozenset({"write_file", "edit_file", "multi_edit", "run_command", "kill_command"})
+MUTATING_TOOL_NAMES = frozenset({"write_file", "edit_file", "multi_edit", "run_command", "kill_command", "restart_command"})
 FILE_EDIT_TOOL_NAMES = frozenset({"write_file", "edit_file", "multi_edit"})
 
 PLAN_MODE_REJECTION = (
@@ -1264,8 +1254,9 @@ def filter_tools_for_mode(tools: list[dict], mode: str | None) -> list[dict]:
         if name in allowed:
             filtered.append(tool)
             continue
+    # The questions card in every mode: a doubt is asked, and answered, within the turn.
+    filtered.append(dict(ASK_QUESTION_TOOL))
     if normalized == "plan":
-        filtered.append(dict(ASK_QUESTION_TOOL))
         filtered.append(dict(CREATE_PLAN_TOOL))
     return filtered
 
@@ -1394,7 +1385,7 @@ def compact_tool_result_for_llm(tool_name: str, result: dict) -> dict:
         if len(content) > READ_RESULT_MAX_CHARS:
             out["content"] = content[:READ_RESULT_MAX_CHARS] + "\n... [truncated]"
             out["truncated"] = True
-    elif tool_name in ("run_command", "command_status", "kill_command"):
+    elif tool_name in ("run_command", "command_status", "kill_command", "restart_command"):
         output = out.get("output") or ""
         if len(output) > COMMAND_RESULT_MAX_CHARS:
             out["output"] = head_tail_text(output, COMMAND_RESULT_MAX_CHARS)
@@ -1828,7 +1819,6 @@ def _livecode_run_command(
     cmd = command.strip()
     if not cmd:
         return {"error": "Empty command"}
-    cmd = inject_livecode_commit_coauthor(cmd)
     blocked = ["rm -rf /", "mkfs", ":(){ :|:& };:"]
     low = cmd.lower()
     for b in blocked:
@@ -2648,6 +2638,31 @@ def dispatch_tool(
         except (TypeError, ValueError):
             wait_s = 0.0
         return wait_for(str(args.get("command_id") or "").strip(), wait_s, str(args.get("until") or ""))
+    if name == "restart_command":
+        from livecode.bg_commands import restart as restart_background
+
+        selected = _selected_workspace_root(project_path, {"file_path": "", "workspace": args.get("workspace")}, active_workspace)
+        if selected.get("error"):
+            return {"error": selected.get("error"), "error_kind": "invalid_input"}
+        try:
+            wait_s = float(args.get("wait_seconds") or 0)
+        except (TypeError, ValueError):
+            wait_s = 0.0
+        try:
+            port = int(args.get("port") or 0)
+        except (TypeError, ValueError):
+            return {"error": "port is a number.", "error_kind": "invalid_input"}
+        command = str(args.get("command") or "").strip()
+        return restart_background(
+            str(args.get("command_id") or "").strip(),
+            command=command,
+            cwd=selected["root"],
+            env=_subprocess_env(),
+            session_id=session_id,
+            port=port,
+            wait_seconds=wait_s,
+            until=str(args.get("until") or ""),
+        )
     if name == "kill_command":
         from livecode.bg_commands import kill as kill_background
 
@@ -3140,6 +3155,9 @@ def human_tool_label(name: str, args: dict) -> str:
         return f"Running `{cmd}`"
     if name == "command_status":
         return f"Checked `{str(args.get('command_id', ''))[:24]}`"
+    if name == "restart_command":
+        target = str(args.get("command_id") or args.get("command") or "")[:40]
+        return f"Restarted `{target}`" if target else "Restarted the server"
     if name == "kill_command":
         return f"Stopped `{str(args.get('command_id', ''))[:24]}`"
     if name == "find_symbol":

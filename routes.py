@@ -29,15 +29,15 @@ def register_livecode_routes(app, socketio, rt):
         append_turn_messages,
         append_turn_summary,
         delete_session,
-        format_messages_for_display,
         fork_session,
         list_sessions,
-        load_diff_records,
         load_session,
-        load_tool_artifacts,
+        load_transcript,
         message_index_for_user_turn,
         rename_session,
         rewind_to_message,
+        save_transcript,
+        session_exists,
         set_session_title,
         _sanitize_display_payload,
     )
@@ -247,21 +247,48 @@ def register_livecode_routes(app, socketio, rt):
         expanded = os.path.abspath(os.path.expanduser(project_path))
         if not os.path.isdir(expanded):
             return jsonify({"error": f"Project path not found: {project_path}"}), 400
+        # The chat is shown as it was rendered (transcript.html); message_count says whether there is a
+        # history at all, so a chat saved before transcripts existed can say so instead of showing nothing.
         try:
             state_path = _livecode_state_path(expanded, workspace_payload)
             session = load_session(state_path, session_id)
-            diffs = load_diff_records(state_path, session_id)
-            tool_artifacts = load_tool_artifacts(state_path, session_id)
-            display_messages = format_messages_for_display(session.get("messages") or [], diffs, tool_artifacts)
             return jsonify({
                 "success": True,
                 "session_id": session_id,
                 "summary": session.get("summary") or {},
-                "messages": display_messages,
+                "transcript_html": load_transcript(state_path, session_id),
+                "message_count": len(session.get("messages") or []),
             })
         except Exception as e:
             LIVECODE_LOGGER.exception("livecode load session error")
             return jsonify({"error": str(e)}), 500
+
+    @app.route("/livecode/session/transcript", methods=["POST"])
+    def livecode_save_transcript():
+        # {project_path, session_id, html, workspace?} -> {success}. success is false (not an error) when the
+        # transcript is over the 40 MB cap. 400 when the session is not in that project's workspace: the page
+        # only sends a chat to the workspace it belongs to.
+        data = request.get_json(silent=True) or {}
+        project_path = str(data.get("project_path") or "").strip()
+        session_id = str(data.get("session_id") or "").strip()
+        html = data.get("html")
+        workspace_payload = data.get("workspace") if isinstance(data.get("workspace"), dict) else None
+        if not project_path or not session_id or not isinstance(html, str):
+            return jsonify({"error": "project_path, session_id and html required"}), 400
+        expanded = os.path.abspath(os.path.expanduser(project_path))
+        if not os.path.isdir(expanded):
+            return jsonify({"error": f"Project path not found: {project_path}"}), 400
+        try:
+            state_path = _livecode_state_path(expanded, workspace_payload)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        if not session_exists(state_path, session_id):
+            return jsonify({"error": "This chat is not in that workspace."}), 400
+        try:
+            saved = save_transcript(state_path, session_id, html)
+        except OSError as e:
+            return jsonify({"error": f"Could not save the chat: {e.strerror or e}"}), 500
+        return jsonify({"success": bool(saved), **({} if saved else {"reason": "too_large"})})
 
     @app.route("/livecode/project-storage", methods=["DELETE", "POST"])
     def livecode_delete_project_storage():
@@ -945,7 +972,7 @@ def register_livecode_routes(app, socketio, rt):
 
     @app.route("/livecode/rules", methods=["GET", "POST"])
     def livecode_rules():
-        from livecode.rules import discover_project_rules
+        from livecode.rules import discover_project_rules, file_identity
         data = (request.get_json(silent=True) or {}) if request.method == "POST" else {}
         project_path = (data.get("project_path") or request.args.get("project_path") or "").strip()
         workspace_payload = data.get("workspace") if isinstance(data.get("workspace"), dict) else None
@@ -959,9 +986,10 @@ def register_livecode_routes(app, socketio, rt):
         seen = set()
         for folder in workspace.folders:
             for rule in discover_project_rules(folder.path):
-                if rule.file_path in seen:
+                ident = file_identity(rule.file_path)
+                if ident in seen:
                     continue
-                seen.add(rule.file_path)
+                seen.add(ident)
                 files.append({
                     "name": rule.file_name,
                     "path": rule.file_path,
@@ -969,6 +997,20 @@ def register_livecode_routes(app, socketio, rt):
                     "chars": len(rule.content),
                 })
         return jsonify({"success": True, "files": files, "primary_path": workspace.primary_path})
+
+    @app.route("/livecode/memory", methods=["GET", "POST"])
+    def livecode_memory():
+        # {success, files: [{path, name, source, size, modified, exists}]}: MEMORY.md, then session logs newest first.
+        from livecode.memory import list_editable_memory
+        data = (request.get_json(silent=True) or {}) if request.method == "POST" else {}
+        try:
+            state_path = _memory_state_path(data)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        try:
+            return jsonify({"success": True, "files": list_editable_memory(state_path)})
+        except OSError as e:
+            return jsonify({"error": f"Could not list memory files: {e.strerror or e}"}), 500
 
     @app.route("/livecode/rules/create", methods=["POST"])
     def livecode_rules_create():
@@ -1243,6 +1285,17 @@ def register_livecode_routes(app, socketio, rt):
         response.headers["X-Accel-Buffering"] = "no"
         return response
 
+    @app.route("/livecode/browser/inspect-map", methods=["POST"])
+    def livecode_browser_inspect_map():
+        data = request.get_json(silent=True) or {}
+        state_path, failed = _browser_target(data)
+        if failed:
+            return failed
+        try:
+            return jsonify({"success": True, **livecode_browser.inspect_map(state_path)})
+        except Exception as e:
+            return _browser_failure(e)
+
     @app.route("/livecode/browser/view", methods=["POST"])
     def livecode_browser_view():
         data = request.get_json(silent=True) or {}
@@ -1362,8 +1415,8 @@ def register_livecode_routes(app, socketio, rt):
     @app.route("/livecode/browser/settings", methods=["GET", "POST"])
     def livecode_browser_settings():
         # GET/POST reply: {success, design_accuracy, default_design_accuracy, min_design_accuracy, match_threshold,
-        # default_match_threshold, reduce_automation_signals, design_gate, agent_tabs, view_quality, default_viewport,
-        # allowed}. POST takes any of those setting keys (match_threshold from older clients is saved as the
+        # default_match_threshold, reduce_automation_signals, design_gate, compare_content, ui_verify, agent_tabs, view_quality,
+        # default_viewport, allowed}. POST takes any of those setting keys (match_threshold from older clients is saved as the
         # design accuracy it stands for); every value is checked before any is saved.
         if request.method == "GET":
             return jsonify({"success": True, **livecode_browser.browser_settings()})
@@ -1375,17 +1428,67 @@ def register_livecode_routes(app, socketio, rt):
         except OSError as e:
             return jsonify({"error": f"Could not save the setting: {e.strerror or e}"}), 500
 
+    from livecode import settings_store
+
+    @app.route("/livecode/settings", methods=["GET", "POST"])
+    def livecode_settings():
+        # GET: {success, settings}. POST {settings: {key: value | null}} merges them (null removes a key) and
+        # replies {success, settings, rejected: {key: reason}}; valid keys are saved even when others are rejected.
+        if request.method == "GET":
+            return jsonify({"success": True, "settings": settings_store.load_settings()})
+        data = request.get_json(silent=True) or {}
+        updates = data.get("settings")
+        if not isinstance(updates, dict):
+            return jsonify({"error": "settings must be an object"}), 400
+        try:
+            stored, rejected = settings_store.save_settings(updates)
+        except OSError as e:
+            return jsonify({"error": f"Could not save settings: {e.strerror or e}"}), 500
+        return jsonify({"success": True, "settings": stored, "rejected": rejected})
+
+    @app.route("/livecode/settings/reset", methods=["POST"])
+    def livecode_settings_reset():
+        # Reset all: LiveCode's settings file and the browser and design preferences (the attached Chrome stays).
+        data = request.get_json(silent=True) or {}
+        try:
+            settings_store.reset_settings()
+            browser = livecode_browser.browser_settings() if data.get("keep_browser") else livecode_browser.reset_browser_settings()
+        except OSError as e:
+            return jsonify({"error": f"Could not reset settings: {e.strerror or e}"}), 500
+        return jsonify({"success": True, "settings": {}, "browser": browser})
+
+    def _browser_connection_update(data):
+        """One place for the three ways to change the connection: {launch, port} starts Chrome with remote
+        debugging and attaches to it, {cdp_url} attaches to a running one, {disconnect} goes back to the
+        built-in browser (and closes a Chrome LiveCode started)."""
+        if data.get("launch"):
+            return livecode_browser.launch_chrome_and_attach(data.get("port") or 9222)
+        return livecode_browser.set_cdp_endpoint("" if data.get("disconnect") else str(data.get("cdp_url") or ""))
+
     @app.route("/livecode/browser/connection", methods=["GET", "POST"])
     def livecode_browser_connection():
+        # Status: {success, engine, endpoint, source?, connected?, version?, managed_launch, pid?, profile_dir?, port?}.
         if request.method == "GET":
             return jsonify({"success": True, **livecode_browser.connection_status()})
         data = request.get_json(silent=True) or {}
         try:
-            status = livecode_browser.set_cdp_endpoint("" if data.get("disconnect") else str(data.get("cdp_url") or ""))
+            status = _browser_connection_update(data)
         except Exception as e:
             return _browser_failure(e)
         return jsonify({"success": True, **status})
 
+    @socketio.on("livecode_browser_connection")
+    def livecode_browser_connection_socket(data=None):
+        # Same as POST /livecode/browser/connection; the reply comes back as livecode_browser_connection_result,
+        # tagged with the request_id the client sent.
+        data = data if isinstance(data, dict) else {}
+        reply = {"request_id": data.get("request_id")}
+        try:
+            reply.update({"success": True, **_browser_connection_update(data)})
+        except Exception as e:
+            body, status = _browser_failure(e)
+            reply.update({"success": False, "status": status, **(body.get_json() or {})})
+        socketio.emit("livecode_browser_connection_result", reply, to=request.sid)
     @app.route("/livecode/browser/cdp/probe", methods=["POST"])
     def livecode_browser_cdp_probe():
         data = request.get_json(silent=True) or {}
@@ -1469,7 +1572,10 @@ def register_livecode_routes(app, socketio, rt):
 
     @app.route("/livecode/memory/file", methods=["POST"])
     def livecode_memory_file():
-        # Returns MEMORY.md's path, creating an empty one so it opens in the editor.
+        # Without a path: MEMORY.md's location, creating an empty one so it opens in the editor.
+        # With {path} (MEMORY.md or sessions/<log>.md): reads that file; with content too, saves it.
+        # 400 for other paths or non-text content, 404 for a missing log, 500 on OS errors.
+        from livecode.memory import read_editable_memory, save_memory_file
         from livecode.memory.storage import memory_md_path, write_text_atomic
 
         data = request.get_json(silent=True) or {}
@@ -1477,6 +1583,18 @@ def register_livecode_routes(app, socketio, rt):
             state_path = _memory_state_path(data)
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
+        rel = str(data.get("path") or "")
+        if rel:
+            try:
+                if data.get("content") is None:
+                    return jsonify({"success": True, **read_editable_memory(state_path, rel)})
+                return jsonify({"success": True, **save_memory_file(state_path, rel, data.get("content"))})
+            except FileNotFoundError as e:
+                return jsonify({"error": str(e)}), 404
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
+            except OSError as e:
+                return jsonify({"error": f"Could not {'save' if data.get('content') is not None else 'read'} {rel}: {e.strerror or e}"}), 500
         path = memory_md_path(state_path, create=True)
         if not os.path.isfile(path):
             try:

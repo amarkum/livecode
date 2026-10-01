@@ -11,6 +11,17 @@ RULES_SUBDIRS = (".claude/rules",)
 RULE_FILE_MAX_CHARS = 20_000
 WORKSPACE_RULES_MAX_CHARS = 60_000
 
+def file_identity(path: str) -> tuple:
+    """The same file, however it is reached: a symlink or a hard link to a rule file is that rule file."""
+    try:
+        info = os.stat(path)
+    except OSError:
+        return ("path", os.path.normcase(os.path.realpath(path)))
+    if info.st_ino:
+        return ("inode", info.st_dev, info.st_ino)
+    return ("path", os.path.normcase(os.path.realpath(path)))
+
+
 @dataclass
 class RuleConfig:
     file_name: str
@@ -82,22 +93,22 @@ def _read_rule_file(path: str) -> str | None:
 
 
 def discover_project_rules(project_path: str) -> list[RuleConfig]:
-    configs: dict[str, RuleConfig] = {}
-    seen_named_paths: set[str] = set()
+    configs: dict[tuple, RuleConfig] = {}
+    seen_named: set[tuple] = set()
     for directory, depth in _collect_dirs_chain(project_path):
         for name in AGENT_FILE_NAMES:
             path = os.path.join(directory, name)
             if not os.path.isfile(path):
                 continue
-            real = os.path.normcase(os.path.realpath(path))
-            if real in seen_named_paths:
+            ident = file_identity(path)
+            if ident in seen_named:
                 continue
-            seen_named_paths.add(real)
+            seen_named.add(ident)
             content = _read_rule_file(path)
             if content is None:
                 continue
             if content:
-                key = f"named:{real}"
+                key = ident
                 prev = configs.get(key)
                 if not prev or depth >= prev.depth:
                     configs[key] = RuleConfig(name, path, content, depth)
@@ -119,7 +130,7 @@ def discover_project_rules(project_path: str) -> list[RuleConfig]:
                 if content is None:
                     continue
                 if content:
-                    key = f"rule:{path}"
+                    key = file_identity(path)
                     prev = configs.get(key)
                     if not prev or depth >= prev.depth:
                         configs[key] = RuleConfig(entry, path, content, depth)
@@ -169,7 +180,7 @@ def load_workspace_rules_reminder(workspace: LivecodeWorkspace) -> str:
     ]
     parts = list(header)
     seen_roots: set[str] = set()
-    seen_files: set[str] = set()
+    seen_files: set[tuple] = set()
     added = 0
     for folder in workspace.folders:
         real_root = os.path.normcase(os.path.realpath(folder.path))
@@ -178,10 +189,10 @@ def load_workspace_rules_reminder(workspace: LivecodeWorkspace) -> str:
         seen_roots.add(real_root)
         folder_configs: list[RuleConfig] = []
         for cfg in discover_project_rules(folder.path):
-            real_file = os.path.normcase(os.path.realpath(cfg.file_path))
-            if real_file in seen_files:
+            ident = file_identity(cfg.file_path)
+            if ident in seen_files:
                 continue
-            seen_files.add(real_file)
+            seen_files.add(ident)
             folder_configs.append(cfg)
         if not folder_configs:
             continue

@@ -4,19 +4,21 @@ import hashlib
 import json
 import os
 import shutil
+import tempfile
 import threading
 import time
 from typing import Any
 
 from .project_store import project_file
-from .subagent import display_subagent_result
 
 CHAT_HISTORY_FILE = "chat_history.jsonl"
 SUMMARY_FILE = "summary.json"
 COMPACTION_FILE = "compaction.json"
 CHECKPOINTS_DIR = "compaction_checkpoints"
-DIFFS_FILE = "diffs.jsonl"
-TOOL_ARTIFACTS_FILE = "tool_artifacts.jsonl"
+# The chat as the user saw it: the rendered transcript the page sends after each turn. Loading a chat shows
+# this, exactly; the message history (chat_history.jsonl) is what the model reads.
+TRANSCRIPT_FILE = "transcript.html"
+TRANSCRIPT_MAX_BYTES = 40 * 1024 * 1024
 
 def session_dir(project_path: str, session_id: str, *, create: bool = True) -> str:
     safe_id = "".join(c for c in (session_id or "") if c.isalnum() or c in ("_", "-"))[:128]
@@ -134,121 +136,39 @@ def load_session(project_path: str, session_id: str) -> dict[str, Any]:
         _SESSION_CACHE.pop(next(iter(_SESSION_CACHE)), None)
     return {**result, "messages": list(result["messages"])}
 
-def save_diff_record(
-    project_path: str,
-    session_id: str,
-    tool_call_id: str,
-    *,
-    file_name: str,
-    diff_html: str,
-    additions: int = 0,
-    deletions: int = 0,
-    absolute_path: str = "",
-    created: bool = False,
-) -> None:
-    if not tool_call_id or not diff_html:
-        return
-    path = os.path.join(session_dir(project_path, session_id), DIFFS_FILE)
-    record = {
-        "tool_call_id": tool_call_id,
-        "file_name": file_name,
-        "diff_html": diff_html,
-        "additions": additions,
-        "deletions": deletions,
-        "absolute_path": absolute_path,
-    }
-    if created:
-        record["created"] = True
-    _append_jsonl(path, record)
+def save_transcript(project_path: str, session_id: str, html: str) -> bool:
+    """Write the rendered transcript atomically. Over 40 MB it is not written and this returns False."""
+    data = (html or "").encode("utf-8")
+    if len(data) > TRANSCRIPT_MAX_BYTES:
+        return False
+    path = os.path.join(session_dir(project_path, session_id), TRANSCRIPT_FILE)
+    fd, tmp = tempfile.mkstemp(prefix=".transcript-", suffix=".tmp", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return True
 
-def load_diff_records(project_path: str, session_id: str) -> dict[str, dict[str, Any]]:
-    path = os.path.join(session_dir(project_path, session_id, create=False), DIFFS_FILE)
-    records = _read_jsonl(path)
-    return {r["tool_call_id"]: r for r in records if r.get("tool_call_id")}
 
-def _compact_artifact_result(tool_name: str, result: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(result, dict):
-        return {"summary": str(result)[:2000]}
-    if tool_name == "spawn_subagent":
-        return display_subagent_result(result)
-    if tool_name in ("write_file", "edit_file"):
-        return {
-            "success": result.get("success"),
-            "error": result.get("error"),
-            "file_path": result.get("file_path"),
-            "action": result.get("action") or tool_name,
-            "diff_html": result.get("diff_html", ""),
-            "additions": result.get("additions", 0),
-            "deletions": result.get("deletions", 0),
-            "absolute_path": result.get("absolute_path", ""),
-            "is_new_file": bool(result.get("is_new_file")),
-        }
-    if tool_name == "run_command":
-        output = str(result.get("output") or "")
-        return {
-            "success": result.get("success"),
-            "error": result.get("error"),
-            "command": result.get("command"),
-            "exit_code": result.get("exit_code"),
-            "output": output[:24000] + ("\n... [truncated]" if len(output) > 24000 else ""),
-            "hint": result.get("hint"),
-        }
-    if tool_name == "browser":
-        out = {
-            key: result.get(key)
-            for key in ("success", "error", "action", "url", "title", "status", "clicked", "typed_into", "pressed",
-                        "opened_tab", "shot_url", "width", "height", "full_page", "elements", "dialog", "truncated",
-                        "region", "target", "reference", "similarity", "diff_pct", "hotspots", "size_note",
-                        "verdict", "mode", "source", "differences", "size_diff", "offset", "shifts", "notes",
-                        "page_size", "reference_size", "reference_scale", "reference_region", "viewport",
-                        "viewport_mode", "device", "page_height", "overflow_x", "note", "warning", "element",
-                        "count", "scroll_y", "hint", "tab_id", "reference_tab", "opened_tab", "design", "layer",
-                        "scale", "layers", "fallback", "reason", "cached")
-            if result.get(key) not in (None, "")
-        }
-        script_result = str(result.get("result") or "")
-        if script_result:
-            out["result"] = script_result[:8000] + ("…" if len(script_result) > 8000 else "")
-        outline = str(result.get("outline") or "")
-        if outline:
-            out["outline"] = outline[:6000] + ("\n…" if len(outline) > 6000 else "")
-        return out
-    return {
-        "success": result.get("success"),
-        "error": result.get("error"),
-        "summary": str(result.get("summary") or result.get("message") or "")[:2000],
-    }
+def load_transcript(project_path: str, session_id: str) -> str:
+    path = os.path.join(session_dir(project_path, session_id, create=False), TRANSCRIPT_FILE)
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            return handle.read()
+    except OSError:
+        return ""
 
-def save_tool_artifact(
-    project_path: str,
-    session_id: str,
-    tool_call_id: str,
-    *,
-    tool_name: str,
-    tool_args: dict[str, Any] | None = None,
-    result: dict[str, Any] | None = None,
-    iteration: int | None = None,
-) -> None:
-    if not tool_call_id or not tool_name:
-        return
-    result = result or {}
-    should_store = tool_name in ("run_command", "write_file", "edit_file", "spawn_subagent", "browser") or bool(result.get("error"))
-    if not should_store:
-        return
-    path = os.path.join(session_dir(project_path, session_id), TOOL_ARTIFACTS_FILE)
-    _append_jsonl(path, {
-        "tool_call_id": tool_call_id,
-        "tool_name": tool_name,
-        "tool_args": tool_args or {},
-        "result": _compact_artifact_result(tool_name, result),
-        "iteration": iteration,
-        "created_at": time.time(),
-    })
 
-def load_tool_artifacts(project_path: str, session_id: str) -> dict[str, dict[str, Any]]:
-    path = os.path.join(session_dir(project_path, session_id, create=False), TOOL_ARTIFACTS_FILE)
-    records = _read_jsonl(path)
-    return {r["tool_call_id"]: r for r in records if r.get("tool_call_id")}
+def session_exists(project_path: str, session_id: str) -> bool:
+    sdir = session_dir(project_path, session_id, create=False)
+    return any(os.path.isfile(os.path.join(sdir, name)) for name in (CHAT_HISTORY_FILE, SUMMARY_FILE, TRANSCRIPT_FILE))
+
 
 def _load_compaction(project_path: str, session_id: str) -> dict[str, Any] | None:
     path = _compaction_path(project_path, session_id)
@@ -598,180 +518,6 @@ def append_turn_messages(
         model=model,
         title=(title or _first_user_title(turn_messages) or "")[:200] or None,
     )
-
-def _user_interjection_body(content: str) -> str | None:
-    prefix = "[User interjection]"
-    if not content.startswith(prefix):
-        return None
-    body = content[len(prefix):].lstrip("\n").strip()
-    return body
-
-def _is_legacy_internal_user_content(content: str) -> bool:
-    if not content:
-        return False
-    markers = (
-        "with the exact same arguments",
-        "narrow search calls in a row",
-        "steps only searching and reading",
-        "steps exploring without producing an answer",
-        "steps left this turn",
-        "directories in a row by drilling",
-        "It has been a while since your last edit",
-        "The tests have failed several runs in a row",
-        "You answered without looking at the code",
-    )
-    return any(marker in content for marker in markers)
-
-def format_messages_for_display(
-    messages: list[dict[str, Any]],
-    diffs: dict[str, dict[str, Any]] | None = None,
-    tool_artifacts: dict[str, dict[str, Any]] | None = None,
-) -> list[dict[str, Any]]:
-    diffs = diffs or {}
-    tool_artifacts = tool_artifacts or {}
-    display: list[dict[str, Any]] = []
-    consumed_artifacts: set[str] = set()
-    consumed_diffs: set[str] = set()
-
-    def _artifact_needs_diff_fallback(artifact: dict[str, Any], tc_id: str) -> bool:
-        if tc_id not in diffs:
-            return False
-        tool_name = str(artifact.get("tool_name") or "")
-        if tool_name not in ("write_file", "edit_file"):
-            return False
-        result = artifact.get("result") or {}
-        return not str(result.get("diff_html") or "").strip()
-
-    def _append_tool_artifact_for_display(artifact: dict[str, Any], tc_id: str) -> None:
-        tool_name = str(artifact.get("tool_name") or "")
-        result = artifact.get("result") or {}
-        diff_html = str(result.get("diff_html") or "").strip()
-        if tool_name in ("write_file", "edit_file") and diff_html:
-            tool_args = artifact.get("tool_args") or {}
-            display.append({
-                "role": "diff",
-                "file_name": result.get("file_path") or tool_args.get("file_path") or "",
-                "diff_html": diff_html,
-                "additions": result.get("additions", 0),
-                "deletions": result.get("deletions", 0),
-                "absolute_path": result.get("absolute_path", ""),
-                "created": bool(result.get("is_new_file")),
-            })
-            consumed_diffs.add(tc_id)
-        else:
-            display.append({"role": "tool_artifact", **artifact})
-        consumed_artifacts.add(tc_id)
-        if _artifact_needs_diff_fallback(artifact, tc_id):
-            display.append({"role": "diff", **diffs[tc_id]})
-            consumed_diffs.add(tc_id)
-
-    for msg in messages or []:
-        role = msg.get("role")
-        content = _message_content_text(msg.get("content"))
-        tool_calls = msg.get("tool_calls")
-
-        if role == "user":
-            if not content and not msg.get("display"):
-                continue
-            if content.startswith("[Turn activity summary]"):
-                display.append({
-                    "role": "activity",
-                    "content": content.replace("[Turn activity summary]\n", "", 1),
-                })
-                continue
-            if content.startswith("[Previous conversation summary"):
-                continue
-            if msg.get("internal") or _is_legacy_internal_user_content(content):
-                continue
-            interjection = _user_interjection_body(content)
-            if interjection is not None:
-                if not interjection:
-                    continue
-                display.append({"role": "user", "content": interjection})
-                continue
-            entry: dict[str, Any] = {"role": "user", "content": content or str(msg.get("content") or "")}
-            if msg.get("display"):
-                entry["display"] = msg["display"]
-            display.append(entry)
-        elif role == "assistant":
-            reasoning = str(msg.get("reasoning_content") or "").strip()
-            thinking_s = msg.get("thinking_s")
-            thinking_ms = msg.get("thinking_ms")
-            timed_s = isinstance(thinking_s, (int, float)) and thinking_s > 0
-            timed_ms = isinstance(thinking_ms, (int, float)) and thinking_ms > 0
-            if reasoning or timed_s or timed_ms:
-                thought_entry = {
-                    "role": "activity",
-                    "content": reasoning,
-                    "thought_only": True,
-                    "thought_content": reasoning,
-                }
-                if timed_s:
-                    thought_entry["thinking_s"] = int(thinking_s)
-                if timed_ms:
-                    thought_entry["thinking_ms"] = int(thinking_ms)
-                display.append(thought_entry)
-            if tool_calls:
-                if content.strip():
-                    display.append({"role": "assistant", "content": content.strip(), "narration": True})
-                for tc in tool_calls:
-                    fn = tc.get("function") or {}
-                    name = fn.get("name", "tool")
-                    entry = {
-                        "role": "activity",
-                        "content": name,
-                        "tool_calls": [tc],
-                    }
-                    display.append(entry)
-                    tc_id = tc.get("id") or ""
-                    if not tc_id:
-                        continue
-                    if name == "spawn_subagent":
-                        artifact = tool_artifacts.get(tc_id)
-                        if artifact:
-                            entry["subagent"] = artifact.get("result") or {}
-                            consumed_artifacts.add(tc_id)
-                        continue
-                    artifact = tool_artifacts.get(tc_id)
-                    if artifact:
-                        _append_tool_artifact_for_display(artifact, tc_id)
-                    elif tc_id in diffs:
-                        display.append({"role": "diff", **diffs[tc_id]})
-                        consumed_diffs.add(tc_id)
-            elif content:
-                display.append({"role": "assistant", "content": content})
-        elif role == "tool":
-            tc_id = msg.get("tool_call_id") or ""
-            if tc_id and tc_id in tool_artifacts and tc_id not in consumed_artifacts:
-                _append_tool_artifact_for_display(tool_artifacts[tc_id], tc_id)
-                continue
-            if tc_id and tc_id in consumed_artifacts:
-                continue
-            if tc_id and tc_id in diffs and tc_id not in consumed_diffs:
-                display.append({"role": "diff", **diffs[tc_id]})
-                consumed_diffs.add(tc_id)
-                continue
-            if content:
-                display.append({
-                    "role": "tool",
-                    "content": content[:500],
-                    "tool_call_id": tc_id,
-                })
-
-    for tc_id, artifact in sorted(
-        tool_artifacts.items(),
-        key=lambda item: float((item[1] or {}).get("created_at") or 0),
-    ):
-        if tc_id in consumed_artifacts:
-            continue
-        _append_tool_artifact_for_display(artifact, tc_id)
-
-    for tc_id, diff in diffs.items():
-        if tc_id in consumed_diffs:
-            continue
-        display.append({"role": "diff", **diff})
-
-    return display
 
 def set_session_title(
     project_path: str,

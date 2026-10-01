@@ -32,6 +32,9 @@ class Stream:
         self.box: tuple[int, int] | None = None
         self.quality = SCREENCAST_QUALITY
         self.closed = False
+        # The page's CSS size as the last frame had it (the screencast's own word, not the viewport
+        # the UI last heard of), so the view can keep the frame's real aspect ratio.
+        self.page_size: tuple[int, int] | None = None
 
     def open_viewer(self) -> None:
         with self.cond:
@@ -68,15 +71,37 @@ class Stream:
             data = base64.b64decode(params["data"])
         except Exception:
             return
+        meta = params.get("metadata") or {}
+        try:
+            width, height = int(round(float(meta.get("deviceWidth") or 0))), int(round(float(meta.get("deviceHeight") or 0)))
+            if width > 0 and height > 0:
+                self.page_size = (width, height)
+        except (TypeError, ValueError):
+            pass
         self._publish(data)
 
     def _quality(self) -> tuple[int, int]:
         sharp = getattr(self.session, "view_sharp", True)
         return (MAX_SCALE, SCREENCAST_QUALITY) if sharp else (STANDARD_MAX_SCALE, STANDARD_QUALITY)
 
+    def _page_css_size(self, page: Any) -> tuple[int, int]:
+        """The page's CSS size: the viewport when Playwright sets it; the window's own when it does
+        not (the user's attached Chrome), else what the last frame said."""
+        size = page.viewport_size
+        if size:
+            return max(1, int(size["width"])), max(1, int(size["height"]))
+        try:
+            measured = page.evaluate("() => [window.innerWidth, window.innerHeight]")
+            if measured and int(measured[0]) > 0 and int(measured[1]) > 0:
+                return int(measured[0]), int(measured[1])
+        except Exception:
+            pass
+        if self.page_size:
+            return self.page_size
+        return FALLBACK_VIEWPORT["width"], FALLBACK_VIEWPORT["height"]
+
     def _target_box(self, page: Any) -> tuple[int, int]:
-        size = page.viewport_size or FALLBACK_VIEWPORT
-        width, height = max(1, int(size["width"])), max(1, int(size["height"]))
+        width, height = self._page_css_size(page)
         scale, _quality = self._quality()
         view = getattr(self.session, "view_box", None)
         if view:
@@ -92,8 +117,7 @@ class Stream:
         viewport's size. Skipped for the user's own attached Chrome, whose screen is real."""
         if getattr(self.session, "shared", False):
             return
-        size = page.viewport_size or FALLBACK_VIEWPORT
-        width, height = max(1, int(size["width"])), max(1, int(size["height"]))
+        width, height = self._page_css_size(page)
         try:
             dpr = float(page.evaluate("devicePixelRatio") or 1)
             cdp.send("Emulation.setDeviceMetricsOverride", {

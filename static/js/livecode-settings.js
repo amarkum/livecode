@@ -611,7 +611,10 @@
     ]);
     html += group("Design checks", [
       _livecodeSettingsMatchRowHtml(),
+      _livecodeSettingsCompareContentRowHtml(),
       _livecodeSettingsDesignGateRowHtml(),
+      _livecodeBrowserSwitchRowHtml("ui_verify", "Check UI changes in the browser",
+        "After changing components, pages or styles, the agent asks whether to check the change in the Browser tab, and on Yes looks at just that element. It checks without asking when your request asks to see it."),
       _livecodeSettingsFigmaRowHtml(),
     ]);
     return html;
@@ -738,6 +741,9 @@
     _livecodeModalConfirm({ title: "Reset all settings?", message: "Appearance, agent, harness, memory and plan settings go back to their defaults. API keys, MCP servers and browser settings are kept.", confirmText: "Reset all", danger: true }).then(function(ok) {
       if (!ok) return;
       try { localStorage.removeItem(LIVECODE_SETTINGS_STORAGE_KEY); } catch (e) {}
+      // Client preferences live in ~/.livecode/settings.json too; clear them there, keeping browser settings.
+      if (typeof _livecodeServerSettings !== "undefined") { _livecodeServerSettings = {}; _livecodeSettingsPending = {}; }
+      postJson("/livecode/settings/reset", { keep_browser: true }).catch(function() {});
       postJson("/livecode/agent/settings/reset", {})
         .then(function(d) { agent = d; })
         .catch(function(err) { toast(err.message || String(err)); })

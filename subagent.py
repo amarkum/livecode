@@ -11,7 +11,6 @@ from typing import Any, Callable
 MAX_TITLE_CHARS = 48
 MAX_ACTIONS_KEPT = 40
 MAX_FINDINGS_CHARS = 16_000
-MAX_FINDINGS_DISPLAY_CHARS = 4_000
 
 READ_TOOLS = frozenset({"read_repo_file", "ast_symbols", "lsp_document_symbols"})
 SEARCH_TOOLS = frozenset({
@@ -19,7 +18,7 @@ SEARCH_TOOLS = frozenset({
     "list_repo_dir", "web_search", "memory_search", "git_log", "lsp_references",
 })
 EDIT_TOOLS = frozenset({"write_file", "edit_file", "multi_edit"})
-SCOPED_WRITER_EXCLUDED_TOOLS = frozenset({"run_command", "kill_command", "command_status"})
+SCOPED_WRITER_EXCLUDED_TOOLS = frozenset({"run_command", "kill_command", "restart_command", "command_status"})
 
 _VERBS: dict[str, tuple[str, str]] = {
     "read_repo_file": ("Reading", "Read"),
@@ -352,22 +351,6 @@ def compact_subagent_result(result: dict) -> dict:
         out["error"] = result["error"]
     if result.get("state") == "stopped":
         out["stopped"] = True
-    return out
-
-
-def display_subagent_result(result: dict) -> dict:
-    findings = str(result.get("result") or "")
-    if len(findings) > MAX_FINDINGS_DISPLAY_CHARS:
-        findings = findings[:MAX_FINDINGS_DISPLAY_CHARS].rstrip() + "…"
-    keys = ("success", "error", "title", "goal", "read_only", "files", "state", "model", "duration_s",
-            "files_read", "searches", "outcome", "actions")
-    out = {key: result.get(key) for key in keys if result.get(key) is not None}
-    out["result"] = findings
-    out["files_changed"] = [
-        {k: item.get(k) for k in ("path", "additions", "deletions", "absolute_path")}
-        for item in result.get("files_changed") or []
-        if isinstance(item, dict)
-    ]
     return out
 
 

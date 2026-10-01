@@ -24,7 +24,10 @@ from livecode.memory.inject import (
 )
 from livecode.memory.storage import (
     append_memory_md,
+    editable_memory_rel,
+    list_editable_memory,
     list_memory_files,
+    read_editable_memory,
     read_memory_file,
     read_memory_md,
     write_session_log,
@@ -47,7 +50,24 @@ def append_project_memory(project_path: str, note: str) -> str:
     embed_missing_chunks(project_path)
     return combined[-MAX_MEMORY_CHARS:] if len(combined) > MAX_MEMORY_CHARS else combined
 
+def save_memory_file(project_path: str, rel_path: str, content) -> dict:
+    """Save a memory file from the Settings view, then refresh its entries in the memory search index."""
+    from livecode.memory.storage import save_editable_memory
+
+    result = save_editable_memory(project_path, rel_path, content)
+    if result.get("saved"):
+        try:
+            reindex_file(project_path, result["abs_path"], "workspace" if result["path"] == "MEMORY.md" else "session", result["path"])
+        except Exception:
+            pass
+        result.pop("abs_path", None)
+    return result
+
 __all__ = [
+    "editable_memory_rel",
+    "list_editable_memory",
+    "read_editable_memory",
+    "save_memory_file",
     "MAX_MEMORY_CHARS",
     "MEMORY_CONTEXT_CLOSE",
     "MEMORY_CONTEXT_OPEN",

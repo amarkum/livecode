@@ -237,7 +237,186 @@ _BROWSER_INTENT_RE = re.compile(
 )
 
 def user_requests_browser(question: str) -> bool:
-    return bool(_BROWSER_INTENT_RE.search(question or ""))
+    return bool(_BROWSER_INTENT_RE.search(question or "")) or browse_request(question) is not None
+
+_UI_CHECK_RE = re.compile(
+    r"\b(?:verify|check|test|confirm|look\s+at|see|show\s+me)\b[^.;!?]{0,40}\b(?:visually|in\s+the\s+(?:built[- ]in\s+)?browser|"
+    r"on\s+(?:the\s+)?(?:page|screen)|how\s+it\s+looks|the\s+(?:ui|page|screen))\b",
+    re.IGNORECASE,
+)
+
+
+def user_requests_ui_check(question: str) -> bool:
+    """The request itself asks to see the result in the browser, so checking a UI change needs no question first."""
+    return user_requests_browser(question) or bool(_UI_CHECK_RE.search(question or ""))
+
+
+# A site the user names: a URL, a local dev server, or a bare domain (github.com, my-app.vercel.app).
+_SITE_PATTERN = (
+    r"(?P<site>https?://[^\s<>\"']+|(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d{2,5})?(?:/[^\s<>\"']*)?|"
+    r"(?<![\w./-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"(?:com|org|net|io|dev|app|ai|co|in|me|us|uk|de|fr|es|it|nl|ca|au|edu|gov|xyz|info|site|tech|cloud|store|shop|page|to|tv|ly|so|sh)"
+    r"(?![\w-])(?:/[^\s<>\"']*)?)"
+)
+_VISIT_VERB = (
+    r"\b(?:go(?:\s+over)?\s+to|goto|visit|open(?:\s+up)?|navigate\s+to|head\s+(?:over\s+)?to|browse\s+(?:to\s+)?|"
+    r"check(?:\s+out)?|pull\s+up|load|look\s+at|show\s+me|take\s+me\s+to|test|try|preview|launch|hit|surf\s+to|"
+    r"log\s*in\s+to|sign\s+in\s+to)\b"
+)
+_VISIT_RE = re.compile(
+    _VISIT_VERB + r"\s+(?:the\s+|this\s+|my\s+|our\s+|that\s+)?(?:(?:web)?site|web\s*page|page|website|app|url|link|dashboard|home\s*page|server)?"
+    r"\s*(?:at\s+|on\s+|of\s+|:\s*)?" + _SITE_PATTERN,
+    re.IGNORECASE,
+)
+_ANY_SITE_RE = re.compile(_SITE_PATTERN, re.IGNORECASE)
+_ANY_VISIT_VERB_RE = re.compile(_VISIT_VERB + r"|\b(?:see|view|read|screenshot|browse|browser|in the browser)\b", re.IGNORECASE)
+
+# Well-known sites asked for by name, without a domain ("go to amazon and search for …").
+KNOWN_SITES = {
+    "google": "google.com", "youtube": "youtube.com", "amazon": "amazon.com", "github": "github.com", "gitlab": "gitlab.com",
+    "gmail": "mail.google.com", "google docs": "docs.google.com", "google drive": "drive.google.com", "google maps": "maps.google.com",
+    "linkedin": "linkedin.com", "twitter": "x.com", "facebook": "facebook.com", "instagram": "instagram.com", "reddit": "reddit.com",
+    "wikipedia": "wikipedia.org", "stackoverflow": "stackoverflow.com", "stack overflow": "stackoverflow.com", "netflix": "netflix.com",
+    "figma": "figma.com", "notion": "notion.so", "chatgpt": "chatgpt.com", "flipkart": "flipkart.com", "bing": "bing.com",
+    "duckduckgo": "duckduckgo.com", "yahoo": "yahoo.com", "npm": "npmjs.com", "npmjs": "npmjs.com", "pypi": "pypi.org",
+    "medium": "medium.com", "dribbble": "dribbble.com", "behance": "behance.net", "canva": "canva.com", "vercel": "vercel.com",
+    "netlify": "netlify.com", "slack": "slack.com", "discord": "discord.com", "hacker news": "news.ycombinator.com",
+    "product hunt": "producthunt.com", "producthunt": "producthunt.com", "myntra": "myntra.com", "swiggy": "swiggy.com",
+    "zomato": "zomato.com", "ebay": "ebay.com", "walmart": "walmart.com", "etsy": "etsy.com", "airbnb": "airbnb.com",
+    "booking.com": "booking.com", "mdn": "developer.mozilla.org", "codepen": "codepen.io", "dev.to": "dev.to",
+}
+_STRONG_VISIT = r"\b(?:go(?:\s+over)?\s+to|goto|visit|open(?:\s+up)?|navigate\s+to|head\s+(?:over\s+)?to|browse\s+to|take\s+me\s+to|pull\s+up|launch|surf\s+to)\b"
+_NAMED_SITE_RE = re.compile(
+    _STRONG_VISIT + r"\s+(?:the\s+)?(?P<name>" + "|".join(sorted((re.escape(k) for k in KNOWN_SITES), key=len, reverse=True)) + r")"
+    r"(?:\s+(?:website|site|web\s*site|home\s*page|page))?(?![\w.-])",
+    re.IGNORECASE,
+)
+# The user's own running app: "check it in the browser", "open my app", "preview the site".
+_APP_STRICT_RE = re.compile(r"\b(?:in|on|with|using)\s+(?:the\s+|a\s+|my\s+)?(?:built[- ]in\s+)?browser\b|"
+                            r"\b(?:open|launch|preview|go\s+to|visit|navigate\s+to)\s+(?:the|my|our)\s+(?:app|site|website|web\s*app|frontend|front-end|ui|dashboard)\b", re.IGNORECASE)
+_STEPS_LEAD_RE = re.compile(r"^\s*(?:[,;:.-]+\s*)?(?:and\s+(?:then\s+)?|then\s+|&\s*|,\s*)", re.IGNORECASE)
+
+
+def _site_steps(text: str, end: int) -> str:
+    """What the user asked to do on the site: the rest of the sentence after it ("and search for …")."""
+    rest = text[end:]
+    lead = _STEPS_LEAD_RE.match(rest)
+    if not lead:
+        return ""
+    steps = re.sub(r"\s+", " ", rest[lead.end():]).strip().rstrip(".")
+    return steps[:400]
+
+
+def browse_request(question: str) -> dict[str, Any] | None:
+    """What the user asked to open in the browser, and what to do there:
+    {"site": "github.com", "steps": "check the latest issues"}, {"app": True, ...} for their own running
+    app ("open my app", "check it in the browser"), or None when the message asks for neither."""
+    text = question or ""
+    match = _VISIT_RE.search(text)
+    if match:
+        site = match.group("site").rstrip(".,;:!?)")
+        return {"site": site, "steps": _site_steps(text, match.start("site") + len(site)), "app": False}
+    named = _NAMED_SITE_RE.search(text)
+    if named:
+        return {"site": KNOWN_SITES[named.group("name").lower()], "steps": _site_steps(text, named.end()), "app": False}
+    for found in _ANY_SITE_RE.finditer(text):
+        site = found.group("site")
+        if site.lower().startswith(("http://", "https://", "localhost", "127.", "0.0.0.0")) and _ANY_VISIT_VERB_RE.search(text):
+            site = site.rstrip(".,;:!?)")
+            return {"site": site, "steps": _site_steps(text, found.start("site") + len(site)), "app": False}
+    apps = list(_APP_STRICT_RE.finditer(text))
+    if apps:
+        steps = next((st for st in (_site_steps(text, m.end()) for m in reversed(apps)) if st), "")
+        return {"site": "", "steps": steps, "app": True}
+    return None
+
+
+def user_requests_site_visit(question: str) -> str:
+    """The site the user asked to open ("go to github.com", "open localhost:3000", "visit https://…",
+    "go to amazon"), or "" when the message does not name one."""
+    found = browse_request(question)
+    return str(found.get("site") or "") if found else ""
+
+# The final steps a request itself asks for: "send him a message saying …" is the go-ahead to press Send.
+_ACTION_VERBS = {
+    "send": r"send|sending|reply|respond|dm|ping|e-?mail|message\s+(?:him|her|them|[A-Z][\w.-]+)|text\s+(?:him|her|them|[A-Z][\w.-]+)|invite|connect\s+with",
+    "post": r"post|publish|tweet|comment\s+on|share\s+(?:it|this|the\s+post)",
+    "submit": r"submit|apply(?:\s+(?:for|to))?|sign\s*up|register",
+    "buy": r"buy|purchase|(?<!in\s)order(?!\s+(?:of|by|to|in)\b)|pay(?:\s+for)?|check\s*out\s+(?:the\s+)?(?:cart|basket)|checkout",
+    "book": r"book|reserve",
+    "confirm": r"confirm",
+}
+_NEGATION_RE = re.compile(r"\b(?:don'?t|do\s+not|never|without|not|no\s+need\s+to|avoid|instead\s+of|before\s+you|until\s+i|wait\s+(?:for|until))\b[^.;!?]{0,24}$", re.I)
+_DRAFT_RE = re.compile(r"\b(?:draft|prepare|write\s+up|compose)\b[^.;!?]{0,60}\b(?:but|and)\s+(?:don'?t|do\s+not|not)\b|\bjust\s+(?:draft|prepare|fill)\b|\bfor\s+me\s+to\s+(?:review|check)\b", re.I)
+
+
+def authorized_final_actions(question: str) -> list[str]:
+    """The kinds of final step the request itself asks for ("send", "post", "submit", "buy", "book",
+    "confirm"): the user asked, so doing it needs no second yes. A negated one ("don't send it yet", "just
+    draft it") is left out."""
+    text = question or ""
+    if _DRAFT_RE.search(text):
+        return []
+    kinds = []
+    for kind, verbs in _ACTION_VERBS.items():
+        for match in re.finditer(r"\b(?:" + verbs + r")\b", text, re.I if kind != "send" else 0):
+            if not _NEGATION_RE.search(text[: match.start()]):
+                kinds.append(kind)
+                break
+        else:
+            # "send" matched case-sensitively above only for "message Name": try the verbs in any case.
+            if kind == "send":
+                for match in re.finditer(r"\b(?:send|sending|reply|respond|dm|ping|e-?mail|invite|connect\s+with)\b", text, re.I):
+                    if not _NEGATION_RE.search(text[: match.start()]):
+                        kinds.append(kind)
+                        break
+    return kinds
+
+
+# An answer that stops to ask permission for the next step ("Shall I send it?", "Should I go ahead?").
+_PERMISSION_RE = re.compile(
+    r"(?:\b(?:shall|should|can|may)\s+i\b|\bdo\s+you\s+want\s+me\s+to\b|\bwould\s+you\s+like\s+me\s+to\b|\bwant\s+me\s+to\b|"
+    r"\bis\s+it\s+ok(?:ay)?\s+(?:if|to)\b|\bready\s+(?:for\s+me\s+)?to\b|\bok(?:ay)?\s+to\b|\bconfirm\s+(?:that|whether|if)?\b|\blet\s+me\s+know\s+if\b)"
+    r"[^?]{0,160}?\b(?P<verb>send|post|submit|publish|apply|book|buy|purchase|pay|place|proceed|go\s+ahead|continue|do\s+(?:it|that|this|so)|click|press|hit)\b[^?]{0,100}\?",
+    re.I,
+)
+
+
+def asks_permission(answer: str) -> str:
+    """The step a final answer stops to ask permission for, or "" when it does not."""
+    tail = (answer or "").strip()[-500:]
+    found = None
+    for found in _PERMISSION_RE.finditer(tail):
+        pass
+    rest = tail[found.end():] if found else ""
+    # Only when it ends the answer (a short "Let me know." after it is still the ending).
+    if not found or "?" in rest or len(rest.strip(" \n\t*_)\"'")) > 60:
+        return ""
+    return re.sub(r"\s+", " ", found.group("verb").lower())
+
+
+# Files whose change shows in a browser: components, pages, styles and templates.
+_UI_EXTENSIONS = (".tsx", ".jsx", ".vue", ".svelte", ".astro", ".html", ".htm", ".css", ".scss", ".sass", ".less",
+                  ".styl", ".pcss", ".mdx", ".hbs", ".handlebars", ".ejs", ".njk", ".jinja", ".jinja2", ".j2", ".twig",
+                  ".erb", ".liquid", ".pug", ".razor", ".cshtml")
+_UI_SCRIPT_EXTENSIONS = (".ts", ".js", ".mjs", ".cjs")
+_UI_DIRS = re.compile(r"(^|/)(components?|pages|app|views?|screens|layouts?|ui|widgets|styles?|theme|templates|routes|"
+                      r"features|containers|public|static|assets|src/mfe|microfrontends?|mfe[^/]*)/", re.IGNORECASE)
+_NOT_UI = re.compile(r"(^|/)(__tests__|tests?|spec|e2e|cypress|playwright|__mocks__|stories|node_modules|dist|build)/|"
+                     r"\.(test|spec|stories|story|d)\.[a-z]+$|(^|/)(vite|webpack|jest|vitest|babel|tailwind|postcss|eslint|"
+                     r"prettier|next|nuxt|astro|svelte)\.config\.", re.IGNORECASE)
+
+
+def is_ui_file(path: str) -> bool:
+    """Whether a change to this file shows in the browser (a component, a page, a stylesheet, a template)."""
+    text = str(path or "").replace("\\", "/").strip()
+    low = text.lower()
+    if not low or _NOT_UI.search(low):
+        return False
+    if low.endswith(_UI_EXTENSIONS):
+        return True
+    return low.endswith(_UI_SCRIPT_EXTENSIONS) and bool(_UI_DIRS.search("/" + low))
+
 
 _DESIGN_INTENT_RE = re.compile(
     r"\b(?:figma|canva|sketch (?:app|file|design)|penpot|adobe xd|zeplin|framer|invision|uizard|balsamiq)\b|"

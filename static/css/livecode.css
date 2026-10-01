@@ -5653,6 +5653,16 @@ body.black-theme #livecode-chat-pill-wrapper {
 	pointer-events: none;
 }
 
+#livecode-chat-messages .livecode-image-thumb-wrap,
+#livecode-chat-messages .livecode-image-thumb-wrap.readonly {
+	pointer-events: auto;
+	cursor: zoom-in;
+}
+
+#livecode-chat-messages .livecode-image-thumb-wrap .livecode-image-thumb {
+	cursor: zoom-in;
+}
+
 .livecode-image-thumb {
 	width: 100%;
 	height: 100%;
@@ -8130,16 +8140,19 @@ body.pink-theme .livecode-dialog-overlay {
 	background: transparent;
 }
 
+/* An empty tail below the last message keeps the chat off the composer.
+   Always there once the chat has a message, never on the empty welcome
+   screen; flex-shrink: 0 stops a long chat from squeezing it to nothing. */
 #ide-editor-inner #livecode-agent-panel #livecode-chat-messages::after {
 	content: "";
 	display: block;
+	flex: 0 0 auto;
 	height: 0;
-	transition: height 0.25s ease;
 }
 
-#ide-editor-inner #livecode-agent-panel #livecode-chat-messages.is-turn-running::after {
-	height: 25%;
-	transition: none;
+#ide-editor-inner #livecode-agent-panel #livecode-chat-messages.is-turn-running::after,
+#ide-editor-inner #livecode-agent-panel #livecode-chat-messages:has(> .chat-row.livecode-user-row)::after {
+	height: 10%;
 }
 
 #ide-editor-inner #livecode-agent-panel #livecode-chat-messages > .chat-row {
@@ -8235,7 +8248,8 @@ body.pink-theme .livecode-dialog-overlay {
 	position: relative !important;
 }
 
-#ide-editor-inner #livecode-agent-panel #livecode-chat-messages > .chat-row.livecode-user-row:not(.is-stuck)::after {
+#ide-editor-inner #livecode-agent-panel #livecode-chat-messages > .chat-row.livecode-user-row:not(.is-stuck)::after,
+#ide-editor-inner #livecode-agent-panel #livecode-chat-messages > .chat-row.livecode-user-row.is-pushed::after {
 	display: none !important;
 }
 
@@ -10602,6 +10616,7 @@ body.pink-theme #ide-plan-view {
 	position: relative;
 	max-height: 200px;
 	overflow-y: auto;
+	padding-bottom: 10px;
 	scrollbar-width: none;
 	overflow-anchor: none;
 	-webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 16px), rgba(0, 0, 0, 0.8) calc(100% - 14px), rgba(0, 0, 0, 0.4) calc(100% - 8px), transparent);
@@ -10623,13 +10638,12 @@ body.pink-theme #ide-plan-view {
 	margin-left: 4px;
 	animation: livecodeQuestionIn 0.3s ease-out;
 }
-.livecode-questions-bar .livecode-questions-question:last-child:not(:first-child) {
-	min-height: 200px;
-}
 @keyframes livecodeQuestionIn {
 	from { opacity: 0; transform: translateY(4px); }
 	to { opacity: 1; transform: none; }
 }
+/* The card rebuilds on every click; a question fades in only when it first shows, not on each click. */
+.livecode-questions-bar.is-settled .livecode-questions-question { animation: none; }
 @media (prefers-reduced-motion: reduce) {
 	.livecode-questions-bar .livecode-questions-question { animation: none; }
 }
@@ -10643,6 +10657,13 @@ body.pink-theme #ide-plan-view {
 	font-weight: 590;
 	line-height: 135%;
 	transition: color 0.1s ease-out;
+}
+.livecode-questions-bar .livecode-questions-hint {
+	flex-shrink: 0;
+	margin-left: auto;
+	color: var(--lc-text-3);
+	font-size: 11.5px;
+	font-weight: 500;
 }
 .livecode-questions-bar .livecode-questions-number {
 	flex-shrink: 0;
@@ -11981,30 +12002,6 @@ body.white-theme #ide-editor-inner #livecode-agent-panel .livecode-questions-bar
 	line-height: 1.5;
 }
 
-#ide-editor-inner .livecode-empty-editor-steps {
-	display: flex;
-	flex-direction: column;
-	gap: 10px;
-	width: 100%;
-	max-width: 340px;
-	margin-top: 10px;
-	text-align: left;
-}
-
-#ide-editor-inner .livecode-empty-editor-step {
-	display: flex;
-	align-items: flex-start;
-	gap: 10px;
-	color: var(--lc-text-3);
-	font-size: 13px;
-	line-height: 1.5;
-}
-
-#ide-editor-inner .livecode-empty-editor-step strong {
-	color: var(--lc-text-1);
-	font-weight: 600;
-}
-
 @container (max-width: 300px) {
 	#ide-editor-inner .livecode-empty-editor-logo {
 		width: 56px;
@@ -12014,25 +12011,9 @@ body.white-theme #ide-editor-inner #livecode-agent-panel .livecode-questions-bar
 }
 
 @container (max-height: 420px) {
-	#ide-editor-inner .livecode-empty-editor-logo,
-	#ide-editor-inner .livecode-empty-editor-steps {
+	#ide-editor-inner .livecode-empty-editor-logo {
 		display: none;
 	}
-}
-
-#ide-editor-inner .livecode-empty-editor-step-num {
-	display: inline-flex;
-	flex: none;
-	align-items: center;
-	justify-content: center;
-	width: 18px;
-	height: 18px;
-	border-radius: 50%;
-	margin-top: 1px;
-	background: rgb(var(--lc-fg) / 0.1);
-	color: var(--lc-text-2);
-	font-size: 11px;
-	font-weight: 600;
 }
 
 
@@ -12381,6 +12362,121 @@ body .livecode-dialog .livecode-settings-btn.is-primary:hover {
 	padding: 16px 14px;
 	color: var(--lc-text-3);
 	font-size: 13px;
+}
+
+#ide-editor-inner .livecode-memory {
+	display: grid;
+	grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
+	gap: 12px;
+	min-height: 420px;
+}
+
+#ide-editor-inner .livecode-settings-page:has(.livecode-memory) { container-type: inline-size; }
+
+@container (max-width: 620px) {
+	#ide-editor-inner .livecode-memory { grid-template-columns: minmax(0, 1fr); }
+	#ide-editor-inner .livecode-memory-list { max-height: 168px; }
+}
+
+#ide-editor-inner .livecode-memory-list {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	max-height: 520px;
+	padding: 4px;
+	overflow-y: auto;
+	border-radius: 8px;
+	background: rgb(var(--lc-fg) / 0.035);
+	box-shadow: inset 0 0 0 1px var(--lc-stroke-3);
+}
+
+#ide-editor-inner .livecode-memory-file {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 2px;
+	width: 100%;
+	padding: 7px 9px;
+	border: 0;
+	border-radius: 6px;
+	background: transparent;
+	color: var(--lc-text-1);
+	text-align: left;
+	cursor: pointer;
+}
+
+#ide-editor-inner .livecode-memory-file:hover { background: var(--lc-hover); }
+#ide-editor-inner .livecode-memory-file.is-active { background: rgb(var(--lc-fg) / 0.09); }
+
+#ide-editor-inner .livecode-memory-file-name {
+	max-width: 100%;
+	overflow: hidden;
+	font-size: 13px;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+#ide-editor-inner .livecode-memory-file-meta {
+	color: var(--lc-text-3);
+	font-size: 11.5px;
+}
+
+#ide-editor-inner .livecode-memory-editor {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+	border-radius: 8px;
+	background: rgb(var(--lc-fg) / 0.035);
+	box-shadow: inset 0 0 0 1px var(--lc-stroke-3);
+	overflow: hidden;
+}
+
+#ide-editor-inner .livecode-memory-editor-head {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px 8px;
+	padding: 8px 10px;
+	border-bottom: 1px solid var(--lc-stroke-3);
+}
+
+#ide-editor-inner .livecode-memory-editor-title {
+	min-width: 0;
+	overflow: hidden;
+	color: var(--lc-text-1);
+	font-size: 13px;
+	font-weight: 600;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+#ide-editor-inner .livecode-memory-editor-status {
+	order: 3;
+	flex: 1 0 100%;
+	color: var(--lc-text-3);
+	font-size: 12px;
+}
+
+#ide-editor-inner .livecode-memory-editor-status:empty { display: none; }
+
+#ide-editor-inner .livecode-memory-editor-title { flex: 1 1 auto; }
+
+#ide-editor-inner .livecode-memory-text {
+	flex: 1 1 auto;
+	min-height: 380px;
+	width: 100%;
+	box-sizing: border-box;
+	margin: 0;
+	padding: 12px 14px;
+	border: 0;
+	outline: none;
+	resize: vertical;
+	background: transparent;
+	color: var(--lc-text-1);
+	font-family: var(--livecode-font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+	font-size: 12.5px;
+	line-height: 1.6;
+	tab-size: 2;
 }
 
 #ide-editor-inner .livecode-mcp-cards {
@@ -16504,6 +16600,8 @@ body.dark-theme .livecode-dialog-overlay {
 	cursor: default;
 }
 #ide-editor-inner #ide-browser-view .ide-browser-engine-chip[hidden] { display: none; }
+#ide-editor-inner #ide-browser-view .ide-browser-engine-chip.is-chrome { border-color: rgb(66 133 244 / 0.45); color: var(--livecode-text-primary); }
+#ide-editor-inner #ide-browser-view .ide-browser-size-chip:not(.is-fixed) { color: var(--livecode-text-tertiary); }
 #ide-editor-inner #ide-browser-view .nav-button .ui-icon { --icon-size: 16px; }
 #ide-editor-inner #ide-browser-view .url-input-container { display: flex; flex: 1; min-width: 0; }
 #ide-editor-inner #ide-browser-view .ide-browser-url { position: relative; flex: 1; min-width: 0; }
@@ -16678,7 +16776,12 @@ body.dark-theme .livecode-dialog-overlay {
 	outline: none !important;
 }
 #ide-editor-inner #ide-browser-view .ide-browser-stage { position: relative; flex-shrink: 0; }
-#ide-editor-inner #ide-browser-view .browser-frame-container[data-loaded] .ide-browser-stage { background: #fff; }
+/* Behind the page until it paints, and in a letterbox: the theme's page colour, not a white flash in dark themes. */
+#ide-editor-inner #ide-browser-view { --ide-browser-stage-bg: #ffffff; }
+body.dark-theme #ide-editor-inner #ide-browser-view { --ide-browser-stage-bg: #1b1f27; }
+body.black-theme #ide-editor-inner #ide-browser-view { --ide-browser-stage-bg: #0b0b0b; }
+body.pink-theme #ide-editor-inner #ide-browser-view { --ide-browser-stage-bg: #fff7fb; }
+#ide-editor-inner #ide-browser-view .browser-frame-container[data-loaded] .ide-browser-stage { background: var(--ide-browser-stage-bg); }
 #ide-editor-inner #ide-browser-view .browser-frame-container.is-device .ide-browser-stage {
 	border: 1px solid var(--livecode-stroke-secondary);
 	border-radius: 18px;
@@ -16689,6 +16792,9 @@ body.dark-theme .livecode-dialog-overlay {
 	display: block;
 	width: 100%;
 	height: 100%;
+	/* Never stretched: a frame whose shape the stage has not caught up with is letterboxed, top left. */
+	object-fit: contain;
+	object-position: top left;
 	user-select: none;
 	-webkit-user-drag: none;
 	cursor: default;
@@ -19382,8 +19488,17 @@ body.pink-theme #ide-editor-section #ide-editor-inner #livecode-agent-panel #liv
 	mask-image: linear-gradient(to bottom, transparent 0, #000 16px);
 }
 
+/* Expanded output has one scroller, the inner .livecode-term-scroll. The body
+   used to scroll too (420px around a 480px inner scroller that blocks scroll
+   chaining), which left the last lines of long output out of reach. */
 #ide-editor-section #ide-editor-inner #livecode-agent-panel #livecode-chat-messages .livecode-term-card.is-expanded .livecode-term-body {
-	max-height: 420px;
+	max-height: none;
+	overflow-y: visible !important;
+}
+
+#ide-editor-section #ide-editor-inner #livecode-agent-panel #livecode-chat-messages .livecode-term-card.is-expanded .livecode-term-scroll {
+	max-height: min(420px, 60vh);
+	overflow-y: auto;
 	scrollbar-width: thin;
 	scrollbar-color: var(--lc-scroll) transparent;
 }
@@ -19395,12 +19510,12 @@ body.pink-theme #ide-editor-section #ide-editor-inner #livecode-agent-panel #liv
 	mask-image: none;
 }
 
-#ide-editor-section #ide-editor-inner #livecode-agent-panel #livecode-chat-messages .livecode-term-card.is-expanded .livecode-term-body::-webkit-scrollbar {
+#ide-editor-section #ide-editor-inner #livecode-agent-panel #livecode-chat-messages .livecode-term-card.is-expanded .livecode-term-scroll::-webkit-scrollbar {
 	display: block;
 	width: 7px;
 }
 
-#ide-editor-section #ide-editor-inner #livecode-agent-panel #livecode-chat-messages .livecode-term-card.is-expanded .livecode-term-body::-webkit-scrollbar-thumb {
+#ide-editor-section #ide-editor-inner #livecode-agent-panel #livecode-chat-messages .livecode-term-card.is-expanded .livecode-term-scroll::-webkit-scrollbar-thumb {
 	background: var(--lc-scroll);
 }
 
@@ -20645,6 +20760,73 @@ body.white-theme #chatbot-model-dropdown.chatbot-model-dropdown,body.pink-theme 
 .livecode-accuracy-range { width: 140px; accent-color: var(--ide-browser-accent, var(--lc-link, #569cd6)); cursor: pointer; }
 .livecode-accuracy-meaning { color: var(--livecode-text-secondary); }
 
+/* A finished command's long output fades before the card folds (see _livecodeSettleFinishedTerminalCard). */
+#livecode-chat-messages .livecode-term-card > .livecode-term-body {
+	transition: opacity 0.22s ease;
+}
+#livecode-chat-messages .livecode-term-card.is-fading-out > .livecode-term-body {
+	opacity: 0;
+}
+
+/* Mode chip: one pill per mode, tinted so the mode reads at a glance. Agent stays neutral, Plan is amber
+   (its Build button is yellow), Ask is blue with a chat-bubble icon. */
+#ide-editor-section #livecode-chat-mode-trigger.chatbot-composer-mode-wrap {
+	--lc-mode-tint: 148, 163, 184;
+	--lc-mode-ink: #cbd5e1;
+	gap: 6px;
+	height: 26px;
+	padding: 0 9px 0 8px !important;
+	background: rgba(var(--lc-mode-tint), 0.14) !important;
+	border-color: rgba(var(--lc-mode-tint), 0.28) !important;
+	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+#ide-editor-section #livecode-chat-mode-trigger.chatbot-composer-mode-wrap[data-mode="plan"] { --lc-mode-tint: 234, 179, 8; --lc-mode-ink: #facc15; }
+#ide-editor-section #livecode-chat-mode-trigger.chatbot-composer-mode-wrap[data-mode="ask"] { --lc-mode-tint: 59, 130, 246; --lc-mode-ink: #93c5fd; }
+#ide-editor-section #livecode-chat-mode-trigger.chatbot-composer-mode-wrap:hover,
+#ide-editor-section #livecode-chat-mode-trigger.chatbot-composer-mode-wrap[aria-expanded="true"] {
+	background: rgba(var(--lc-mode-tint), 0.24) !important;
+	border-color: rgba(var(--lc-mode-tint), 0.42) !important;
+}
+#ide-editor-section #livecode-chat-mode-trigger .chatbot-composer-mode-label,
+#ide-editor-section #livecode-chat-mode-trigger .chatbot-composer-mode-icon,
+#ide-editor-section #livecode-chat-mode-trigger svg {
+	color: var(--lc-mode-ink) !important;
+}
+#ide-editor-section #livecode-chat-mode-trigger .chatbot-composer-mode-label { font-weight: 600; letter-spacing: 0.01em; }
+#ide-editor-section #livecode-chat-mode-trigger .chatbot-composer-model-chevron { opacity: 0.65; }
+body.white-theme #ide-editor-section #livecode-chat-mode-trigger.chatbot-composer-mode-wrap,
+body.pink-theme #ide-editor-section #livecode-chat-mode-trigger.chatbot-composer-mode-wrap { --lc-mode-tint: 100, 116, 139; --lc-mode-ink: #334155; }
+body.white-theme #ide-editor-section #livecode-chat-mode-trigger.chatbot-composer-mode-wrap[data-mode="plan"],
+body.pink-theme #ide-editor-section #livecode-chat-mode-trigger.chatbot-composer-mode-wrap[data-mode="plan"] { --lc-mode-tint: 202, 138, 4; --lc-mode-ink: #92400e; }
+body.white-theme #ide-editor-section #livecode-chat-mode-trigger.chatbot-composer-mode-wrap[data-mode="ask"],
+body.pink-theme #ide-editor-section #livecode-chat-mode-trigger.chatbot-composer-mode-wrap[data-mode="ask"] { --lc-mode-tint: 37, 99, 235; --lc-mode-ink: #1d4ed8; }
+
+/* Dividers: a wider grab area than the line they draw, so they are easy to catch. */
+#ide-sidebar-divider,
+#ide-agent-divider { position: relative; }
+#ide-sidebar-divider::before,
+#ide-agent-divider::before {
+	content: "";
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	left: -5px;
+	right: -5px;
+	z-index: 30;
+	cursor: col-resize;
+}
+#ide-terminal-divider::before {
+	content: "";
+	position: absolute;
+	left: 0;
+	right: 0;
+	top: -5px;
+	bottom: -5px;
+	z-index: 30;
+	cursor: row-resize;
+}
+body.dark-theme .livecode-accuracy-range,
+body.black-theme .livecode-accuracy-range { accent-color: #3b82f6; }
 
 /* ---- Settings: search, new controls, theme cards, responsive rows ---- */
 

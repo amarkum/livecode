@@ -1,0 +1,45 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Messaging</title><style>
+body { margin: 0; font-family: Arial, Helvetica, sans-serif; display: flex; height: 100vh; }
+nav { width: 260px; border-right: 1px solid #e5e7eb; }
+nav a { display: block; padding: 14px 16px; color: #111827; text-decoration: none; border-bottom: 1px solid #f3f4f6; }
+nav a.active { background: #eef2ff; }
+main { flex: 1; display: flex; flex-direction: column; }
+#thread { flex: 1; padding: 16px; overflow: auto; }
+.msg { margin: 8px 0; padding: 8px 12px; border-radius: 12px; background: #f3f4f6; max-width: 60%; }
+.msg.sent { background: #dbeafe; margin-left: auto; }
+form { display: flex; gap: 8px; padding: 12px; border-top: 1px solid #e5e7eb; }
+textarea { flex: 1; height: 48px; }
+</style></head><body>
+<!-- A messaging inbox like LinkedIn's: pick a conversation, write, press Send. -->
+<nav>
+  <a href="#" data-name="Gurubani Kaur" onclick="openThread(this); return false;">Gurubani Kaur</a>
+  <a href="#" data-name="Ravi Menon" onclick="openThread(this); return false;">Ravi Menon</a>
+</nav>
+<main>
+  <h2 id="with" style="margin: 16px">Select a conversation</h2>
+  <div id="thread"></div>
+  <form id="compose" onsubmit="send(event)">
+    <textarea id="message" aria-label="Write a message" placeholder="Write a message…"></textarea>
+    <button type="submit">Send</button>
+  </form>
+</main>
+<script>
+function openThread(a) {
+  document.querySelectorAll("nav a").forEach((x) => x.classList.toggle("active", x === a));
+  document.getElementById("with").textContent = a.dataset.name;
+  document.getElementById("thread").innerHTML = '<div class="msg">Hi! Good to connect.</div>';
+}
+function send(e) {
+  e.preventDefault();
+  const box = document.getElementById("message");
+  if (!box.value.trim()) return;
+  const m = document.createElement("div");
+  m.className = "msg sent";
+  m.textContent = box.value;
+  document.getElementById("thread").appendChild(m);
+  box.value = "";
+  document.title = "Messaging · sent";
+}
+</script>
+</body></html>

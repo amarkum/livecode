@@ -58,8 +58,7 @@ def normalize_questions(args: dict) -> tuple[list[dict], str]:
             options.append({"id": oid, "label": label[:300]})
             if len(options) >= MAX_OPTIONS:
                 break
-        if not options:
-            return [], f"question {qid!r} needs at least one option"
+        # No options: an open question, answered in the card's text box.
         questions.append({
             "id": qid,
             "prompt": prompt[:1000],
@@ -152,7 +151,7 @@ def build_answer_result(questions: list[dict], response: dict) -> dict:
         labels = [opt["label"] for opt in question["options"] if opt["id"] in chosen]
         other = str(picked.get("other") or "").strip()[:2000]
         entry: dict[str, Any] = {"question": question["prompt"], "selected": labels}
-        if FREEFORM_OPTION_ID in chosen and other:
+        if (FREEFORM_OPTION_ID in chosen or not question["options"]) and other:
             entry["other"] = other
         if not labels and "other" not in entry:
             entry["unanswered"] = True

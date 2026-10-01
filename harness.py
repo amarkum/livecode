@@ -63,6 +63,13 @@ from livecode.prompts import (
     DESIGN_LOOP_FIGMA_NOTE,
     DESIGN_LOOP_PROMPT,
     DESIGN_RECHECK_TEMPLATE,
+    PERMISSION_GATE_MAX_FIRES,
+    PERMISSION_GATE_TEMPLATE,
+    UI_VERIFY_ASK_TEMPLATE,
+    UI_VERIFY_DECLINED_NOTE,
+    UI_VERIFY_GATE_MAX_FIRES,
+    UI_VERIFY_QUESTION,
+    UI_VERIFY_TEMPLATE,
     TODO_GATE_TEMPLATE,
     TODO_NUDGE_AFTER,
     TODO_NUDGE_COOLDOWN,
@@ -97,6 +104,11 @@ from livecode.routing import (
     user_requests_browser,
     user_requests_design_work,
     user_requests_mcp_or_tool_use,
+    asks_permission,
+    authorized_final_actions,
+    browse_request,
+    user_requests_ui_check,
+    is_ui_file,
     user_requests_web_lookup,
     wants_structured_json,
 )
@@ -118,8 +130,6 @@ from livecode.session import (
     has_valid_compaction,
     load_session,
     sanitize_messages_for_api,
-    save_diff_record,
-    save_tool_artifact,
 )
 from livecode.mcp_bridge import MCPToolBinding
 from livecode.project_store import workspace_state_identity
@@ -145,13 +155,16 @@ from livecode.browser import (
     design_context as browser_design_context,
     figma_configured as browser_figma_configured,
     agent_tabs_enabled as browser_agent_tabs_enabled,
+    authorize_final_actions as browser_authorize_final_actions,
     design_gate_enabled as browser_design_gate_enabled,
+    ui_verify_enabled as browser_ui_verify_enabled,
     playwright_installed as browser_playwright_installed,
     release_agent as browser_release_agent,
     shot_data_url as browser_shot_data_url,
     turn_context as browser_turn_context,
 )
 from livecode.tools import (
+    ASK_QUESTION_TOOL,
     FILE_EDIT_TOOL_NAMES,
     MUTATING_TOOL_NAMES,
     READ_ONLY_TOOL_NAMES,
@@ -772,6 +785,86 @@ class _DesignRounds:
         self.fires += 1
         return text
 
+_UI_LOOK_ACTIONS = frozenset({"navigate", "reload", "screenshot", "compare", "snapshot", "crop", "inspect", "back", "forward",
+                               "new_tab", "switch_tab"})
+
+
+class _UiVerify:
+    """UI code changed in this turn: ask whether to look at it in the browser, and hold the agent to the answer.
+
+    When the request already asked to see it in the browser (or the turn is a design compare), there is no
+    question: the change has to be looked at after its last edit. Otherwise the agent asks first, and only a
+    Yes sends it to the browser; No, a skip or a free-text answer ends the reminders for this turn.
+    """
+
+    def __init__(self, requested: bool = False) -> None:
+        self.files: list[str] = []
+        self.edited_at: int | None = None
+        self.looked_at: int | None = None
+        self.blocked = False
+        self.fires = 0
+        self.requested = requested
+        self.consent: bool | None = None
+
+    def observe_edit(self, path: str, iteration: int) -> None:
+        if path and is_ui_file(path):
+            if path not in self.files:
+                self.files.append(path)
+            self.edited_at = iteration
+
+    def observe_browser(self, args: Any, result: Any, iteration: int) -> None:
+        if not isinstance(result, dict):
+            return
+        if result.get("unavailable"):
+            self.blocked = True
+            return
+        if result.get("error"):
+            return
+        args = args if isinstance(args, dict) else {}
+        actions = [str(args.get("action") or "").lower()]
+        if actions[0] == "batch":
+            actions = [str((a or {}).get("action") or "").lower() for a in (args.get("actions") or []) if isinstance(a, dict)]
+        if any(a in _UI_LOOK_ACTIONS for a in actions):
+            self.looked_at = iteration
+
+    @staticmethod
+    def _is_verify_question(prompt: Any) -> bool:
+        text = str(prompt or "").lower()
+        return text == UI_VERIFY_QUESTION.lower() or ("verify" in text and ("browser" in text or " ui" in text))
+
+    def observe_question(self, args: Any, result: Any) -> str:
+        """Read the answer to "verify in the browser?". Returns a note for the model when the user said no."""
+        if not isinstance(result, dict):
+            return ""
+        questions = (args or {}).get("questions") if isinstance(args, dict) else None
+        prompts = [str((q or {}).get("prompt") or "") for q in (questions or []) if isinstance(q, dict)]
+        if not any(self._is_verify_question(p) for p in prompts):
+            return ""
+        if result.get("skipped"):
+            self.consent = False
+        else:
+            answer = next((a for a in (result.get("answers") or [])
+                           if isinstance(a, dict) and self._is_verify_question(a.get("question"))), None)
+            picked = [str(x).strip().lower() for x in ((answer or {}).get("selected") or [])]
+            self.consent = bool(picked) and picked[0].startswith("yes") and not (answer or {}).get("other")
+        return "" if self.consent else UI_VERIFY_DECLINED_NOTE
+
+    def reminder(self) -> str:
+        if not self.files or self.blocked or self.fires >= UI_VERIFY_GATE_MAX_FIRES or self.edited_at is None:
+            return ""
+        if self.consent is False:
+            return ""
+        if self.looked_at is not None and self.looked_at > self.edited_at:
+            return ""
+        self.fires += 1
+        shown = ", ".join(self.files[:4]) + (f" and {len(self.files) - 4} more" if len(self.files) > 4 else "")
+        if self.consent:
+            return UI_VERIFY_TEMPLATE.format(files=shown, why=", and the user asked you to")
+        if self.requested:
+            return UI_VERIFY_TEMPLATE.format(files=shown, why="")
+        return UI_VERIFY_ASK_TEMPLATE.format(files=shown)
+
+
 def _is_child_directory(parent: str, child: str) -> bool:
     parent_norm = (parent or "").strip().strip("/")
     child_norm = (child or "").strip().strip("/")
@@ -958,9 +1051,9 @@ def _tool_summary(tool_name: str, result: dict) -> tuple[str, bool]:
         if result.get("background"):
             return ("Running in background" if result.get("running") else f"Exit {result.get('exit_code', '?')}"), False
         return f"Exit {result.get('exit_code', '?')}", False
-    if tool_name in ("command_status", "kill_command"):
+    if tool_name in ("command_status", "kill_command", "restart_command"):
         if result.get("running"):
-            return "Still running", False
+            return ("Restarted, running" if tool_name == "restart_command" else "Still running"), False
         return f"Exit {result.get('exit_code', '?')}", False
     if tool_name == "multi_edit":
         return result.get("summary") or "Edited file", False
@@ -1362,7 +1455,7 @@ def _execute_one_tool(
             "iteration": iteration,
         }
 
-    allowed_in_read_only_mode = tool_name in READ_ONLY_TOOL_NAMES or tool_name in {"attempt_completion", STRUCTURED_OUTPUT_TOOL} or (mode == "plan" and tool_name in {"create_plan", "ask_question"})
+    allowed_in_read_only_mode = tool_name in READ_ONLY_TOOL_NAMES or tool_name in {"attempt_completion", STRUCTURED_OUTPUT_TOOL} or (mode == "plan" and tool_name == "create_plan") or tool_name == "ask_question"
     if tool_name == "browser":
         allowed_in_read_only_mode = not browser_action_needs_approval(tool_args)
     mcp_writes_in_read_only_mode = (
@@ -1667,6 +1760,9 @@ def run_livecode_turn(
     design_loop_for_turn = False
     enable_browser_for_turn = False
     browser_tabs_note = ""
+    browser_open_note = ""
+    authorized_note = ""
+    authorized_kinds = authorized_final_actions(question) if mode == "agent" else []
     if enable_browser_tools:
         attached_images = _image_urls_in_content(effective_user_content)
         if attached_images:
@@ -1883,21 +1979,6 @@ def run_livecode_turn(
         except Exception:
             if logger:
                 _ide_log(logger, "debug", "diff emit failed", file_name, sid=_log_session_id(session_id), exc_info=True)
-        try:
-            save_diff_record(
-                state_path,
-                session_id,
-                tool_call_id,
-                file_name=file_name,
-                diff_html=result.get("diff_html", ""),
-                additions=additions,
-                deletions=deletions,
-                absolute_path=absolute_path,
-                created=created,
-            )
-        except Exception:
-            if logger:
-                _ide_log(logger, "exception", "Failed to persist diff artifact", sid=_log_session_id(session_id), exc_info=True)
 
     allowed_mcp_tools: dict[str, MCPToolBinding] = {}
 
@@ -1986,6 +2067,12 @@ def run_livecode_turn(
             own_browser_tabs = enable_browser_for_turn and browser_agent_tabs_enabled()
         except Exception:
             own_browser_tabs = False
+        if enable_browser_for_turn and authorized_kinds:
+            # A subagent sending the message the user asked for has the same go-ahead.
+            try:
+                browser_authorize_final_actions(state_path, parent_sid or session_id, authorized_kinds, browser_agent)
+            except Exception:
+                pass
 
         def _mini_turn(project_path: str, question: str, session_id: str = "", max_iterations: int = 0, **kwargs):
             del kwargs, session_id
@@ -2267,7 +2354,7 @@ def run_livecode_turn(
     def _build_base_messages(brief_summary: str, *, include_layout: bool = True) -> list[dict[str, Any]]:
         rules_reminder = prefetched.pop("rules") if "rules" in prefetched else load_workspace_rules_reminder(active_workspace)
         compacted = has_valid_compaction(state_path, session_id)
-        reminders = "\n".join(part for part in (build_reminder_text(state_path, session_id), _parallel_agents_hint(), browser_tabs_note) if part)
+        reminders = "\n".join(part for part in (build_reminder_text(state_path, session_id), _parallel_agents_hint(), browser_tabs_note, browser_open_note, authorized_note) if part)
         memory = prefetched.pop("memory") if "memory" in prefetched else _memory_context_for(question)
         prefetched_layout = prefetched.pop("layout", None)
         system_content = build_system_prompt(
@@ -2364,6 +2451,8 @@ def run_livecode_turn(
     todo_nudger = _TodoNudgeRun()
     todo_gate_fires = 0
     design_rounds = _DesignRounds()
+    ui_verify = _UiVerify()  # requested is set once the turn's browser intent is known
+    permission_gate_fires = 0
     last_diag_sig_by_file: dict[str, str] = {}
     diagnostics_blocked_completion = False
     interjection_extensions = 0
@@ -2440,6 +2529,44 @@ def run_livecode_turn(
             browser_tabs_note = browser_turn_context(state_path, session_id)
         except Exception:
             browser_tabs_note = ""
+        # "Go to github.com and …", "open localhost:3000", "check it in the browser": the page opens in the
+        # user's Browser tab, which the UI brings forward as soon as the browser navigates. Without this the
+        # model tends to fetch the page as text, or to open the browser only when told to in so many words.
+        # The final step the request already asks for ("send her a message saying …"): that button goes
+        # through this turn, and the model is told not to ask again.
+        try:
+            browser_authorize_final_actions(state_path, session_id, authorized_kinds)
+        except Exception:
+            pass
+        if authorized_kinds:
+            _names = {"send": "send it", "post": "post it", "submit": "submit it", "buy": "place the order", "book": "book it", "confirm": "confirm it"}
+            authorized_note = (
+                "The user's request already tells you to " + " and ".join(_names[k] for k in authorized_kinds) +
+                ": that is their go-ahead. Carry it through to the end and press that button yourself (the browser lets it "
+                "through this turn); do not ask them to confirm, and say in your answer that it is done."
+            )
+        wanted = browse_request(question)
+        if wanted:
+            steps = str(wanted.get("steps") or "")
+            then = (f" Then do what they asked there, in the browser, step by step: {steps} (snapshot to find the "
+                    "controls, then click and type; read the result off the page, and say what you found).") if steps else \
+                " Then read the page with snapshot or a screenshot."
+            if wanted.get("app"):
+                browser_open_note = (
+                    "The user wants to see their app in the built-in browser. Open it there with browser {action: \"navigate\", "
+                    "url}: the URL of its dev server (a background command you started prints it: command_status; a tab "
+                    "may already show it), or start the dev server first (its script in package.json or the like, with "
+                    "run_command background: true) and open the URL it prints." + then +
+                    " Do not ask whether to open the browser."
+                )
+            else:
+                browser_open_note = (
+                    f"The user asked you to open {wanted['site']}: open it in the built-in browser now, with browser "
+                    "{action: \"navigate\", url} (it appears in their Browser tab, which opens by itself)." + then +
+                    " Do not fetch it as text with web_fetch instead, and do not ask whether to open the browser."
+                )
+    # A request that already asks to see it in the browser (or a design compare) needs no question first.
+    ui_verify.requested = bool(design_loop_for_turn) or user_requests_ui_check(question)
     messages = _build_base_messages(summary)
     tools_result = get_livecode_tools(
         enable_mcp=enable_mcp_for_turn,
@@ -2457,6 +2584,9 @@ def run_livecode_turn(
     else:
         tools, allowed_mcp_tools = tools_result, {}
     tools = filter_tools_for_mode(tools, mode)
+    if mode == "agent" and not any((t.get("function") or {}).get("name") == "ask_question" for t in tools):
+        # The questions card in agent mode too: a doubt is asked, and answered, in this same turn.
+        tools.append(dict(ASK_QUESTION_TOOL))
     disabled_by_settings = set()
     if not cfg["subagents"]:
         disabled_by_settings.add("spawn_subagent")
@@ -3141,20 +3271,6 @@ def run_livecode_turn(
                     compacted = item["compacted"]
                     tool_call_id = item["tool_call_id"]
                     tool_args = item.get("tool_args") or {}
-                    try:
-                        save_tool_artifact(
-                            state_path,
-                            session_id,
-                            tool_call_id,
-                            tool_name=tool_name,
-                            tool_args=tool_args,
-                            result=result,
-                            iteration=iteration,
-                        )
-                    except Exception:
-                        if logger:
-                            _ide_log(logger, "exception", "Failed to persist tool artifact", sid=_log_session_id(session_id), exc_info=True)
-
                     if item.get("parse_error"):
                         # Unparseable arguments all hash alike; they are not a repeated call.
                         stationarity._reset()
@@ -3169,6 +3285,11 @@ def run_livecode_turn(
 
                     if tool_name == "browser":
                         design_rounds.observe(result, iteration)
+                        ui_verify.observe_browser(tool_args, result, iteration)
+                    if tool_name == "ask_question":
+                        declined = ui_verify.observe_question(tool_args, result)
+                        if declined and isinstance(compacted, dict):
+                            compacted = {**compacted, "note": declined}
                     if tool_name == "browser" and result.get("shot_id"):
                         if model_reads_images:
                             browser_shots.append(result)
@@ -3191,6 +3312,7 @@ def run_livecode_turn(
                         fp = result.get("file_path") or tool_args.get("file_path")
                         if fp:
                             record_file_edited(state_path, session_id, str(fp))
+                            ui_verify.observe_edit(str(fp), iteration)
                         _emit_diff(result, tool_call_id)
                         edits_to_verify.append((tool_name, str(fp or ""), result))
 
@@ -3202,6 +3324,7 @@ def run_livecode_turn(
                             last_edit_iteration = iteration
                             edit_completed_this_turn = True
                             record_file_edited(state_path, session_id, fp)
+                            ui_verify.observe_edit(fp, iteration)
                             edits_to_verify.append((tool_name, fp, changed))
 
                     if tool_name == "create_plan" and result.get("success"):
@@ -3576,6 +3699,43 @@ def run_livecode_turn(
                             f"in_progress={_in_prog}",
                             f"fire={todo_gate_fires}",
                         )
+                    continue
+
+            # "Shall I send it?" after the user said to send it: do it instead of asking.
+            asked_for = asks_permission(content) if mode == "agent" else ""
+            if (asked_for and permission_gate_fires < PERMISSION_GATE_MAX_FIRES and iteration < max_iterations - CLOSURE_ITERATIONS
+                    and (authorized_kinds or asked_for in ("proceed", "go ahead", "continue", "do it", "do that", "do this", "do so"))):
+                permission_gate_fires += 1
+                if content.strip():
+                    step_stream.close_content(role="narration", text=content, thought_content=reasoning_only)
+                    early = {"role": "assistant", "content": content}
+                    messages.append(early)
+                    _persist_msg(early)
+                what = (" (" + ", ".join(authorized_kinds) + ")") if authorized_kinds else ""
+                gate = {"role": "user", "content": PERMISSION_GATE_TEMPLATE.format(verb=asked_for, what=what), "internal": True}
+                messages.append(gate)
+                _persist_msg(gate)
+                force_tool_choice_required = True
+                if logger:
+                    _ide_log(logger, "info", "permission-gate re-entry", asked_for)
+                continue
+
+            if (mode == "agent" and enable_browser_for_turn and iteration < max_iterations - CLOSURE_ITERATIONS
+                    and any((t.get("function") or {}).get("name") == "browser" for t in tools)
+                    and browser_ui_verify_enabled()):
+                ui_note = ui_verify.reminder()
+                if ui_note:
+                    if content.strip():
+                        step_stream.close_content(role="narration", text=content, thought_content=reasoning_only)
+                        early = {"role": "assistant", "content": content}
+                        messages.append(early)
+                        _persist_msg(early)
+                    gate = {"role": "user", "content": ui_note, "internal": True}
+                    messages.append(gate)
+                    _persist_msg(gate)
+                    force_tool_choice_required = True
+                    if logger:
+                        _ide_log(logger, "info", "ui-verify re-entry", f"fire={ui_verify.fires}", ", ".join(ui_verify.files[:3]))
                     continue
 
             if (design_loop_for_turn and mode == "agent" and iteration < max_iterations - CLOSURE_ITERATIONS
