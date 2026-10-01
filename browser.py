@@ -331,11 +331,12 @@ class _Worker:
     def _launch(self) -> Any:
         playwright = self._playwright()
         args = [*LAUNCH_ARGS, f"--force-device-scale-factor={_device_scale_factor():g}"]
-        options: dict[str, Any] = {"headless": True, "args": args, "ignore_default_args": ["--enable-automation"]}
-        executable = os.environ.get("LIVECODE_BROWSER_EXECUTABLE", "").strip()
+        launch = launch_settings()
+        options: dict[str, Any] = {"headless": launch["headless"], "args": args, "ignore_default_args": ["--enable-automation"]}
+        executable = launch["executable_path"]
         if executable:
             options["executable_path"] = executable
-        proxy = os.environ.get("LIVECODE_BROWSER_PROXY", "").strip()
+        proxy = launch["proxy"]
         if proxy:
             options["proxy"] = {"server": proxy}
         channel = os.environ.get("LIVECODE_BROWSER_CHANNEL", "").strip()
@@ -353,7 +354,7 @@ class _Worker:
             return playwright.chromium.launch(**options)
         except Exception as exc:
             if executable:
-                raise BrowserUnavailable(f"Could not start the browser at LIVECODE_BROWSER_EXECUTABLE ({_first_line(exc)}).") from exc
+                raise BrowserUnavailable(f"Could not start the browser at {executable} ({_first_line(exc)}). Check the path in Settings > Browser.") from exc
             try:
                 return playwright.chromium.launch(channel="chrome", **options)
             except Exception:
@@ -704,9 +705,12 @@ def _context(session: _Session) -> Any:
 
 
 def _device_scale_factor() -> float:
+    raw = os.environ.get("LIVECODE_BROWSER_SCALE", "").strip() or _read_browser_settings().get("device_scale", 2)
     try:
-        value = float(os.environ.get("LIVECODE_BROWSER_SCALE", "2"))
-    except ValueError:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = 2.0
+    if not math.isfinite(value):
         value = 2.0
     return min(3.0, max(1.0, value))
 
@@ -5899,10 +5903,13 @@ def browser_settings() -> dict[str, Any]:
         "agent_tabs": agent_tabs_enabled(),
         "view_quality": view_quality(),
         "default_viewport": default_viewport(),
+        **launch_settings(),
+        "env_overrides": launch_env_overrides(),
         "allowed": {
             "design_accuracy": [MIN_DESIGN_ACCURACY, 100.0],
             "view_quality": list(VIEW_QUALITIES),
             "default_viewport": list(DEFAULT_VIEWPORTS),
+            "device_scale": [1.0, 3.0],
         },
     }
 
@@ -5924,13 +5931,204 @@ def save_browser_settings(data: dict[str, Any]) -> dict[str, Any]:
         updates["view_quality"] = _choice(data.get("view_quality"), VIEW_QUALITIES, "view_quality")
     if "default_viewport" in data:
         updates["default_viewport"] = _choice(data.get("default_viewport"), DEFAULT_VIEWPORTS, "default_viewport")
+    if "headless" in data:
+        updates["headless"] = _flag(data.get("headless"), "headless")
+    if "executable_path" in data:
+        updates["executable_path"] = _executable_value(data.get("executable_path"))
+    if "proxy" in data:
+        updates["proxy"] = _proxy_value(data.get("proxy"))
+    if "device_scale" in data:
+        updates["device_scale"] = _device_scale_value(data.get("device_scale"))
     if updates:
         settings = _read_browser_settings()
+        before = launch_settings()
         if "design_accuracy" in updates:
             settings.pop("match_threshold", None)
         settings.update(updates)
         _write_browser_settings(settings)
+        if launch_settings() != before:
+            _restart_local_browsers()
     return browser_settings()
+
+
+# Launch options for the browser LiveCode starts itself. An environment variable on the server wins
+# over the saved value, so a deployment can pin them.
+_LAUNCH_ENV = {
+    "executable_path": "LIVECODE_BROWSER_EXECUTABLE",
+    "proxy": "LIVECODE_BROWSER_PROXY",
+    "headless": "LIVECODE_BROWSER_HEADLESS",
+    "device_scale": "LIVECODE_BROWSER_SCALE",
+}
+_PROXY_URL = re.compile(r"^(https?|socks[45]?)://[^\s/]+(:\d{1,5})?/?$", re.I)
+
+
+def launch_env_overrides() -> dict[str, str]:
+    return {key: env for key, env in _LAUNCH_ENV.items() if os.environ.get(env, "").strip()}
+
+
+def launch_settings() -> dict[str, Any]:
+    saved = _read_browser_settings()
+    headless_env = os.environ.get("LIVECODE_BROWSER_HEADLESS", "").strip().lower()
+    if headless_env in _TRUE_WORDS or headless_env in _FALSE_WORDS:
+        headless = headless_env in _TRUE_WORDS
+    else:
+        headless = saved.get("headless", True) not in (False, "false", 0)
+    return {
+        "headless": headless,
+        "executable_path": os.environ.get("LIVECODE_BROWSER_EXECUTABLE", "").strip() or str(saved.get("executable_path") or "").strip(),
+        "proxy": os.environ.get("LIVECODE_BROWSER_PROXY", "").strip() or str(saved.get("proxy") or "").strip(),
+        "device_scale": _device_scale_factor(),
+    }
+
+
+def _executable_value(value: Any) -> str:
+    path = os.path.expanduser(str(value or "").strip())
+    if not path:
+        return ""
+    if path.endswith(".app") and os.path.isdir(path):
+        inner = os.path.join(path, "Contents", "MacOS", os.path.basename(path)[:-4])
+        if os.path.isfile(inner):
+            path = inner
+    if not os.path.isfile(path) or not os.access(path, os.X_OK):
+        raise BrowserError(f"No browser program at {path}. Enter the path to a Chrome or Chromium executable.")
+    return path
+
+
+def _proxy_value(value: Any) -> str:
+    text = str(value or "").strip()
+    if text and not _PROXY_URL.match(text):
+        raise BrowserError("Enter a proxy like http://127.0.0.1:8080 or socks5://127.0.0.1:1080.")
+    return text
+
+
+def _device_scale_value(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = math.nan
+    if not math.isfinite(number) or not 1.0 <= number <= 3.0:
+        raise BrowserError("Pixel density is a number from 1 to 3.")
+    return round(number, 2)
+
+
+def _close_local(worker: "_Worker") -> None:
+    if not worker.remote:
+        _reset_engine(worker)
+    if worker.local is not None:
+        try:
+            worker.local.close()
+        except Exception:
+            pass
+        worker.local = None
+
+
+def _restart_local_browsers() -> None:
+    """Closes browsers LiveCode launched, so the next action starts one with the new launch options.
+    An attached Chrome is left alone."""
+    for worker in _all_workers():
+        if worker._thread is not None and worker._thread.is_alive():
+            try:
+                worker.call(_close_local, worker, label="relaunch", timeout=40)
+            except Exception:
+                pass
+
+
+# Attaching to a Chrome over the DevTools protocol.
+DEBUG_PROFILE_DIR = os.path.expanduser("~/.livecode/chrome-debug-profile")
+DEFAULT_DEBUG_PORT = 9222
+_DETECT_PORTS = (9222, 9223, 9224, 9229)
+
+
+def probe_cdp(url: str, timeout: float = 2.0) -> dict[str, Any]:
+    """Asks a DevTools endpoint for its version without attaching to it.
+    {ok, endpoint, browser, protocol, user_agent} or {ok: False, endpoint, error}."""
+    import urllib.request
+
+    endpoint = str(url or "").strip().rstrip("/")
+    if not endpoint or not _CDP_URL.match(endpoint):
+        return {"ok": False, "endpoint": endpoint, "error": "Enter Chrome's debugging address, e.g. http://127.0.0.1:9222."}
+    http = re.sub(r"^ws", "http", endpoint, flags=re.I)
+    http = re.sub(r"/devtools/browser/.*$", "", http)
+    try:
+        with urllib.request.urlopen(http + "/json/version", timeout=timeout) as resp:
+            info = json.loads(resp.read().decode("utf-8", "replace") or "{}")
+    except Exception as exc:
+        return {"ok": False, "endpoint": endpoint, "error": f"Nothing answered at {http} ({_first_line(exc)})."}
+    if not isinstance(info, dict) or not info.get("webSocketDebuggerUrl"):
+        return {"ok": False, "endpoint": endpoint, "error": f"{http} answered, but it is not a Chrome debugging endpoint."}
+    return {
+        "ok": True,
+        "endpoint": endpoint,
+        "browser": str(info.get("Browser") or ""),
+        "protocol": str(info.get("Protocol-Version") or ""),
+        "user_agent": str(info.get("User-Agent") or ""),
+    }
+
+
+def detect_cdp() -> dict[str, Any]:
+    """The first Chrome debugging endpoint answering on this machine's usual ports."""
+    tried = []
+    for port in _DETECT_PORTS:
+        url = f"http://127.0.0.1:{port}"
+        tried.append(url)
+        result = probe_cdp(url, timeout=0.8)
+        if result.get("ok"):
+            return {**result, "found": True}
+    return {"ok": True, "found": False, "tried": tried}
+
+
+def _chrome_candidates() -> list[str]:
+    configured = launch_settings()["executable_path"]
+    out = [configured] if configured else []
+    if sys.platform == "darwin":
+        for app in ("Google Chrome", "Google Chrome Canary", "Chromium", "Microsoft Edge", "Brave Browser"):
+            for root in ("/Applications", os.path.expanduser("~/Applications")):
+                out.append(os.path.join(root, f"{app}.app", "Contents", "MacOS", app))
+    else:
+        import shutil
+
+        for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge", "brave-browser"):
+            found = shutil.which(name)
+            if found:
+                out.append(found)
+    return [p for p in out if p and os.path.isfile(p) and os.access(p, os.X_OK)]
+
+
+def launch_debug_chrome(port: int = DEFAULT_DEBUG_PORT) -> dict[str, Any]:
+    """Starts a visible Chrome with remote debugging on a LiveCode profile and attaches to it.
+    Reuses a Chrome already answering on the port."""
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        raise BrowserError("The debugging port is a number from 1024 to 65535.") from None
+    if not 1024 <= port <= 65535:
+        raise BrowserError("The debugging port is a number from 1024 to 65535.")
+    url = f"http://127.0.0.1:{port}"
+    if not probe_cdp(url, timeout=0.8).get("ok"):
+        candidates = _chrome_candidates()
+        if not candidates:
+            raise BrowserError("Could not find Chrome on this machine. Set its path under Settings > Browser > Browser program.")
+        os.makedirs(DEBUG_PROFILE_DIR, exist_ok=True)
+        args = [
+            candidates[0],
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={DEBUG_PROFILE_DIR}",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ]
+        try:
+            subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        except OSError as exc:
+            raise BrowserError(f"Could not start {candidates[0]} ({exc.strerror or exc}).") from exc
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            if probe_cdp(url, timeout=0.8).get("ok"):
+                break
+            time.sleep(0.3)
+        else:
+            raise BrowserError(f"Chrome started but did not open its debugging port {port}. Close other Chrome windows using this profile and try again.")
+    status = set_cdp_endpoint(url)
+    return {**status, "profile": DEBUG_PROFILE_DIR}
 
 
 def automation_signals_reduced() -> bool:

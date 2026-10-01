@@ -26,7 +26,7 @@
 - **Editor and terminal.** A Monaco editor with Python and TypeScript intelligence, an integrated terminal, and background commands for dev servers and watchers.
 - **Review and undo.** Pending changes show as diffs, and you can roll back to a checkpoint.
 - **Project context.** The agent reads project rules (`AGENTS.md`, `CLAUDE.md`, `.claude/rules/*.md`), keeps a searchable project memory, and connects to MCP servers.
-- **Themes:** Dark, Light, Black and Pink.
+- **Themes:** Dark, Light, Black and Pink, or follow your system's light and dark mode.
 
 ## Requirements
 
@@ -83,12 +83,24 @@ LIVECODE_PORT=9001 python3 server.py
 
 ## Configuration
 
-Most settings are in the app, under **Settings** (General, Agent, Models, Rules, MCP, Indexing). They are saved on your machine:
+Most settings are in the app, under **Settings**, with a search box at the top:
+
+- **General**: projects, notifications, settings backup and restore.
+- **Appearance**: theme (or follow the system), conversation text size, editor font and behaviour.
+- **Agent**: default mode, approvals, web tools, custom instructions for every chat.
+- **Harness**: step limits, subagents, parallel tool calls, loop guard, model retries, command timeout, compaction threshold.
+- **Plan mode**: plan detail, clarifying questions, diagrams, tests section, recent plans.
+- **Memory**: recall and saving options, plus MEMORY.md, session logs, consolidation and clearing for the open project.
+- **Browser**: headless, in a window, or attached to your Chrome over CDP (test, detect or launch one), browser program, proxy, pixel density, design checks.
+- **Models**, **Rules**, **MCP**, **Indexing**.
+
+They are saved on your machine:
 
 | File | Holds |
 | --- | --- |
 | `~/.livecode/llm.json` | API keys (saved with `0600` permissions), the default provider, Auto options |
-| `~/.livecode/browser.json` | Browser settings: design accuracy, design gate, subagent tabs, view quality, default viewport |
+| `~/.livecode/agent.json` | Harness, memory and plan-mode settings (only values that differ from the defaults) |
+| `~/.livecode/browser.json` | Browser settings: headless or windowed, browser program, proxy, pixel density, Chrome CDP address, design accuracy, design gate, subagent tabs, view quality, default viewport |
 | `~/.livecode/figma.json` | Figma token (optional) |
 | `llm/models.yaml` | Provider catalog: which models each provider offers, and whether each model reads images or is tuned for code. LiveCode reloads this file when it changes. |
 
@@ -100,6 +112,9 @@ Useful environment variables:
 | `LIVECODE_LOG_LEVEL` | Log level (default `INFO`) |
 | `LIVECODE_BROWSER_EXECUTABLE` | Path to a Chrome or Chromium binary for the built-in browser |
 | `LIVECODE_BROWSER_CDP_URL` | Attach to your own Chrome, started with `--remote-debugging-port` |
+| `LIVECODE_BROWSER_HEADLESS` | `true` or `false`: pins whether the built-in browser opens a window |
+| `LIVECODE_BROWSER_PROXY` | Proxy for the built-in browser, e.g. `http://127.0.0.1:8080` |
+| `LIVECODE_BROWSER_SCALE` | Pixel density for the built-in browser, 1 to 3 |
 | `FIGMA_TOKEN` | Figma access token for design compares |
 
 ### Adding a model or provider

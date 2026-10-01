@@ -10,6 +10,8 @@ from typing import Any, Callable
 
 import requests
 
+from .retry import call_with_retries, is_cancel, raise_for_status
+
 LIVECODE_LOGGER = logging.getLogger("LiveCode")
 logger = logging.getLogger(__name__)
 
@@ -92,13 +94,20 @@ def _response_is_empty(out: dict | None) -> bool:
     return (not content) and (not reasoning) and (not has_tools)
 
 
-def _notify_retry(on_retry, attempt, max_retries, error):
-    if not on_retry:
-        return
-    try:
-        on_retry(attempt + 1, max_retries, error)
-    except Exception:
-        logger.debug("Gemini on_retry callback failed", exc_info=True)
+def _raise_for_status(response) -> None:
+    # A 429 is left to _with_rate_limit_retry, which knows Gemini's retryDelay and the fallback model.
+    if response.status_code == 429:
+        raise Exception(f"Gemini API error: {response.status_code} - {response.text}")
+    raise_for_status(response, "Gemini")
+
+
+def _retry_logger(on_retry, kind: str):
+    def _log(attempt, total, error):
+        logger.warning("Gemini %s tools request failed (%s), attempt %s/%s; retrying", kind, error, attempt + 1, total)
+        if on_retry:
+            on_retry(attempt + 1, total, error)
+
+    return _log
 
 
 def _normalize_timeout(timeout) -> Any:
@@ -637,8 +646,7 @@ class GeminiClient:
             json=payload,
             timeout=_normalize_timeout(timeout),
         )
-        if response.status_code != 200:
-            raise Exception(f"Gemini API error: {response.status_code} - {response.text}")
+        _raise_for_status(response)
 
         result = response.json()
         usage_fields = _usage_fields(result.get("usageMetadata") or {})
@@ -707,70 +715,57 @@ class GeminiClient:
         payload,
         connect_timeout=30,
         read_timeout=60,
-        max_retries=3,
+        max_retries=None,
         on_retry=None,
         request_id: str = "",
     ):
         started = time.monotonic()
         prefix = f"Gemini tools {request_id}".strip()
+        LIVECODE_LOGGER.debug(
+            "%s blocking_start messages=%d tools=%d timeout=(%s,%s)",
+            prefix,
+            len((payload.get("contents") or [])),
+            len((((payload.get("tools") or [{}])[0]).get("functionDeclarations") or [])),
+            connect_timeout,
+            read_timeout,
+        )
 
-        for attempt in range(max_retries):
-            try:
-                if attempt == 0:
-                    LIVECODE_LOGGER.debug(
-                        "%s blocking_start messages=%d tools=%d timeout=(%s,%s)",
-                        prefix,
-                        len((payload.get("contents") or [])),
-                        len((((payload.get("tools") or [{}])[0]).get("functionDeclarations") or [])),
-                        connect_timeout,
-                        read_timeout,
-                    )
-                response = requests.post(
-                    endpoint,
-                    headers=headers,
-                    json=payload,
-                    timeout=(connect_timeout, read_timeout),
-                )
-                LIVECODE_LOGGER.debug(
-                    "%s blocking_http status=%s elapsed=%.2fs",
-                    prefix,
-                    response.status_code,
-                    time.monotonic() - started,
-                )
-                if response.status_code != 200:
-                    raise Exception(f"Gemini API error: {response.status_code} - {response.text}")
+        def _attempt():
+            response = requests.post(
+                endpoint,
+                headers=headers,
+                json=payload,
+                timeout=(connect_timeout, read_timeout),
+            )
+            LIVECODE_LOGGER.debug(
+                "%s blocking_http status=%s elapsed=%.2fs",
+                prefix,
+                response.status_code,
+                time.monotonic() - started,
+            )
+            _raise_for_status(response)
 
-                result = response.json()
-                candidates = result.get("candidates") or []
-                if not candidates:
-                    raise Exception("Gemini returned invalid response format")
+            result = response.json()
+            candidates = result.get("candidates") or []
+            if not candidates:
+                raise Exception("Gemini returned invalid response format")
 
-                out = _parse_candidate(candidates[0])
-                usage_fields = _usage_fields(result.get("usageMetadata") or {})
-                out.update(usage_fields)
-                _log_token_usage(usage_fields, streaming=False)
-                LIVECODE_LOGGER.debug(
-                    "%s blocking_parsed content_len=%d reasoning_len=%d tool_calls=%d usage=%s elapsed=%.2fs",
-                    prefix,
-                    len(out.get("content") or ""),
-                    len(out.get("reasoning_content") or ""),
-                    len(out.get("tool_calls") or []),
-                    bool(usage_fields),
-                    time.monotonic() - started,
-                )
-                return out
-            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
-                if attempt < max_retries - 1:
-                    logger.warning(
-                        "Gemini tools request failed (%s), attempt %s/%s; retrying",
-                        e,
-                        attempt + 1,
-                        max_retries,
-                    )
-                    _notify_retry(on_retry, attempt, max_retries, e)
-                    time.sleep(2**attempt)
-                    continue
-                raise
+            out = _parse_candidate(candidates[0])
+            usage_fields = _usage_fields(result.get("usageMetadata") or {})
+            out.update(usage_fields)
+            _log_token_usage(usage_fields, streaming=False)
+            LIVECODE_LOGGER.debug(
+                "%s blocking_parsed content_len=%d reasoning_len=%d tool_calls=%d usage=%s elapsed=%.2fs",
+                prefix,
+                len(out.get("content") or ""),
+                len(out.get("reasoning_content") or ""),
+                len(out.get("tool_calls") or []),
+                bool(usage_fields),
+                time.monotonic() - started,
+            )
+            return out
+
+        return call_with_retries(_attempt, on_retry=_retry_logger(on_retry, "blocking"), retries=max_retries)
 
     def _call_streaming(
         self,
@@ -780,7 +775,7 @@ class GeminiClient:
         on_thought_delta,
         connect_timeout=30,
         read_timeout=60,
-        max_retries=3,
+        max_retries=None,
         on_retry=None,
         request_id: str = "",
         on_content_delta=None,
@@ -788,59 +783,46 @@ class GeminiClient:
     ):
         started = time.monotonic()
         prefix = f"Gemini tools {request_id}".strip()
+        LIVECODE_LOGGER.debug(
+            "%s streaming_start messages=%d tools=%d timeout=(%s,%s)",
+            prefix,
+            len(payload.get("contents") or []),
+            len((((payload.get("tools") or [{}])[0]).get("functionDeclarations") or [])),
+            connect_timeout,
+            read_timeout,
+        )
 
-        for attempt in range(max_retries):
-            try:
-                if attempt == 0:
-                    LIVECODE_LOGGER.debug(
-                        "%s streaming_start messages=%d tools=%d timeout=(%s,%s)",
-                        prefix,
-                        len(payload.get("contents") or []),
-                        len((((payload.get("tools") or [{}])[0]).get("functionDeclarations") or [])),
-                        connect_timeout,
-                        read_timeout,
-                    )
-                response = requests.post(
-                    endpoint,
-                    headers=headers,
-                    json=payload,
-                    stream=True,
-                    timeout=(connect_timeout, read_timeout),
-                )
-                LIVECODE_LOGGER.debug(
-                    "%s streaming_http status=%s elapsed=%.2fs",
-                    prefix,
-                    response.status_code,
-                    time.monotonic() - started,
-                )
-                if response.status_code != 200:
-                    raise Exception(f"Gemini API error: {response.status_code} - {response.text}")
-                out = _parse_sse_stream(
-                    response,
-                    on_thought_delta=on_thought_delta,
-                    on_content_delta=on_content_delta,
-                    on_tool_call_delta=on_tool_call_delta,
-                    request_id=request_id,
-                )
-                usage_fields = {
-                    k: out[k]
-                    for k in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens")
-                    if k in out
-                }
-                _log_token_usage(usage_fields, streaming=True)
-                return out
-            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
-                if attempt < max_retries - 1:
-                    logger.warning(
-                        "Gemini streaming tools request failed (%s), attempt %s/%s; retrying",
-                        e,
-                        attempt + 1,
-                        max_retries,
-                    )
-                    _notify_retry(on_retry, attempt, max_retries, e)
-                    time.sleep(2**attempt)
-                    continue
-                raise
+        def _attempt():
+            response = requests.post(
+                endpoint,
+                headers=headers,
+                json=payload,
+                stream=True,
+                timeout=(connect_timeout, read_timeout),
+            )
+            LIVECODE_LOGGER.debug(
+                "%s streaming_http status=%s elapsed=%.2fs",
+                prefix,
+                response.status_code,
+                time.monotonic() - started,
+            )
+            _raise_for_status(response)
+            out = _parse_sse_stream(
+                response,
+                on_thought_delta=on_thought_delta,
+                on_content_delta=on_content_delta,
+                on_tool_call_delta=on_tool_call_delta,
+                request_id=request_id,
+            )
+            usage_fields = {
+                k: out[k]
+                for k in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens")
+                if k in out
+            }
+            _log_token_usage(usage_fields, streaming=True)
+            return out
+
+        return call_with_retries(_attempt, on_retry=_retry_logger(on_retry, "streaming"), retries=max_retries)
 
     def _complete_with_tools_once(
         self,
@@ -907,6 +889,8 @@ class GeminiClient:
                 else:
                     return out
             except Exception as e:
+                if is_cancel(e) or _rate_limit_delay(e) is not None:
+                    raise
                 logger.warning("Gemini streaming tools failed (%s); falling back to blocking", e)
                 _relax_forced_tool_mode(payload, e, request_id)
 

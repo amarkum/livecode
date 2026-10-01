@@ -1877,6 +1877,10 @@ def _livecode_run_command(
     from livecode.bg_commands import clean_terminal_text, kill_process_tree
     from livecode.interjection import is_cancelled
 
+    if not timeout_seconds:
+        from livecode import agent_settings
+
+        timeout_seconds = agent_settings.get("command_timeout_s")
     limit_s = max(1, min(int(timeout_seconds or COMMAND_TIMEOUT_DEFAULT_S), COMMAND_TIMEOUT_MAX_S))
     if cancel_check is None and session_id:
         command_started = time.monotonic()

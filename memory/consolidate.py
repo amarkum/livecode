@@ -260,12 +260,16 @@ def maybe_consolidate_memory(
     model: str,
     call_summarize: Callable[[str, list[dict[str, str]]], str] | None,
     logger: Any = None,
+    min_hours: float | None = None,
 ) -> dict[str, Any] | None:
     if not call_summarize or not project_path:
         return None
     try:
         result = run_consolidation(
-            project_path, model=model, call_summarize=call_summarize
+            project_path,
+            model=model,
+            call_summarize=call_summarize,
+            min_hours=MIN_HOURS_BETWEEN_RUNS if min_hours is None else min_hours,
         )
         if logger and result.get("status") == "written":
             logger.info(

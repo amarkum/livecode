@@ -464,7 +464,7 @@ function _livecodeBindEditorAutosaveOnce() {
       clearTimeout(_livecodeEditorAutosaveTimer);
       _livecodeEditorAutosaveTimer = setTimeout(function() {
         autoSaveIDEFile(ideActiveFile);
-      }, 1e3);
+      }, typeof window._livecodeEditorAutosaveDelay === "function" ? window._livecodeEditorAutosaveDelay() : 1e3);
     }
   });
 }
@@ -2400,6 +2400,7 @@ function initializeIDEEditor() {
     });
     ideEditor = window.ideEditor;
     window.ideEditorReady = true;
+    if (typeof window._livecodeApplyEditorSettings === "function") window._livecodeApplyEditorSettings();
     _livecodeBindEditorAutosaveOnce();
     _livecodeBindPlanMonacoAutosave();
     try { if (typeof window.installLivecodeTsIntel === "function") window.installLivecodeTsIntel(); } catch (e) {}
@@ -11974,6 +11975,9 @@ function handleLiveCodeProgress(data) {
   }
 
   const isActiveTab = _livecodeIsActiveTab(targetTab);
+  if (typeof window._livecodeNotifyProgress === "function") {
+    try { window._livecodeNotifyProgress(data); } catch (e) {}
+  }
   if (data.status === "complete") {
     const completeCost = Number(data.cost_usd || 0);
     if (completeCost > 0) {
@@ -12055,6 +12059,9 @@ function handleLiveCodeProgress(data) {
       if (planFile) {
         _livecodeFinalizeRunningActivity({ pastTense: true }, output);
         _livecodeAppendPlanCard({ file: planFile, title: planTitle, overview: data.overview || "" }, output, targetTab);
+        if (isActiveTab && _livecodeSettingsGet("planAutoOpen")) {
+          try { window.openLiveCodePlanTab(planFile, planTitle); } catch (e) {}
+        }
       }
     } else if (progressType === "compaction") {
       _livecodeResolveRunningActivityEl(output);
@@ -17390,7 +17397,12 @@ const _LIVECODE_SETTINGS_TAB_ICON = "data:image/svg+xml;utf8," + encodeURICompon
 
 const _LIVECODE_SETTINGS_SECTIONS = [
   { id: "general", label: "General", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"></path></svg>' },
+  { id: "appearance", label: "Appearance", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="13.5" cy="6.5" r="1.2"></circle><circle cx="17.5" cy="10.5" r="1.2"></circle><circle cx="8.5" cy="7.5" r="1.2"></circle><circle cx="6.5" cy="12.5" r="1.2"></circle><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.9 0 1.7-.8 1.7-1.7 0-.4-.2-.8-.4-1.1-.3-.3-.4-.7-.4-1.1 0-.9.8-1.7 1.7-1.7h2c3 0 5.5-2.5 5.5-5.5C22 6 17.5 2 12 2z"></path></svg>' },
   { id: "agent", label: "Agent", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9z"></path><path d="M19 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"></path></svg>' },
+  { id: "harness", label: "Harness", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"></path></svg>' },
+  { id: "plan", label: "Plan mode", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"></path><rect x="9" y="3" width="6" height="4" rx="1"></rect><path d="M9 12l2 2 4-4"></path></svg>' },
+  { id: "memory", label: "Memory", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24A2.5 2.5 0 0 1 9.5 2z"></path><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24A2.5 2.5 0 0 0 14.5 2z"></path></svg>' },
+  { id: "browser", label: "Browser", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"></path></svg>' },
   { id: "models", label: "Models", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="13" width="3.5" height="7" rx="1"></rect><rect x="10.25" y="8" width="3.5" height="12" rx="1"></rect><rect x="16.5" y="4" width="3.5" height="16" rx="1"></rect></svg>' },
   { id: "rules", label: "Rules", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path><path d="M14 3v5h5"></path><line x1="9" y1="13" x2="15" y2="13"></line><line x1="9" y1="17" x2="13" y2="17"></line></svg>' },
   { id: "mcp", label: "MCP", icon: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 1.75v3M10 1.75v3"></path><path d="M4.25 4.75h7.5v2.5a3.75 3.75 0 0 1-7.5 0z"></path><path d="M8 11v3.25"></path></svg>' },
@@ -17451,14 +17463,33 @@ function _livecodeRenderSettings() {
   if (!view) return;
   _livecodeBindSettingsOnce(view);
   const nav = _LIVECODE_SETTINGS_SECTIONS.map(function(s) {
-    const active = s.id === _livecodeSettingsSection;
+    const active = s.id === _livecodeSettingsSection && !String(window._livecodeSettingsQuery || "").trim();
     return '<button type="button" class="livecode-settings-nav-item lc-btn' + (active ? " is-active" : "") + '" data-settings-section="' + s.id + '" title="' + s.label + '" aria-label="' + s.label + '"' + (active ? ' aria-current="page"' : "") + ">" +
       s.icon + "<span>" + s.label + "</span></button>";
   }).join("");
+  const query = String(window._livecodeSettingsQuery || "");
+  const search = '<div class="livecode-settings-search"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>' +
+    '<input type="search" data-settings-search placeholder="Search settings" value="' + _livecodeEscapeHtml(query).replace(/"/g, "&quot;") + '" aria-label="Search settings" spellcheck="false" autocomplete="off"></div>';
   view.innerHTML =
-    '<nav class="livecode-settings-nav" aria-label="Settings sections"><div class="livecode-settings-nav-title">LiveCode Settings</div>' + nav + "</nav>" +
+    '<nav class="livecode-settings-nav" aria-label="Settings sections"><div class="livecode-settings-nav-title">LiveCode Settings</div>' + search + nav + "</nav>" +
     '<div class="livecode-settings-main"><div class="livecode-settings-page" id="livecode-settings-page"></div></div>';
   _livecodeRenderSettingsPage();
+}
+
+function _livecodeSettingsRenderers() {
+  return {
+    general: _livecodeSettingsGeneralHtml,
+    appearance: window._livecodeSettingsAppearanceHtml,
+    agent: _livecodeSettingsAgentHtml,
+    harness: window._livecodeSettingsHarnessHtml,
+    plan: window._livecodeSettingsPlanHtml,
+    memory: window._livecodeSettingsMemoryHtml,
+    browser: window._livecodeSettingsBrowserHtml,
+    models: _livecodeSettingsModelsHtml,
+    rules: _livecodeSettingsRulesHtml,
+    mcp: _livecodeSettingsMcpHtml,
+    indexing: _livecodeSettingsIndexingHtml,
+  };
 }
 
 function _livecodeRenderSettingsPage() {
@@ -17466,14 +17497,10 @@ function _livecodeRenderSettingsPage() {
   if (!page) return;
   const main = page.parentElement;
   const keepScroll = main ? main.scrollTop : 0;
-  const render = {
-    general: _livecodeSettingsGeneralHtml,
-    agent: _livecodeSettingsAgentHtml,
-    models: _livecodeSettingsModelsHtml,
-    rules: _livecodeSettingsRulesHtml,
-    mcp: _livecodeSettingsMcpHtml,
-    indexing: _livecodeSettingsIndexingHtml,
-  }[_livecodeSettingsSection] || _livecodeSettingsGeneralHtml;
+  const query = String(window._livecodeSettingsQuery || "").trim();
+  const render = query && window._livecodeSettingsSearchHtml
+    ? function() { return window._livecodeSettingsSearchHtml(query); }
+    : _livecodeSettingsRenderers()[_livecodeSettingsSection] || _livecodeSettingsGeneralHtml;
   page.innerHTML = render();
   if (main) main.scrollTop = keepScroll;
   if (_livecodeSettingsSection === "rules" && _livecodeSettingsRules === null) _livecodeLoadSettingsRules();
@@ -17557,6 +17584,7 @@ function _livecodeSettingsGeneralHtml() {
     }).join("");
   }
   html += "</div>";
+  if (typeof window._livecodeSettingsGeneralExtraHtml === "function") html += window._livecodeSettingsGeneralExtraHtml();
   return html;
 }
 
@@ -17570,36 +17598,15 @@ function _livecodeSettingsAgentHtml() {
   html += _livecodeSettingSwitchHtml("requireApproval", "Ask before edits, commands, and MCP tools", "The agent waits for your approval before it writes a file, runs a command, or calls an MCP tool. Destructive commands (rm -rf, git reset --hard, force push) always ask.");
   html += _livecodeSettingSwitchHtml("webTools", "Web search and fetch", "Let the agent search the web and read pages. It can always do this when you ask for it in your message.");
   html += "</div>";
-  html += '<h3 class="livecode-settings-subh">Browser</h3><div class="livecode-settings-group">';
-  html += _livecodeSettingSwitchHtml("browserTools", "Built-in browser", "Let the agent open pages in the Browser tab, click and type in them, run page scripts, and take screenshots. Clicks, typing, and scripts ask first when approvals are on.");
-  const attached = !!(_livecodeBrowserConnection && _livecodeBrowserConnection.engine === "chrome");
-  html += _livecodeSettingsRowHtml("Cookies", attached
-    ? "Your attached Chrome signs in with its own cookies; imported ones are for the built-in browser."
-    : "Import cookies from your own browser so pages open signed in. They stay in this project’s browser profile.",
-    (attached ? "" : _livecodeSettingsButton("Manage…", "browser-cookies") + " ") + _livecodeSettingsButton("Open browser", "open-browser"));
-  html += _livecodeSettingsMatchRowHtml();
-  html += _livecodeSettingsDesignGateRowHtml();
-  html += _livecodeSettingsBrowserViewRowsHtml();
-  html += _livecodeSettingsAutomationRowHtml();
-  html += _livecodeSettingsChromeRowHtml();
-  html += _livecodeSettingsFigmaRowHtml();
-  html += "</div>";
-  const density = _livecodeConversationDensity();
-  const densitySeg = LIVECODE_CONVERSATION_DENSITIES.map(function(d) {
-    return '<button type="button" class="lc-btn' + (d.value === density ? " is-active" : "") + '" data-settings-action="set-density" data-density="' + d.value + '" role="radio" aria-checked="' + (d.value === density) + '">' + d.label + "</button>";
-  }).join("");
-  html += '<h3 class="livecode-settings-subh">Conversation</h3><div class="livecode-settings-group">';
-  html += _livecodeSettingsRowHtml("Conversation density", "Choose how much detail Agent tool calls show in the conversation. Detailed shows each file edit's diff and each command's output; Balanced shows them as one line each.", '<div class="lc-segmented" role="radiogroup" aria-label="Conversation density">' + densitySeg + "</div>");
-  const grouping = _livecodeStepGrouping();
-  const groupingSeg = LIVECODE_STEP_GROUPINGS.map(function(g) {
-    return '<button type="button" class="lc-btn' + (g.value === grouping ? " is-active" : "") + '" data-settings-action="set-step-grouping" data-grouping="' + g.value + '" role="radio" aria-checked="' + (g.value === grouping) + '">' + g.label + "</button>";
-  }).join("");
-  html += _livecodeSettingsRowHtml("Group tool calls", "Grouped folds consecutive reads, searches, and other tool calls into one collapsible summary line. Ungrouped lists every tool call on its own line.", '<div class="lc-segmented" role="radiogroup" aria-label="Group tool calls">' + groupingSeg + "</div>");
+  html += '<h3 class="livecode-settings-subh">More agent settings</h3><div class="livecode-settings-group">';
+  html += _livecodeSettingsRowHtml("Browser, display and limits", "The agent's browser is under Browser, conversation display under Appearance, and step limits, retries and safety rails under Harness.",
+    _livecodeSettingsButton("Browser", "goto-section", ' data-section="browser"') + _livecodeSettingsButton("Harness", "goto-section", ' data-section="harness"'));
   html += "</div>";
   html += '<h3 class="livecode-settings-subh">Queued messages</h3><div class="livecode-settings-group">';
   html += _livecodeSettingSwitchHtml("autoRunQueue", "Run queued messages automatically", "Messages you send while the agent works start one after another when each turn ends. Turn off to send each one yourself.");
   html += _livecodeSettingsRowHtml("Keys", "Enter queues a message while the agent works · ⌘/Ctrl+Enter stops the turn and sends it now · Stop pauses the queue.", "");
   html += "</div>";
+  if (typeof window._livecodeSettingsAgentExtraHtml === "function") html += window._livecodeSettingsAgentExtraHtml();
   return html;
 }
 
@@ -17610,7 +17617,7 @@ function _livecodeLoadBrowserConnection() {
     .then(function(resp) { return resp.json(); })
     .then(function(data) {
       _livecodeBrowserConnection = data && data.success ? data : { engine: "builtin" };
-      if (_livecodeSettingsSection === "agent") _livecodeRenderSettingsPage();
+      if (_livecodeSettingsSection === "browser" || window._livecodeSettingsQuery) _livecodeRenderSettingsPage();
     })
     .catch(function() {});
 }
@@ -17643,7 +17650,7 @@ function _livecodeLoadFigmaStatus() {
     .then(function(resp) { return resp.json(); })
     .then(function(data) {
       _livecodeFigmaStatus = data && data.success ? data : { configured: false, source: "" };
-      if (_livecodeSettingsSection === "agent") _livecodeRenderSettingsPage();
+      if (_livecodeSettingsSection === "browser" || window._livecodeSettingsQuery) _livecodeRenderSettingsPage();
     })
     .catch(function() {});
 }
@@ -17655,12 +17662,12 @@ function _livecodeLoadBrowserSettings() {
     .then(function(resp) { return resp.json(); })
     .then(function(data) {
       _livecodeBrowserSettings = data && data.success ? data : Object.assign({}, _LIVECODE_BROWSER_SETTING_DEFAULTS);
-      if (_livecodeSettingsSection === "agent") _livecodeRenderSettingsPage();
+      if (_livecodeSettingsSection === "browser" || window._livecodeSettingsQuery) _livecodeRenderSettingsPage();
     })
     .catch(function() {
       if (_livecodeBrowserSettings) return;
       _livecodeBrowserSettings = Object.assign({}, _LIVECODE_BROWSER_SETTING_DEFAULTS);
-      if (_livecodeSettingsSection === "agent") _livecodeRenderSettingsPage();
+      if (_livecodeSettingsSection === "browser" || window._livecodeSettingsQuery) _livecodeRenderSettingsPage();
     });
 }
 
@@ -18210,10 +18217,19 @@ async function _livecodeRemoveMcpServer(name) {
 function _livecodeBindSettingsOnce(view) {
   if (view._livecodeSettingsBound) return;
   view._livecodeSettingsBound = true;
+  view.addEventListener("keydown", function(e) {
+    const input = e.target;
+    if (e.key !== "Escape" || !input || !input.hasAttribute || !input.hasAttribute("data-settings-search") || !input.value) return;
+    e.stopPropagation();
+    input.value = "";
+    window._livecodeSettingsQuery = "";
+    _livecodeRenderSettings();
+  });
   view.addEventListener("click", function(e) {
     const sectionBtn = e.target.closest ? e.target.closest("[data-settings-section]") : null;
     if (sectionBtn) {
       e.preventDefault();
+      window._livecodeSettingsQuery = "";
       _livecodeSettingsSection = sectionBtn.getAttribute("data-settings-section");
       if (_livecodeSettingsSection === "rules") _livecodeSettingsRules = null;
       _livecodeRenderSettings();
@@ -18226,6 +18242,7 @@ function _livecodeBindSettingsOnce(view) {
     const action = btn.getAttribute("data-settings-action");
     const path = btn.getAttribute("data-path") || "";
     const server = btn.getAttribute("data-server") || "";
+    if (typeof window._livecodeHandleSettingsActionExt === "function" && window._livecodeHandleSettingsActionExt(action, btn)) return;
     if (action === "open-project") openLiveCodeProjectBrowser();
     else if (action === "clone") openLiveCodeCloneDialog();
     else if (action === "workspace-manager") openLiveCodeWorkspaceManager();
@@ -18238,6 +18255,10 @@ function _livecodeBindSettingsOnce(view) {
         removeLiveCodeRecentProject(path);
         _livecodeRenderSettingsPage();
       });
+    } else if (action === "goto-section") {
+      window._livecodeSettingsQuery = "";
+      _livecodeSettingsSection = btn.getAttribute("data-section") || "general";
+      _livecodeRenderSettings();
     } else if (action === "set-mode") {
       const mode = btn.getAttribute("data-mode") || "agent";
       window.livecodeChatMode = mode;
@@ -18333,6 +18354,7 @@ function _livecodeBindSettingsOnce(view) {
   });
   view.addEventListener("input", function(e) {
     const input = e.target;
+    if (input && typeof window._livecodeHandleSettingsInputExt === "function") window._livecodeHandleSettingsInputExt(input);
     if (!input || !input.hasAttribute || !input.hasAttribute("data-design-accuracy")) return;
     const number = Number(input.value);
     if (!Number.isFinite(number)) return;
@@ -18347,6 +18369,7 @@ function _livecodeBindSettingsOnce(view) {
       _livecodeSaveLlmSettings({ best_auto: !!input.checked });
       return;
     }
+    if (input && input.getAttribute && typeof window._livecodeHandleSettingsChangeExt === "function" && window._livecodeHandleSettingsChangeExt(input)) return;
     if (!input || input.tagName !== "INPUT") return;
     const setting = input.getAttribute("data-setting");
     if (setting) {

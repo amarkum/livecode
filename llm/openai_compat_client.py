@@ -13,6 +13,8 @@ from typing import Any, Callable, Iterator
 
 import requests
 
+from .retry import call_with_retries, raise_for_status, stream_error
+
 logger = logging.getLogger(__name__)
 
 _KEEP_KEYS = ("role", "content", "name", "tool_calls", "tool_call_id")
@@ -72,8 +74,7 @@ class OpenAICompatClient:
         if self.provider == "openrouter":
             headers["X-Title"] = "LiveCode"
         resp = requests.post(f"{base}/chat/completions", headers=headers, json=payload, stream=stream, timeout=timeout)
-        if resp.status_code != 200:
-            raise Exception(f"{self.provider} API error: {resp.status_code} - {resp.text[:2000]}")
+        raise_for_status(resp, self.provider)
         return resp
 
     def _payload(self, model_id: str, messages: list[dict], *, max_tokens: int | None, temperature: float | None,
@@ -94,8 +95,8 @@ class OpenAICompatClient:
         return payload
 
     def complete(self, model_id: str, messages: list[dict], *, timeout=30, **_: Any) -> str:
-        resp = self._request(self._payload(model_id, messages, max_tokens=4096, temperature=0.3), stream=False, timeout=timeout)
-        choices = resp.json().get("choices") or []
+        payload = self._payload(model_id, messages, max_tokens=4096, temperature=0.3)
+        choices = call_with_retries(lambda: self._request(payload, stream=False, timeout=timeout).json(), retries=2).get("choices") or []
         if not choices:
             raise Exception(f"{self.provider} returned no choices")
         return (choices[0].get("message") or {}).get("content") or ""
@@ -140,21 +141,12 @@ class OpenAICompatClient:
     ) -> dict[str, Any]:
         payload = self._payload(model_id, messages, max_tokens=max_completion_tokens, temperature=None,
                                 tools=tools, tool_choice=tool_choice, stream=True)
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                resp = self._request(payload, stream=True, timeout=(30, 300))
-                return self._collect(resp, on_thought_delta, on_content_delta, on_tool_call_delta)
-            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
-                if attempt >= max_retries - 1:
-                    raise
-                if on_retry:
-                    try:
-                        on_retry(attempt, max_retries, e)
-                    except Exception:
-                        pass
-                time.sleep(2 ** attempt)
-        raise RuntimeError("unreachable")
+
+        def _attempt() -> dict[str, Any]:
+            resp = self._request(payload, stream=True, timeout=(30, 300))
+            return self._collect(resp, on_thought_delta, on_content_delta, on_tool_call_delta)
+
+        return call_with_retries(_attempt, on_retry=on_retry)
 
     def _collect(self, resp, on_thought_delta, on_content_delta, on_tool_call_delta) -> dict[str, Any]:
         content: list[str] = []
@@ -163,6 +155,9 @@ class OpenAICompatClient:
         finish = None
         usage: dict = {}
         for chunk in self._iter_sse(resp):
+            if chunk.get("error"):
+                # OpenRouter and some proxies report upstream failures inside a 200 stream.
+                raise stream_error(self.provider, chunk["error"])
             usage.update(_usage(chunk.get("usage")))
             for choice in chunk.get("choices") or []:
                 delta = choice.get("delta") or {}

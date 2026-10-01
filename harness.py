@@ -20,6 +20,7 @@ from livecode.activity_log import (
     describe_turn_complete,
     describe_turn_start,
 )
+from livecode import agent_settings
 from livecode.model_pricing import estimate_usage_cost_usd
 from livecode.compaction.full_replace import fit_messages_for_summarizer
 from livecode.context import (
@@ -47,9 +48,6 @@ from livecode.prompts import (
     EXPLORATION_STREAK_READ_ONLY_NUDGE_TEMPLATE,
     LIVECODE_ASK_MODE_PROMPT,
     LIVECODE_CODEBASE_RECOVERY_PROMPT,
-    LIVECODE_IN_TURN_COMPACT_RATIO,
-    LIVECODE_PLAN_BUILD_PREFIX,
-    LIVECODE_PLAN_MODE_PROMPT,
     LIVECODE_PLAN_REENTRY_REMINDER_TEMPLATE,
     LIVECODE_STRUCTURED_OUTPUT_REMINDER,
     ITERATION_BUDGET_NUDGE_TEMPLATE,
@@ -75,16 +73,16 @@ from livecode.prompts import (
     STATIONARITY_HARD_STOP,
     STATIONARITY_NUDGE_AFTER,
     STATIONARITY_NUDGE_TEMPLATE,
-    SUBAGENT_MAX_ITERATIONS,
     TEST_FAILURE_NUDGE_AFTER,
     TEST_FAILURE_NUDGE_TEMPLATE,
     EDIT_NO_MATCH_NUDGE_AFTER,
     EDIT_NO_MATCH_NUDGE_TEMPLATE,
+    build_plan_build_prefix,
+    build_plan_mode_prompt,
     build_subagent_system_prompt,
     build_system_prompt,
     build_turn_context_block,
     iteration_budget_nudge_points,
-    max_iterations_for_mode,
 )
 from livecode.intelligent_classifier import (
     describe_intelligent_classification,
@@ -615,10 +613,11 @@ _POLLING_TOOLS = frozenset({"command_status"})
 
 
 class _IdenticalToolCallRun(_StreakTracker):
-    def __init__(self) -> None:
+    def __init__(self, hard_stop: int = STATIONARITY_HARD_STOP) -> None:
         super().__init__()
         self.last_signature: str | None = None
         self.tool_name = ""
+        self.hard_stop = hard_stop
 
     def observe(self, signature: str, tool_name: str) -> int:
         if tool_name in _POLLING_TOOLS:
@@ -635,7 +634,7 @@ class _IdenticalToolCallRun(_StreakTracker):
         return self._take_nudge(STATIONARITY_NUDGE_AFTER)
 
     def should_hard_stop(self) -> bool:
-        return self.run_len >= STATIONARITY_HARD_STOP
+        return self.run_len >= self.hard_stop
 
 _SEARCH_SCATTER_TOOLS = frozenset({"grep_repo", "glob_files", "find_files"})
 
@@ -647,6 +646,20 @@ _CONTEXT_OVERFLOW_MARKERS = (
     "prompt is too long",
     "input is too long",
     "reduce the length",
+    "exceed context limit",
+    "exceeds the context",
+    "context window",
+    "maximum number of tokens",
+    "input token count",
+)
+
+# Provider errors that mean the tool-call / tool-result pairing in the history is malformed.
+_TOOL_SEQUENCE_MARKERS = (
+    ("tool_calls", "role"),
+    ("tool_use", "tool_result"),
+    ("tool_use_id",),
+    ("function response", "function call"),
+    ("function_response",),
 )
 
 _READ_ONLY_TOOLS = READ_ONLY_TOOL_NAMES
@@ -1112,16 +1125,36 @@ def _tool_call_read_only_for_parallel(tc: dict, enabled_servers: set[str]) -> bo
     return classify_mcp_tool_effect(server_name, tool, arguments).effect == MCP_EFFECT_READ
 
 
-def _memory_upkeep(state_path: str, session_id: str, history: list, model: str, call_summarize, logger=None) -> None:
+def _memory_upkeep(
+    state_path: str,
+    session_id: str,
+    history: list,
+    model: str,
+    call_summarize,
+    logger=None,
+    extract: bool = True,
+    consolidate_hours: float | bool = True,
+) -> None:
+    """Extracts durable notes from the conversation, then folds session logs into MEMORY.md.
+    consolidate_hours is the minimum gap between consolidations (True keeps the default; False skips)."""
+    if extract:
+        try:
+            result = maybe_flush_session(state_path, session_id, history, model=model, call_summarize=call_summarize)
+            if logger and result and result.get("status") == "written":
+                _ide_log(logger, "info", "memory saved", f"chars={result.get('chars')}", sid=_log_session_id(session_id))
+        except Exception:
+            if logger:
+                _ide_log(logger, "debug", "memory flush skipped", sid=_log_session_id(session_id), exc_info=True)
+    if consolidate_hours is False:
+        return
     try:
-        result = maybe_flush_session(state_path, session_id, history, model=model, call_summarize=call_summarize)
-        if logger and result and result.get("status") == "written":
-            _ide_log(logger, "info", "memory saved", f"chars={result.get('chars')}", sid=_log_session_id(session_id))
-    except Exception:
-        if logger:
-            _ide_log(logger, "debug", "memory flush skipped", sid=_log_session_id(session_id), exc_info=True)
-    try:
-        maybe_consolidate_memory(state_path, model=model, call_summarize=call_summarize, logger=logger)
+        maybe_consolidate_memory(
+            state_path,
+            model=model,
+            call_summarize=call_summarize,
+            logger=logger,
+            min_hours=None if consolidate_hours is True else float(consolidate_hours),
+        )
     except Exception:
         if logger:
             _ide_log(logger, "debug", "memory consolidation skipped", sid=_log_session_id(session_id), exc_info=True)
@@ -1138,7 +1171,12 @@ def _plan_tool_batches(
     tool_calls: list,
     enabled_servers: set[str],
     writer_scope: Callable[[dict], FileScope | None] | None = None,
+    *,
+    parallel: bool = True,
+    max_writers: int = MAX_PARALLEL_WRITERS,
 ) -> list[list[dict]]:
+    if not parallel:
+        return [[tc] for tc in tool_calls]
     groups: list[list[dict]] = []
     last_kind = ""
     scopes: list[FileScope] = []
@@ -1151,7 +1189,7 @@ def _plan_tool_batches(
             kind = "writers" if scope else ""
         joins = bool(kind) and kind == last_kind and (
             kind == "read"
-            or (len(groups[-1]) < MAX_PARALLEL_WRITERS and not any(scope.overlaps(other) for other in scopes))
+            or (len(groups[-1]) < max_writers and not any(scope.overlaps(other) for other in scopes))
         )
         if joins:
             groups[-1].append(tc)
@@ -1227,9 +1265,10 @@ def _execute_one_tool(
             "tool_call_id": tool_call_id,
             "tool_name": tool_name,
             "tool_args": tool_args,
-            "result": {"error": parse_error},
+            "result": {"error": parse_error, "error_kind": "invalid_arguments"},
             "compacted": {"error": parse_error},
             "iteration": iteration,
+            "parse_error": True,
         }
 
     mcp_policy = None
@@ -1359,7 +1398,17 @@ def _execute_one_tool(
                 tool=tool_name,
                 args=tool_args,
             )
-        permission_result = wait_for_permission_result(request_id)
+        permission_result = wait_for_permission_result(request_id, cancel_check=cancel_check)
+        if permission_result == "cancelled":
+            stopped = {"error": "Stopped by the user", "cancelled": True}
+            return {
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+                "tool_args": tool_args,
+                "result": stopped,
+                "compacted": stopped,
+                "iteration": iteration,
+            }
         if permission_result in {"expired", "missing"}:
             if emit_progress_fn:
                 emit_progress_fn(
@@ -1421,28 +1470,36 @@ def _execute_one_tool(
 
     if tool_name == "spawn_subagent" and subagent_runner is not None:
         subagent_runner = functools.partial(subagent_runner, agent_id=tool_call_id)
-    result = dispatch_tool(
-        project_path,
-        tool_name,
-        tool_args,
-        repo_grep_fn=repo_grep_fn,
-        repo_read_fn=repo_read_fn,
-        repo_list_fn=repo_list_fn,
-        repo_ast_fn=repo_ast_fn,
-        create_diff_html_fn=create_diff_html_fn,
-        execute_command_pty_fn=execute_command_pty_fn,
-        socketio=socketio,
-        session_id=session_id,
-        socket_id=socket_id,
-        subagent_runner=subagent_runner,
-        files_read_this_turn=files_read_this_turn,
-        workspace=workspace,
-        mcp_binding=(allowed_mcp_tools or {}).get(tool_name),
-        state_path=state_path,
-        checkpoint=checkpoint,
-        cancel_check=cancel_check,
-        browser_agent=browser_agent,
-    )
+    # A tool's own failure becomes an error result the model can react to; only a cancel ends the turn.
+    try:
+        result = dispatch_tool(
+            project_path,
+            tool_name,
+            tool_args,
+            repo_grep_fn=repo_grep_fn,
+            repo_read_fn=repo_read_fn,
+            repo_list_fn=repo_list_fn,
+            repo_ast_fn=repo_ast_fn,
+            create_diff_html_fn=create_diff_html_fn,
+            execute_command_pty_fn=execute_command_pty_fn,
+            socketio=socketio,
+            session_id=session_id,
+            socket_id=socket_id,
+            subagent_runner=subagent_runner,
+            files_read_this_turn=files_read_this_turn,
+            workspace=workspace,
+            mcp_binding=(allowed_mcp_tools or {}).get(tool_name),
+            state_path=state_path,
+            checkpoint=checkpoint,
+            cancel_check=cancel_check,
+            browser_agent=browser_agent,
+        )
+    except TurnCancelled:
+        raise
+    except Exception as exc:
+        result = {"error": f"{tool_name} failed: {type(exc).__name__}: {str(exc)[:500]}", "error_kind": "tool_exception"}
+    if not isinstance(result, dict):
+        result = {"error": f"{tool_name} returned no result", "error_kind": "tool_exception"}
     if tool_name in MUTATING_TOOL_NAMES:
         invalidate_workspace_index()
     compacted = compact_tool_result_for_llm(tool_name, result)
@@ -1513,8 +1570,9 @@ def _approved_plan_block(plan_file: str) -> str:
         plan = plan_store.read_plan(plan_file)
     except (FileNotFoundError, ValueError, OSError):
         return ""
+    prefix = build_plan_build_prefix(verify=bool(agent_settings.get("plan_build_verify")))
     return (
-        f"{LIVECODE_PLAN_BUILD_PREFIX}\n\n"
+        f"{prefix}\n\n"
         f'<approved_plan file="{plan["file"]}" title="{plan["title"]}">\n'
         f"{plan['body']}\n"
         "</approved_plan>"
@@ -1587,6 +1645,11 @@ def run_livecode_turn(
 
     mode = normalize_mode(mode)
     turn_started = cancel_since if cancel_since is not None else time.monotonic()
+    # One snapshot per turn: a settings change applies from the next turn.
+    cfg = agent_settings.snapshot()
+    nudges_on = bool(cfg["nudges"])
+    in_turn_compact_ratio = cfg["auto_compact_percent"] / 100.0
+    subagent_max_iterations = int(cfg["subagent_max_iterations"])
 
     def _turn_cancelled() -> bool:
         return is_cancelled(session_id, since=turn_started)
@@ -1644,11 +1707,12 @@ def run_livecode_turn(
         try:
             prior = load_session(state_path, session_id).get("messages") or []
             history = list(prior) + msgs
-            maybe_autosave_session(state_path, session_id, history)
+            if cfg["memory_autosave"]:
+                maybe_autosave_session(state_path, session_id, history)
         except Exception:
             if logger:
                 _ide_log(logger, "debug", "memory autosave skipped", sid=_log_session_id(session_id), exc_info=True)
-        if call_summarize and history:
+        if call_summarize and history and (cfg["memory_auto_extract"] or cfg["memory_consolidate"]):
             try:
                 upkeep_model = _pick_iteration_model(
                     user_model,
@@ -1657,7 +1721,11 @@ def run_livecode_turn(
                     escalate=False,
                     content_chars=_estimate_content_chars(),
                 )
-                _launch_memory_upkeep(state_path, session_id, history, upkeep_model, call_summarize, logger)
+                _launch_memory_upkeep(
+                    state_path, session_id, history, upkeep_model, call_summarize, logger,
+                    cfg["memory_auto_extract"],
+                    cfg["memory_consolidate"] and float(cfg["memory_consolidate_hours"]),
+                )
             except Exception:
                 if logger:
                     _ide_log(logger, "debug", "memory upkeep skipped", sid=_log_session_id(session_id), exc_info=True)
@@ -1919,7 +1987,7 @@ def run_livecode_turn(
         except Exception:
             own_browser_tabs = False
 
-        def _mini_turn(project_path: str, question: str, session_id: str = "", max_iterations: int = SUBAGENT_MAX_ITERATIONS, **kwargs):
+        def _mini_turn(project_path: str, question: str, session_id: str = "", max_iterations: int = 0, **kwargs):
             del kwargs, session_id
             child_messages = [
                 {"role": "system", "content": build_subagent_system_prompt(
@@ -1952,8 +2020,8 @@ def run_livecode_turn(
                 if any((item.get("function") or {}).get("name") == name for item in child_tools)
             }
             enabled_servers = {str(server) for server in (mcp_servers or []) if str(server).strip()}
-            budget = int(working_context_tokens(sub_model) * LIVECODE_IN_TURN_COMPACT_RATIO)
-            steps = max(1, min(int(max_iterations or SUBAGENT_MAX_ITERATIONS), SUBAGENT_MAX_ITERATIONS))
+            budget = int(working_context_tokens(sub_model) * in_turn_compact_ratio)
+            steps = max(1, min(int(max_iterations or subagent_max_iterations), subagent_max_iterations))
             answer = ""
             sub_usage_by_model: dict[str, dict[str, int]] = {}
 
@@ -1975,8 +2043,25 @@ def run_livecode_turn(
                     answer = answer or "Stopped by the user."
                     break
                 child_messages = compact_stale_tool_messages(child_messages, max_input_tokens=budget)
-                resp = _call(sanitize_messages_for_api(child_messages), child_tools)
+                try:
+                    resp = _call(sanitize_messages_for_api(child_messages), child_tools)
+                except TurnCancelled:
+                    answer = answer or "Stopped by the user."
+                    break
+                except Exception as sub_err:
+                    # Report what was learned so far instead of losing the subagent's work.
+                    if logger:
+                        _ide_log(logger, "warning", "subagent model call failed", str(sub_err)[:200], exc_info=True)
+                    answer = (answer + "\n\n" if answer else "") + f"Subagent stopped early after {_step} steps: {str(sub_err)[:300]}"
+                    break
                 tcs = resp.get("tool_calls")
+                if tcs:
+                    seen_ids: set[str] = set()
+                    for tc in tcs:
+                        if isinstance(tc, dict) and (not tc.get("id") or tc["id"] in seen_ids):
+                            tc["id"] = f"call_{uuid.uuid4().hex[:24]}"
+                        if isinstance(tc, dict):
+                            seen_ids.add(tc["id"])
                 if not tcs:
                     answer = resp.get("content") or answer
                     break
@@ -2037,7 +2122,7 @@ def run_livecode_turn(
                     return item
 
                 items = []
-                for group in _plan_tool_batches(tcs, enabled_servers):
+                for group in _plan_tool_batches(tcs, enabled_servers, parallel=bool(cfg["parallel_tools"])):
                     if len(group) > 1:
                         with ThreadPoolExecutor(max_workers=min(len(group), 8)) as pool:
                             items.extend(pool.map(_run_child_call, group))
@@ -2075,7 +2160,7 @@ def run_livecode_turn(
                 parent_session_id=parent_sid or session_id,
                 run_turn_fn=_mini_turn,
                 read_only=read_only,
-                max_iterations=SUBAGENT_MAX_ITERATIONS,
+                max_iterations=subagent_max_iterations,
             )
         finally:
             if enable_browser_for_turn:
@@ -2110,7 +2195,12 @@ def run_livecode_turn(
             return LIVECODE_ASK_MODE_PROMPT
         if mode != "plan":
             return ""
-        block = LIVECODE_PLAN_MODE_PROMPT
+        block = build_plan_mode_prompt(
+            ask_questions=bool(cfg["plan_ask_questions"]),
+            diagrams=bool(cfg["plan_diagrams"]),
+            tests_section=bool(cfg["plan_tests_section"]),
+            detail=str(cfg["plan_detail"]),
+        )
         if plan_file:
             from livecode import plan_store
 
@@ -2128,8 +2218,15 @@ def run_livecode_turn(
     prefetched: dict[str, Any] = {}
 
     def _memory_context_for(query: str) -> str:
+        if not cfg["memory_enabled"]:
+            return ""
         try:
-            return build_memory_context(state_path, query, min_score=0.0)
+            return build_memory_context(
+                state_path,
+                query,
+                max_results=int(cfg["memory_max_results"]),
+                min_score=float(cfg["memory_min_score"]),
+            )
         except Exception:
             if logger:
                 _ide_log(logger, "debug", "memory context failed", sid=_log_session_id(session_id), exc_info=True)
@@ -2177,6 +2274,9 @@ def run_livecode_turn(
             project_path,
             has_project_rules=bool(rules_reminder),
         )
+        custom = str(cfg["custom_instructions"] or "").strip()
+        if custom:
+            system_content = f"{system_content}\n\n## Instructions from the user's LiveCode settings\n{custom}"
         mode_block = _mode_prompt_block()
         if mode_block:
             system_content = f"{system_content}\n\n{mode_block}"
@@ -2256,7 +2356,7 @@ def run_livecode_turn(
     finally:
         prep_pool.shutdown(wait=False)
     escalate = False
-    stationarity = _IdenticalToolCallRun()
+    stationarity = _IdenticalToolCallRun(hard_stop=int(cfg["loop_hard_stop"]) if cfg["loop_guard"] else 10**9)
     search_scatter = _SearchScatterRun()
     directory_drill = _DirectoryDrillRun()
     exploration_streak = _ExplorationStreakRun()
@@ -2315,7 +2415,13 @@ def run_livecode_turn(
             "cache" if from_cache else "built",
         )
 
-    _maybe_session_compact()
+    try:
+        _maybe_session_compact()
+    except Exception:
+        # A rate-limited or failing summarizer must not lose the user's message; the in-turn
+        # squeeze and overflow recovery still keep the request inside the context window.
+        if logger:
+            _ide_log(logger, "warning", "pre-turn compaction failed", sid=_log_session_id(session_id), exc_info=True)
     use_structured_output = wants_structured_json(question)
     mcp_tool_intent = user_requests_mcp_or_tool_use(question)
     web_tool_intent = user_requests_web_lookup(question)
@@ -2351,6 +2457,15 @@ def run_livecode_turn(
     else:
         tools, allowed_mcp_tools = tools_result, {}
     tools = filter_tools_for_mode(tools, mode)
+    disabled_by_settings = set()
+    if not cfg["subagents"]:
+        disabled_by_settings.add("spawn_subagent")
+    if not cfg["memory_agent_writes"] or not cfg["memory_enabled"]:
+        disabled_by_settings.add("update_memory")
+    if mode == "plan" and not cfg["plan_ask_questions"]:
+        disabled_by_settings.add("ask_question")
+    if disabled_by_settings:
+        tools = [t for t in tools if (t.get("function") or {}).get("name") not in disabled_by_settings]
     allowed_mcp_tools = {
         name: binding
         for name, binding in allowed_mcp_tools.items()
@@ -2367,9 +2482,10 @@ def run_livecode_turn(
     codebase_recovery_used = False
     force_tool_choice_required = False
     structured_output_retries = 0
-    max_iterations = max_iterations_for_mode(mode)
+    max_iterations = int(cfg["max_iterations"] if mode == "agent" else cfg["read_only_max_iterations"])
     budget_nudge_points = iteration_budget_nudge_points(max_iterations)
     in_turn_squeezes = 0
+    empty_reply_retries = 0
 
     def _cancelled_finish() -> Generator[str, None, None]:
         stop_note = "Stopped by the user before finishing."
@@ -2379,6 +2495,23 @@ def run_livecode_turn(
         turn_messages = _finalize_turn_persist(stop_note)
         yield f"data: {json.dumps({'done': True, 'cancelled': True, 'answer': stop_note, 'turn_summary': turn_summary, 'turn_messages': turn_messages})}\n\n"
         _emit_complete(len(stop_note), turn_summary)
+
+    def _error_finish(err_msg: str, *, answer: str = "") -> Generator[str, None, None]:
+        # Keeps the turn's history (including edits already on disk) so the next message knows what
+        # happened, then reports the error, or the given answer when the turn ends gracefully.
+        try:
+            turn_summary = build_turn_activity_summary(tool_events)
+            turn_messages = _finalize_turn_persist(answer or f"Stopped by an error: {err_msg[:300]}")
+        except Exception:
+            turn_summary, turn_messages = "", []
+            if logger:
+                _ide_log(logger, "debug", "error-path persist failed", sid=_log_session_id(session_id), exc_info=True)
+        if answer:
+            yield f"data: {json.dumps({'done': True, 'answer': answer, 'turn_summary': turn_summary, 'turn_messages': turn_messages})}\n\n"
+            _emit_answer_done(answer)
+            _emit_complete(len(answer), turn_summary)
+            return
+        yield f"data: {json.dumps({'error': err_msg, 'turn_summary': turn_summary, 'turn_messages': turn_messages})}\n\n"
 
     try:
         for iteration in range(1, max_iterations + 1):
@@ -2442,7 +2575,7 @@ def run_livecode_turn(
                 _emit_complete(len(full_answer), turn_summary)
                 return
 
-            if stationarity.take_nudge():
+            if cfg["loop_guard"] and stationarity.take_nudge():
                 nudge_text = STATIONARITY_NUDGE_TEMPLATE.format(
                     tool_name=stationarity.tool_name,
                     run_len=stationarity.run_len,
@@ -2460,7 +2593,7 @@ def run_livecode_turn(
                         f"run={stationarity.run_len}",
                     )
 
-            if search_scatter.take_nudge():
+            if nudges_on and search_scatter.take_nudge():
                 nudge_text = SEARCH_SCATTER_NUDGE_TEMPLATE.format(run_len=search_scatter.run_len)
                 nudge = {"role": "user", "content": nudge_text, "internal": True}
                 messages.append(nudge)
@@ -2468,7 +2601,7 @@ def run_livecode_turn(
                 if logger:
                     _ide_log(logger, "info", "nudge search-scatter", f"run={search_scatter.run_len}")
 
-            if directory_drill.take_nudge():
+            if nudges_on and directory_drill.take_nudge():
                 nudge_text = DIRECTORY_DRILL_NUDGE_TEMPLATE.format(run_len=directory_drill.run_len)
                 nudge = {"role": "user", "content": nudge_text, "internal": True}
                 messages.append(nudge)
@@ -2476,7 +2609,7 @@ def run_livecode_turn(
                 if logger:
                     _ide_log(logger, "info", "nudge directory-drill", f"run={directory_drill.run_len}")
 
-            if exploration_streak.take_nudge():
+            if nudges_on and exploration_streak.take_nudge():
                 streak_template = (
                     EXPLORATION_STREAK_NUDGE_TEMPLATE if mode == "agent"
                     else EXPLORATION_STREAK_READ_ONLY_NUDGE_TEMPLATE
@@ -2490,7 +2623,7 @@ def run_livecode_turn(
                 if logger:
                     _ide_log(logger, "info", "nudge exploration-streak", f"run={exploration_streak.run_len}")
 
-            if edit_no_match.take_nudge():
+            if nudges_on and edit_no_match.take_nudge():
                 nudge_text = EDIT_NO_MATCH_NUDGE_TEMPLATE.format(run_len=edit_no_match.run_len)
                 nudge = {"role": "user", "content": nudge_text, "internal": True}
                 messages.append(nudge)
@@ -2499,7 +2632,7 @@ def run_livecode_turn(
                 if logger:
                     _ide_log(logger, "info", "nudge edit-no-match", f"run={edit_no_match.run_len}")
 
-            if mode == "agent" and todo_nudger.iters_since >= TODO_NUDGE_AFTER:
+            if nudges_on and mode == "agent" and todo_nudger.iters_since >= TODO_NUDGE_AFTER:
                 _multistep = (
                     needs_code_change(question, classification)
                     or not classification.get("chat_only")
@@ -2529,7 +2662,8 @@ def run_livecode_turn(
                     )
 
             if (
-                last_edit_iteration is not None
+                nudges_on
+                and last_edit_iteration is not None
                 and not post_edit_nudged
                 and iteration - last_edit_iteration >= POST_EDIT_COMPLETION_NUDGE_AFTER
             ):
@@ -2540,7 +2674,7 @@ def run_livecode_turn(
                 if logger:
                     _ide_log(logger, "info", "nudge post-edit", f"iter={iteration}")
 
-            if consecutive_test_failures >= TEST_FAILURE_NUDGE_AFTER and not test_failure_nudged:
+            if nudges_on and consecutive_test_failures >= TEST_FAILURE_NUDGE_AFTER and not test_failure_nudged:
                 nudge = {"role": "user", "content": TEST_FAILURE_NUDGE_TEMPLATE, "internal": True}
                 messages.append(nudge)
                 _persist_msg(nudge)
@@ -2574,7 +2708,7 @@ def run_livecode_turn(
                 yield f"data: {json.dumps({'error': err})}\n\n"
                 return
 
-            budget = int(working_context_tokens(iteration_model) * LIVECODE_IN_TURN_COMPACT_RATIO)
+            budget = int(working_context_tokens(iteration_model) * in_turn_compact_ratio)
             messages = compact_stale_tool_messages(messages, max_input_tokens=budget)
 
             pending = drain_interjections(session_id)
@@ -2690,11 +2824,7 @@ def run_livecode_turn(
                         exc_info=True,
                     )
                 low_err = err_msg.lower()
-                is_tool_seq_err = (
-                    "tool_calls" in low_err
-                    and "role" in low_err
-                    and "tool" in low_err
-                )
+                is_tool_seq_err = any(all(word in low_err for word in words) for words in _TOOL_SEQUENCE_MARKERS)
                 if is_tool_seq_err and not message_seq_retried:
                     message_seq_retried = True
                     messages = sanitize_messages_for_api(_build_base_messages(summary) + list(turn_persist[1:]))
@@ -2713,9 +2843,17 @@ def run_livecode_turn(
                     if logger:
                         _ide_log(logger, "warning", "context overflow: squeezed turn", f"budget={squeeze_budget}", sid=_log_session_id(session_id))
                     continue
-                if context_overflow and call_summarize and not context_retried:
+                if context_overflow and not context_retried:
                     context_retried = True
-                    if _maybe_session_compact(force=True):
+                    try:
+                        compacted_session = bool(call_summarize) and _maybe_session_compact(force=True)
+                    except Exception:
+                        compacted_session = False
+                        if logger:
+                            _ide_log(logger, "warning", "forced compaction failed", sid=_log_session_id(session_id), exc_info=True)
+                    # Even without a session compaction (e.g. the first turn of a chat), rebuilding from the
+                    # system prompt plus a summary of this turn's progress drops the bulky tool output.
+                    if compacted_session or tool_events:
                         messages = _build_base_messages(summary)
                         progress_note = build_turn_activity_summary(tool_events)
                         if progress_note:
@@ -2730,10 +2868,9 @@ def run_livecode_turn(
                             })
                         continue
                 if context_overflow:
-                    msg = "Query requires too much context. Try a more specific question."
-                    yield f"data: {json.dumps({'done': True, 'answer': msg})}\n\n"
+                    yield from _error_finish(err_msg, answer="Query requires too much context. Try a more specific question, or start a new chat.")
                     return
-                yield f"data: {json.dumps({'error': err_msg})}\n\n"
+                yield from _error_finish(err_msg)
                 return
 
             finally:
@@ -2792,9 +2929,14 @@ def run_livecode_turn(
 
             tool_calls = response.get("tool_calls")
             if tool_calls:
+                seen_call_ids: set[str] = set()
                 for tc in tool_calls:
-                    if isinstance(tc, dict) and not tc.get("id"):
+                    if not isinstance(tc, dict):
+                        continue
+                    # Missing or repeated ids would collapse results and make the provider reject the history.
+                    if not tc.get("id") or tc["id"] in seen_call_ids:
                         tc["id"] = f"call_{uuid.uuid4().hex[:24]}"
+                    seen_call_ids.add(tc["id"])
                 thought_content = (response.get("reasoning_content") or "").strip()
                 narration = (response.get("content") or "").strip()
                 duration_ms = step_stream.thinking_duration_ms()
@@ -2832,7 +2974,13 @@ def run_livecode_turn(
                 _persist_msg(assistant_msg)
 
                 enabled_server_names = {str(server) for server in (mcp_servers or []) if str(server).strip()}
-                tool_groups = _plan_tool_batches(tool_calls, enabled_server_names, writer_scope=_writer_scope_for_call)
+                tool_groups = _plan_tool_batches(
+                    tool_calls,
+                    enabled_server_names,
+                    writer_scope=_writer_scope_for_call,
+                    parallel=bool(cfg["parallel_tools"]),
+                    max_writers=int(cfg["max_parallel_writers"]),
+                )
                 if logger and len(tool_calls) > 1:
                     names = [tc.get("function", {}).get("name") for tc in tool_calls]
                     _ide_log(
@@ -2943,7 +3091,7 @@ def run_livecode_turn(
                         return None
 
                 def _flush_post_edit_diagnostics() -> bool:
-                    if not LIVECODE_VERIFY_AFTER_EDIT or not edits_to_verify:
+                    if not (LIVECODE_VERIFY_AFTER_EDIT and cfg["verify_after_edit"]) or not edits_to_verify:
                         return False
                     latest: dict[str, tuple[str, dict]] = {}
                     for tool_name, file_path, result in edits_to_verify:
@@ -3007,10 +3155,14 @@ def run_livecode_turn(
                         if logger:
                             _ide_log(logger, "exception", "Failed to persist tool artifact", sid=_log_session_id(session_id), exc_info=True)
 
-                    stationarity.observe(
-                        _tool_call_signature(tool_name, tool_args),
-                        tool_name,
-                    )
+                    if item.get("parse_error"):
+                        # Unparseable arguments all hash alike; they are not a repeated call.
+                        stationarity._reset()
+                    else:
+                        stationarity.observe(
+                            _tool_call_signature(tool_name, tool_args),
+                            tool_name,
+                        )
                     search_scatter.observe(tool_name)
                     directory_drill.observe(tool_name, tool_args)
                     edit_no_match.observe(tool_name, result)
@@ -3325,6 +3477,37 @@ def run_livecode_turn(
                 )
             thinking_start = None
 
+            # An empty reply, or one cut off by the output-token limit, is not a finished turn: ask the
+            # model to carry on (twice at most) instead of ending mid-task.
+            finish_reason = str(response.get("finish_reason") or "").lower()
+            truncated = finish_reason in ("length", "max_tokens")
+            if (
+                (truncated or not content.strip())
+                and empty_reply_retries < 2
+                and iteration < max_iterations - CLOSURE_ITERATIONS
+                and not _turn_cancelled()
+            ):
+                empty_reply_retries += 1
+                if content.strip():
+                    step_stream.close_content(role="narration", text=content, thought_content=reasoning_only)
+                    partial = {"role": "assistant", "content": content}
+                    messages.append(partial)
+                    _persist_msg(partial)
+                    note_text = (
+                        "Your reply was cut off by the output-token limit. Continue exactly where you stopped, "
+                        "without repeating what you already wrote. If you were about to call a tool, call it now."
+                    )
+                else:
+                    note_text = (
+                        "Your last reply was empty"
+                        + (" (the output-token limit was reached)" if truncated else "")
+                        + ". Continue the task: call the next tool, or give your final answer."
+                    )
+                messages.append({"role": "user", "content": note_text, "internal": True})
+                if logger:
+                    _ide_log(logger, "warning", "empty or truncated reply", f"finish={finish_reason or '-'}", f"retry={empty_reply_retries}", sid=_log_session_id(session_id))
+                continue
+
             if (
                 iteration == 1
                 and not codebase_recovery_used
@@ -3356,6 +3539,7 @@ def run_livecode_turn(
 
             if (
                 LIVECODE_TODO_GATE_ENABLED
+                and cfg["todo_gate"]
                 and mode == "agent"
                 and todo_gate_fires < LIVECODE_TODO_GATE_MAX_FIRES
             ):
@@ -3470,6 +3654,9 @@ def run_livecode_turn(
         _emit_complete(len(full_answer), turn_summary)
 
     except Exception as e:
+        if isinstance(e, TurnCancelled) or _turn_cancelled():
+            yield from _cancelled_finish()
+            return
         if logger:
             _ide_log(logger, "exception", "Harness error", sid=_log_session_id(session_id), exc_info=True)
-        yield f"data: {json.dumps({'error': str(e)})}\n\n"
+        yield from _error_finish(str(e) or type(e).__name__)

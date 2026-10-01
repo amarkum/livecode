@@ -1386,6 +1386,177 @@ def register_livecode_routes(app, socketio, rt):
             return _browser_failure(e)
         return jsonify({"success": True, **status})
 
+    @app.route("/livecode/browser/cdp/probe", methods=["POST"])
+    def livecode_browser_cdp_probe():
+        data = request.get_json(silent=True) or {}
+        return jsonify({"success": True, **livecode_browser.probe_cdp(str(data.get("cdp_url") or ""))})
+
+    @app.route("/livecode/browser/cdp/detect", methods=["GET"])
+    def livecode_browser_cdp_detect():
+        return jsonify({"success": True, **livecode_browser.detect_cdp()})
+
+    @app.route("/livecode/browser/cdp/launch", methods=["POST"])
+    def livecode_browser_cdp_launch():
+        data = request.get_json(silent=True) or {}
+        try:
+            status = livecode_browser.launch_debug_chrome(data.get("port") or livecode_browser.DEFAULT_DEBUG_PORT)
+        except Exception as e:
+            return _browser_failure(e)
+        return jsonify({"success": True, **status})
+
+    @app.route("/livecode/agent/settings", methods=["GET", "POST"])
+    def livecode_agent_settings():
+        from livecode import agent_settings
+
+        if request.method == "GET":
+            return jsonify({"success": True, **agent_settings.status()})
+        try:
+            return jsonify({"success": True, **agent_settings.update(request.get_json(silent=True) or {})})
+        except agent_settings.SettingsError as e:
+            return jsonify({"error": str(e)}), 400
+        except OSError as e:
+            return jsonify({"error": f"Could not save the setting: {e.strerror or e}"}), 500
+
+    @app.route("/livecode/agent/settings/reset", methods=["POST"])
+    def livecode_agent_settings_reset():
+        from livecode import agent_settings
+
+        data = request.get_json(silent=True) or {}
+        try:
+            return jsonify({"success": True, **agent_settings.reset(str(data.get("group") or ""))})
+        except agent_settings.SettingsError as e:
+            return jsonify({"error": str(e)}), 400
+        except OSError as e:
+            return jsonify({"error": f"Could not reset the settings: {e.strerror or e}"}), 500
+
+    def _memory_state_path(data):
+        project_path = str(data.get("project_path") or request.args.get("project_path") or "").strip()
+        if not project_path:
+            raise ValueError("Open a project to see its memory.")
+        workspace_payload = data.get("workspace") if isinstance(data.get("workspace"), dict) else None
+        return _livecode_state_path(os.path.abspath(os.path.expanduser(project_path)), workspace_payload)
+
+    def _memory_status(state_path):
+        from livecode.memory.storage import list_memory_files, memory_md_path, memory_root, read_memory_md
+
+        files = list_memory_files(state_path)
+        sessions = [f for f in files if f.get("source") == "session"]
+        size = 0
+        for f in files:
+            try:
+                size += os.path.getsize(f["abs_path"])
+            except OSError:
+                pass
+        memory_md = read_memory_md(state_path)
+        return {
+            "root": memory_root(state_path, create=False),
+            "memory_path": memory_md_path(state_path, create=False),
+            "memory_chars": len(memory_md),
+            "memory_exists": bool(memory_md),
+            "session_logs": len(sessions),
+            "recent_logs": [{"name": os.path.basename(f["abs_path"]), "path": f["abs_path"]} for f in sessions[-8:][::-1]],
+            "bytes": size,
+        }
+
+    @app.route("/livecode/memory/status", methods=["GET", "POST"])
+    def livecode_memory_status():
+        data = (request.get_json(silent=True) or {}) if request.method == "POST" else {}
+        try:
+            state_path = _memory_state_path(data)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        return jsonify({"success": True, **_memory_status(state_path)})
+
+    @app.route("/livecode/memory/file", methods=["POST"])
+    def livecode_memory_file():
+        # Returns MEMORY.md's path, creating an empty one so it opens in the editor.
+        from livecode.memory.storage import memory_md_path, write_text_atomic
+
+        data = request.get_json(silent=True) or {}
+        try:
+            state_path = _memory_state_path(data)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        path = memory_md_path(state_path, create=True)
+        if not os.path.isfile(path):
+            try:
+                write_text_atomic(path, "## Notes\n\n")
+            except OSError as e:
+                return jsonify({"error": f"Could not create MEMORY.md: {e.strerror or e}"}), 500
+        return jsonify({"success": True, "path": path})
+
+    @app.route("/livecode/memory/reindex", methods=["POST"])
+    def livecode_memory_reindex():
+        from livecode.memory import embed_missing_chunks, reindex_all
+
+        data = request.get_json(silent=True) or {}
+        try:
+            state_path = _memory_state_path(data)
+            totals = reindex_all(state_path)
+            embed_missing_chunks(state_path)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        except Exception as e:
+            LIVECODE_LOGGER.warning("memory reindex failed", exc_info=True)
+            return jsonify({"error": f"Could not rebuild the memory index: {e}"}), 500
+        return jsonify({"success": True, "totals": totals, **_memory_status(state_path)})
+
+    @app.route("/livecode/memory/consolidate", methods=["POST"])
+    def livecode_memory_consolidate():
+        from livecode.memory import run_consolidation
+
+        data = request.get_json(silent=True) or {}
+        try:
+            state_path = _memory_state_path(data)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        try:
+            model = _llm_client.pick_model(None, task="fast")
+        except Exception as e:
+            return jsonify({"error": f"Add a model in Settings > Models first ({e})."}), 400
+        try:
+            result = run_consolidation(
+                state_path,
+                model=model,
+                call_summarize=lambda m, msgs: call_azure_openai_non_streaming(m, msgs, timeout=(30, 180)) or "",
+                min_hours=0,
+                min_new_logs=1,
+            )
+        except Exception as e:
+            LIVECODE_LOGGER.warning("memory consolidation failed", exc_info=True)
+            return jsonify({"error": f"Consolidation failed: {e}"}), 500
+        return jsonify({"success": True, "result": result, **_memory_status(state_path)})
+
+    @app.route("/livecode/memory/clear", methods=["POST"])
+    def livecode_memory_clear():
+        import shutil
+
+        from livecode.memory.storage import memory_lock, memory_root
+
+        data = request.get_json(silent=True) or {}
+        scope = str(data.get("scope") or "all")
+        if scope not in ("all", "sessions"):
+            return jsonify({"error": "scope is all or sessions."}), 400
+        try:
+            state_path = _memory_state_path(data)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        root = memory_root(state_path, create=False)
+        try:
+            with memory_lock(state_path):
+                if os.path.isdir(root):
+                    target = os.path.join(root, "sessions") if scope == "sessions" else root
+                    if os.path.isdir(target):
+                        shutil.rmtree(target)
+                    if scope == "sessions":
+                        index = os.path.join(root, "index.sqlite")
+                        for suffix in ("", "-wal", "-shm"):
+                            if os.path.exists(index + suffix):
+                                os.remove(index + suffix)
+        except OSError as e:
+            return jsonify({"error": f"Could not clear memory: {e.strerror or e}"}), 500
+        return jsonify({"success": True, **_memory_status(state_path)})
+
     @app.route("/livecode/browser/shot/<storage_key>/<shot_file>", methods=["GET"])
     def livecode_browser_shot(storage_key, shot_file):
         shot_id = shot_file[:-4] if shot_file.endswith(".jpg") else ""

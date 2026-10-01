@@ -228,7 +228,12 @@ PAGE = """<!doctype html>
 <script>
   try {
     var saved = localStorage.getItem("livecode-theme");
+    var prefs = JSON.parse(localStorage.getItem("livecode_settings_v1") || "{}") || {};
+    if (prefs.themeFollowSystem && window.matchMedia) {
+      saved = window.matchMedia("(prefers-color-scheme: dark)").matches ? (prefs.themeDark || "dark") : (prefs.themeLight || "white");
+    }
     if (["dark", "white", "black", "pink"].indexOf(saved) >= 0) document.body.className = saved + "-theme";
+    if (prefs.reduceMotion) document.body.classList.add("lc-reduce-motion");
   } catch (e) {}
 </script>
 __SECTION__
@@ -238,6 +243,7 @@ __SECTION__
 <script src="/asset/material-icons.js"></script>
 <script src="/host/static/livecode-host.js"></script>
 <script src="/livecode/static/js/livecode.js"></script>
+<script src="/livecode/static/js/livecode-settings.js"></script>
 <script src="/livecode/static/js/livecode-ts-intel.js"></script>
 <script src="/livecode/static/js/livecode-lsp.js"></script>
 <script>
