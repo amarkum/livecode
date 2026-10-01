@@ -2354,16 +2354,15 @@ function initializeIDEEditor() {
       theme: "livecode-dynamic-theme",
       automaticLayout: true,
       fixedOverflowWidgets: true,
-      minimap: {
-        enabled: false
-      },
+      minimap: _livecodeEditorOptionsFromSettings().minimap,
       scrollBeyondLastLine: false,
-      wordWrap: "on",
-      fontSize: 13,
+      wordWrap: _livecodeEditorOptionsFromSettings().wordWrap,
+      fontSize: _livecodeEditorOptionsFromSettings().fontSize,
+      lineNumbers: _livecodeEditorOptionsFromSettings().lineNumbers,
       fontLigatures: false,
       fontWeight: "400",
       fontFamily: window.LIVECODE_MONACO_FONT || "'LivecodeMono', 'Prima Sans Mono W01 Roman', 'PrimaSansMonoW01-Roman', Consolas, 'Liberation Mono', 'Courier New', ui-monospace, SFMono-Regular, Menlo, Monaco, monospace",
-      tabSize: 4,
+      tabSize: Number(_livecodeSettingsGet("editorTabSize")) || 4,
       insertSpaces: true,
       renderWhitespace: "boundary",
       cursorBlinking: "solid",
@@ -2388,6 +2387,12 @@ function initializeIDEEditor() {
         handleMouseWheel: true
       }
     });
+    if (monaco.editor.onDidCreateModel && !window._livecodeTabSizeHooked) {
+      window._livecodeTabSizeHooked = true;
+      monaco.editor.onDidCreateModel(function(model) {
+        try { model.updateOptions({ tabSize: Number(_livecodeSettingsGet("editorTabSize")) || 4 }); } catch (e) {}
+      });
+    }
     try {
       monaco.editor.remeasureFonts();
     } catch (e) {}
@@ -2966,11 +2971,13 @@ function initializeTerminalForTab(tabData, container) {
   document.fonts.ready.then(() => {
     Promise.resolve().finally(() => {
 
+      const termOpts = _livecodeTerminalOptionsFromSettings();
       const terminal = new Terminal({
-        cursorBlink: true,
-        cursorStyle: "bar",
+        cursorBlink: termOpts.cursorBlink,
+        cursorStyle: termOpts.cursorStyle,
+        scrollback: termOpts.scrollback,
         fontFamily: fontStack,
-        fontSize: 13,
+        fontSize: termOpts.fontSize,
         lineHeight: 1.2,
         fontWeight: "normal",
         letterSpacing: 0,
@@ -13108,11 +13115,34 @@ const _LIVECODE_SETTING_DEFAULTS = {
   browserTools: true,
   conversationDensity: "detailed",
   stepGrouping: "grouped",
+  editorFontSize: 13,
+  editorTabSize: 4,
+  editorWordWrap: true,
+  editorMinimap: false,
+  editorLineNumbers: true,
+  terminalFontSize: 13,
+  terminalCursorStyle: "bar",
+  terminalCursorBlink: true,
+  terminalScrollback: 5000,
 };
 
+// Settings are kept on the server (~/.livecode/settings.json). localStorage is a mirror, so the first paint
+// and a server that is briefly away still see the last values; values from before the server kept them are
+// moved there on the first load.
+let _livecodeServerSettings = null;
+let _livecodeSettingsPending = {};
+let _livecodeSettingsSaveTimer = null;
+
+function _livecodeSettingsLocal() {
+  try { return JSON.parse(localStorage.getItem(LIVECODE_SETTINGS_STORAGE_KEY) || "{}") || {}; } catch (e) { return {}; }
+}
+
+function _livecodeSettingsMirror(all) {
+  try { localStorage.setItem(LIVECODE_SETTINGS_STORAGE_KEY, JSON.stringify(all)); } catch (e) {}
+}
+
 function _livecodeSettingsAll() {
-  let stored = {};
-  try { stored = JSON.parse(localStorage.getItem(LIVECODE_SETTINGS_STORAGE_KEY) || "{}") || {}; } catch (e) { stored = {}; }
+  const stored = _livecodeServerSettings || _livecodeSettingsLocal();
   return Object.assign({}, _LIVECODE_SETTING_DEFAULTS, stored);
 }
 
@@ -13120,11 +13150,109 @@ function _livecodeSettingsGet(key) {
   return _livecodeSettingsAll()[key];
 }
 
-function _livecodeSettingsSet(key, value) {
-  const all = _livecodeSettingsAll();
-  all[key] = value;
-  try { localStorage.setItem(LIVECODE_SETTINGS_STORAGE_KEY, JSON.stringify(all)); } catch (e) {}
+function _livecodeSettingsFlush() {
+  _livecodeSettingsSaveTimer = null;
+  const updates = _livecodeSettingsPending;
+  _livecodeSettingsPending = {};
+  if (!Object.keys(updates).length) return Promise.resolve();
+  return fetch("/livecode/settings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ settings: updates }),
+  }).then(function(resp) { return resp.json(); }).then(function(data) {
+    if (!data || !data.success) throw new Error((data && data.error) || "Could not save settings");
+    const rejected = Object.keys(data.rejected || {});
+    if (rejected.length) _livecodeShowIdeToast("Setting not saved: " + rejected[0] + " (" + data.rejected[rejected[0]] + ")");
+  }).catch(function(err) {
+    if (window.console && console.warn) console.warn("LiveCode settings save failed", err);
+  });
 }
+
+function _livecodeSettingsSet(key, value) {
+  const stored = Object.assign({}, _livecodeServerSettings || _livecodeSettingsLocal());
+  if (value === null || value === undefined) delete stored[key];
+  else stored[key] = value;
+  if (_livecodeServerSettings) _livecodeServerSettings = stored;
+  _livecodeSettingsMirror(stored);
+  _livecodeSettingsPending[key] = value === undefined ? null : value;
+  if (_livecodeSettingsSaveTimer) clearTimeout(_livecodeSettingsSaveTimer);
+  _livecodeSettingsSaveTimer = setTimeout(_livecodeSettingsFlush, 250);
+  _livecodeApplyEditorTerminalSettings();
+}
+
+function _livecodeLoadServerSettings() {
+  return fetch("/livecode/settings").then(function(resp) { return resp.json(); }).then(function(data) {
+    if (!data || !data.success) return;
+    const server = data.settings || {};
+    const local = _livecodeSettingsLocal();
+    const missing = {};
+    Object.keys(local).forEach(function(key) { if (!(key in server)) missing[key] = local[key]; });
+    _livecodeServerSettings = Object.assign({}, server, missing);
+    if (Object.keys(missing).length) {
+      Object.assign(_livecodeSettingsPending, missing);
+      _livecodeSettingsFlush();
+    }
+    _livecodeSettingsMirror(_livecodeServerSettings);
+    _livecodeApplyEditorTerminalSettings();
+    if (_livecodeSettingsVisible()) _livecodeRenderSettingsPage();
+  }).catch(function() {});
+}
+
+function _livecodeResetAllSettings() {
+  return fetch("/livecode/settings/reset", { method: "POST" }).then(function(resp) { return resp.json(); }).then(function(data) {
+    if (!data || !data.success) throw new Error((data && data.error) || "Could not reset settings");
+    _livecodeServerSettings = {};
+    _livecodeSettingsPending = {};
+    _livecodeSettingsMirror({});
+    _livecodeBrowserSettings = data.browser ? Object.assign({ success: true }, data.browser) : null;
+    _livecodeApplyEditorTerminalSettings();
+    if (typeof _livecodeApplyConversationDensity === "function") _livecodeApplyConversationDensity();
+    _livecodeRenderSettingsPage();
+    _livecodeShowIdeToast("Settings reset to their defaults");
+  });
+}
+
+function _livecodeEditorOptionsFromSettings() {
+  return {
+    fontSize: Number(_livecodeSettingsGet("editorFontSize")) || 13,
+    wordWrap: _livecodeSettingsGet("editorWordWrap") ? "on" : "off",
+    minimap: { enabled: !!_livecodeSettingsGet("editorMinimap") },
+    lineNumbers: _livecodeSettingsGet("editorLineNumbers") === false ? "off" : "on",
+  };
+}
+
+function _livecodeTerminalOptionsFromSettings() {
+  return {
+    fontSize: Number(_livecodeSettingsGet("terminalFontSize")) || 13,
+    cursorStyle: ["bar", "block", "underline"].indexOf(_livecodeSettingsGet("terminalCursorStyle")) >= 0 ? _livecodeSettingsGet("terminalCursorStyle") : "bar",
+    cursorBlink: _livecodeSettingsGet("terminalCursorBlink") !== false,
+    scrollback: Math.max(100, Math.min(100000, Number(_livecodeSettingsGet("terminalScrollback")) || 5000)),
+  };
+}
+
+function _livecodeApplyEditorTerminalSettings() {
+  if (window.ideEditor && typeof window.ideEditor.updateOptions === "function") {
+    try { window.ideEditor.updateOptions(_livecodeEditorOptionsFromSettings()); } catch (e) {}
+  }
+  if (window.monaco && monaco.editor && typeof monaco.editor.getModels === "function") {
+    const tabSize = Number(_livecodeSettingsGet("editorTabSize")) || 4;
+    monaco.editor.getModels().forEach(function(model) { try { model.updateOptions({ tabSize: tabSize }); } catch (e) {} });
+  }
+  if (typeof ideTerminalTabs !== "undefined") {
+    const opts = _livecodeTerminalOptionsFromSettings();
+    ideTerminalTabs.forEach(function(tab) {
+      const term = tab && tab.terminal;
+      if (!term) return;
+      try {
+        if (term.options) Object.assign(term.options, opts);
+        else Object.keys(opts).forEach(function(k) { term.setOption(k, opts[k]); });
+        if (tab.fitAddon && typeof tab.fitAddon.fit === "function") tab.fitAddon.fit();
+      } catch (e) {}
+    });
+  }
+}
+
+document.addEventListener("DOMContentLoaded", _livecodeLoadServerSettings);
 
 
 function _livecodeComposerPlainText() {
@@ -14827,7 +14955,7 @@ function _livecodeBrowserRender() {
   if (chip.textContent !== chipText) chip.textContent = chipText;
   const engine = view.querySelector(".ide-browser-engine-chip");
   engine.hidden = state.engine !== "chrome";
-  engine.title = "The tabs are in your own Chrome, attached over CDP (Settings > Agent > Browser)";
+  engine.title = "The tabs are in your own Chrome, attached over CDP (Settings > Browser)";
   view.querySelector(".ide-browser-compare-toggle").classList.toggle("is-active", compare.on);
   view.classList.toggle("is-maximized", _livecodeBrowser.maximized);
   const max = view.querySelector(".ide-browser-maximize");
@@ -17574,7 +17702,12 @@ const _LIVECODE_SETTINGS_SECTIONS = [
   { id: "general", label: "General", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"></path></svg>' },
   { id: "agent", label: "Agent", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9z"></path><path d="M19 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"></path></svg>' },
   { id: "models", label: "Models", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="13" width="3.5" height="7" rx="1"></rect><rect x="10.25" y="8" width="3.5" height="12" rx="1"></rect><rect x="16.5" y="4" width="3.5" height="16" rx="1"></rect></svg>' },
+  { id: "editor", label: "Editor", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>' },
+  { id: "terminal", label: "Terminal", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"></rect><polyline points="7 9 10 12 7 15"></polyline><line x1="12" y1="15" x2="16" y2="15"></line></svg>' },
+  { id: "browser", label: "Browser", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18"></path><path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18"></path></svg>' },
+  { id: "design", label: "Design", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l9 5-9 5-9-5z"></path><path d="M3 13l9 5 9-5"></path></svg>' },
   { id: "rules", label: "Rules", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path><path d="M14 3v5h5"></path><line x1="9" y1="13" x2="15" y2="13"></line><line x1="9" y1="17" x2="13" y2="17"></line></svg>' },
+  { id: "memory", label: "Memory", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4h6a2 2 0 0 1 2 2v14l-5-3-5 3V6a2 2 0 0 1 2-2z"></path></svg>' },
   { id: "mcp", label: "MCP", icon: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 1.75v3M10 1.75v3"></path><path d="M4.25 4.75h7.5v2.5a3.75 3.75 0 0 1-7.5 0z"></path><path d="M8 11v3.25"></path></svg>' },
   { id: "indexing", label: "Indexing", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="5.5" rx="7.5" ry="2.5"></ellipse><path d="M4.5 5.5v6c0 1.4 3.4 2.5 7.5 2.5s7.5-1.1 7.5-2.5v-6"></path><path d="M4.5 11.5v6c0 1.4 3.4 2.5 7.5 2.5s7.5-1.1 7.5-2.5v-6"></path></svg>' },
 ];
@@ -17592,7 +17725,7 @@ window.openLiveCodeSettings = function(section) {
     ideOpenFiles[LIVECODE_SETTINGS_TAB_KEY] = {
       isSettings: true,
       path: LIVECODE_SETTINGS_TAB_KEY,
-      name: "LiveCode Settings",
+      name: "Settings",
       content: "",
       originalContent: "",
       modified: false,
@@ -17638,7 +17771,7 @@ function _livecodeRenderSettings() {
       s.icon + "<span>" + s.label + "</span></button>";
   }).join("");
   view.innerHTML =
-    '<nav class="livecode-settings-nav" aria-label="Settings sections"><div class="livecode-settings-nav-title">LiveCode Settings</div>' + nav + "</nav>" +
+    '<nav class="livecode-settings-nav" aria-label="Settings sections"><div class="livecode-settings-nav-title">Settings</div>' + nav + "</nav>" +
     '<div class="livecode-settings-main"><div class="livecode-settings-page" id="livecode-settings-page"></div></div>';
   _livecodeRenderSettingsPage();
 }
@@ -17652,13 +17785,19 @@ function _livecodeRenderSettingsPage() {
     general: _livecodeSettingsGeneralHtml,
     agent: _livecodeSettingsAgentHtml,
     models: _livecodeSettingsModelsHtml,
+    editor: _livecodeSettingsEditorHtml,
+    terminal: _livecodeSettingsTerminalHtml,
+    browser: _livecodeSettingsBrowserHtml,
+    design: _livecodeSettingsDesignHtml,
     rules: _livecodeSettingsRulesHtml,
+    memory: _livecodeSettingsMemoryHtml,
     mcp: _livecodeSettingsMcpHtml,
     indexing: _livecodeSettingsIndexingHtml,
   }[_livecodeSettingsSection] || _livecodeSettingsGeneralHtml;
   page.innerHTML = render();
   if (main) main.scrollTop = keepScroll;
   if (_livecodeSettingsSection === "rules" && _livecodeSettingsRules === null) _livecodeLoadSettingsRules();
+  if (_livecodeSettingsSection === "memory" && _livecodeSettingsMemory === null) _livecodeLoadSettingsMemory();
   if (_livecodeSettingsSection === "mcp" && _livecodeSettingsMcpFocus) {
     const card = page.querySelector('[data-mcp-card="' + CSS.escape(_livecodeSettingsMcpFocus) + '"]');
     _livecodeSettingsMcpFocus = "";
@@ -17724,6 +17863,10 @@ function _livecodeSettingsGeneralHtml() {
   html += '<h3 class="livecode-settings-subh">Folder browser</h3><div class="livecode-settings-group">';
   html += _livecodeSettingSwitchHtml("showHiddenFiles", "Show hidden files", "List dotfiles and hidden folders when opening a project.");
   html += "</div>";
+  html += '<h3 class="livecode-settings-subh">Reset</h3><div class="livecode-settings-group">';
+  html += _livecodeSettingsRowHtml("Reset all settings", "Editor, terminal, agent, browser and design settings go back to their defaults. Model keys, MCP servers, rules, memory and an attached Chrome stay.",
+    _livecodeSettingsButton("Reset all…", "reset-all"));
+  html += "</div>";
   const recents = getLiveCodeRecentProjects();
   html += '<h3 class="livecode-settings-subh">Recent projects</h3><div class="livecode-settings-group">';
   if (!recents.length) {
@@ -17742,6 +17885,175 @@ function _livecodeSettingsGeneralHtml() {
   return html;
 }
 
+function _livecodeSettingsNumberHtml(key, title, desc, min, max, step, unit) {
+  const value = Number(_livecodeSettingsGet(key));
+  return _livecodeSettingsRowHtml(title, desc,
+    '<input type="number" class="livecode-settings-number" min="' + min + '" max="' + max + '" step="' + (step || 1) + '" value="' + _livecodeEscapeHtml(String(value)) +
+      '" data-setting-number="' + key + '" aria-label="' + _livecodeEscapeHtml(title) + '">' + (unit ? " " + unit : ""));
+}
+
+function _livecodeSettingsChoiceHtml(key, title, desc, choices) {
+  const current = String(_livecodeSettingsGet(key));
+  const seg = choices.map(function(c) {
+    return '<button type="button" class="lc-btn' + (c.value === current ? " is-active" : "") + '" data-settings-action="set-choice" data-setting-key="' + key + '" data-value="' + c.value + '" role="radio" aria-checked="' + (c.value === current) + '">' + c.label + "</button>";
+  }).join("");
+  return _livecodeSettingsRowHtml(title, desc, '<div class="lc-segmented" role="radiogroup" aria-label="' + _livecodeEscapeHtml(title) + '">' + seg + "</div>");
+}
+
+function _livecodeSettingsEditorHtml() {
+  let html = '<h2 class="livecode-settings-h">Editor</h2><div class="livecode-settings-group">';
+  html += _livecodeSettingsNumberHtml("editorFontSize", "Font size", "Text size in the code editor.", 9, 32, 1, "px");
+  html += _livecodeSettingsNumberHtml("editorTabSize", "Tab size", "Spaces a tab stands for.", 1, 8, 1, "");
+  html += _livecodeSettingSwitchHtml("editorWordWrap", "Word wrap", "Wrap long lines at the edge of the editor instead of scrolling sideways.");
+  html += _livecodeSettingSwitchHtml("editorLineNumbers", "Line numbers", "Show line numbers in the gutter.");
+  html += _livecodeSettingSwitchHtml("editorMinimap", "Minimap", "Show an overview of the file at the right edge.");
+  html += "</div>";
+  return html;
+}
+
+function _livecodeSettingsTerminalHtml() {
+  let html = '<h2 class="livecode-settings-h">Terminal</h2><div class="livecode-settings-group">';
+  html += _livecodeSettingsNumberHtml("terminalFontSize", "Font size", "Text size in the terminal.", 9, 32, 1, "px");
+  html += _livecodeSettingsChoiceHtml("terminalCursorStyle", "Cursor", "Shape of the terminal cursor.",
+    [{ value: "bar", label: "Bar" }, { value: "block", label: "Block" }, { value: "underline", label: "Underline" }]);
+  html += _livecodeSettingSwitchHtml("terminalCursorBlink", "Blinking cursor", "Blink the cursor while the terminal has focus.");
+  html += _livecodeSettingsNumberHtml("terminalScrollback", "Scrollback", "Lines the terminal keeps above the screen.", 100, 100000, 100, "lines");
+  html += "</div>";
+  return html;
+}
+
+function _livecodeSettingsBrowserHtml() {
+  let html = '<h2 class="livecode-settings-h">Browser</h2><div class="livecode-settings-group">';
+  html += _livecodeSettingSwitchHtml("browserTools", "Built-in browser", "Let the agent open pages in the Browser tab, click and type in them, run page scripts, and take screenshots. Clicks, typing, and scripts ask first when approvals are on.");
+  html += _livecodeSettingsChromeRowHtml();
+  const attached = !!(_livecodeBrowserConnection && _livecodeBrowserConnection.engine === "chrome");
+  html += _livecodeSettingsRowHtml("Cookies", attached
+    ? "Your attached Chrome signs in with its own cookies; imported ones are for the built-in browser."
+    : "Import cookies from your own browser so pages open signed in. They stay in this project’s browser profile.",
+    (attached ? "" : _livecodeSettingsButton("Manage…", "browser-cookies") + " ") + _livecodeSettingsButton("Open browser", "open-browser"));
+  html += "</div>";
+  html += '<h3 class="livecode-settings-subh">Live view</h3><div class="livecode-settings-group">';
+  html += _livecodeSettingsBrowserViewRowsHtml();
+  html += _livecodeSettingsAutomationRowHtml();
+  html += "</div>";
+  return html;
+}
+
+function _livecodeSettingsDesignHtml() {
+  let html = '<h2 class="livecode-settings-h">Design</h2><div class="livecode-settings-group">';
+  html += _livecodeSettingsMatchRowHtml();
+  html += _livecodeSettingsCompareContentRowHtml();
+  html += _livecodeSettingsDesignGateRowHtml();
+  html += _livecodeBrowserSwitchRowHtml("ui_verify", "Check UI changes in the browser",
+    "After changing components, pages or styles, the agent asks whether to check the change in the Browser tab, and on Yes looks at just that element. It checks without asking when your request asks to see it.");
+  html += _livecodeSettingsFigmaRowHtml();
+  html += "</div>";
+  return html;
+}
+
+let _livecodeSettingsMemory = null;
+
+function _livecodeMemoryPost(url, body) {
+  return fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+    .then(function(resp) { return resp.json().then(function(data) { return { ok: resp.ok, data: data || {} }; }); })
+    .then(function(res) {
+      if (!res.ok || !res.data.success) throw new Error(res.data.error || "Memory request failed");
+      return res.data;
+    });
+}
+
+function _livecodeLoadSettingsMemory() {
+  if (!livecodeProjectPath) {
+    _livecodeSettingsMemory = { files: [], noProject: true };
+    if (_livecodeSettingsVisible("memory")) _livecodeRenderSettingsPage();
+    return Promise.resolve();
+  }
+  const previous = _livecodeSettingsMemory || {};
+  _livecodeSettingsMemory = Object.assign({}, previous, { loading: true, files: previous.files || [] });
+  return _livecodeMemoryPost("/livecode/memory", { project_path: livecodeProjectPath }).then(function(data) {
+    _livecodeSettingsMemory = Object.assign({}, _livecodeSettingsMemory, { loading: false, files: data.files || [], error: "" });
+    const active = _livecodeSettingsMemory.active;
+    if (!active || !(data.files || []).some(function(f) { return f.path === active; })) return _livecodeOpenMemoryFile("MEMORY.md");
+    if (_livecodeSettingsVisible("memory")) _livecodeRenderSettingsPage();
+  }).catch(function(err) {
+    _livecodeSettingsMemory = Object.assign({}, _livecodeSettingsMemory, { loading: false, error: err.message || String(err) });
+    if (_livecodeSettingsVisible("memory")) _livecodeRenderSettingsPage();
+  });
+}
+
+function _livecodeMemoryDirty() {
+  const m = _livecodeSettingsMemory;
+  return !!(m && m.active && m.content !== m.original);
+}
+
+function _livecodeOpenMemoryFile(path) {
+  const m = _livecodeSettingsMemory || {};
+  const go = function() {
+    return _livecodeMemoryPost("/livecode/memory/file", { project_path: livecodeProjectPath, path: path }).then(function(data) {
+      _livecodeSettingsMemory = Object.assign({}, _livecodeSettingsMemory, { active: data.path, content: data.content || "", original: data.content || "", status: "", error: "" });
+      if (_livecodeSettingsVisible("memory")) _livecodeRenderSettingsPage();
+    }).catch(function(err) { _livecodeShowIdeToast(err.message || String(err)); });
+  };
+  if (m.active && m.active !== path && _livecodeMemoryDirty()) {
+    return _livecodeModalConfirm({ title: "Discard changes to " + m.active + "?", message: "Your edits to this memory file are not saved.", confirmText: "Discard", danger: true })
+      .then(function(ok) { if (ok) return go(); });
+  }
+  return go();
+}
+
+function _livecodeSaveMemoryFile() {
+  const m = _livecodeSettingsMemory;
+  if (!m || !m.active || m.saving) return;
+  _livecodeSettingsMemory = Object.assign({}, m, { saving: true });
+  _livecodeRenderSettingsPage();
+  _livecodeMemoryPost("/livecode/memory/file", { project_path: livecodeProjectPath, path: m.active, content: m.content }).then(function(data) {
+    if (!data.saved) {
+      _livecodeSettingsMemory = Object.assign({}, _livecodeSettingsMemory, { saving: false, status: data.skipped || "Not saved." });
+      _livecodeRenderSettingsPage();
+      return;
+    }
+    _livecodeSettingsMemory = Object.assign({}, _livecodeSettingsMemory, { saving: false, original: m.content, status: "Saved." });
+    _livecodeLoadSettingsMemory();
+  }).catch(function(err) {
+    _livecodeSettingsMemory = Object.assign({}, _livecodeSettingsMemory, { saving: false });
+    _livecodeRenderSettingsPage();
+    _livecodeShowIdeToast(err.message || String(err));
+  });
+}
+
+function _livecodeSettingsMemoryHtml() {
+  let html = '<h2 class="livecode-settings-h">Memory</h2>';
+  const m = _livecodeSettingsMemory;
+  html += '<p class="livecode-settings-lead">What the agent remembers about this project: MEMORY.md, which it reads at the start of each turn, and the logs it keeps of past sessions. Edit them here; the agent sees the change on its next turn.</p>';
+  if (!m || (m.loading && !(m.files || []).length)) return html + '<div class="livecode-settings-group"><div class="livecode-settings-empty">Loading…</div></div>';
+  if (m.noProject) return html + '<div class="livecode-settings-group"><div class="livecode-settings-empty">Open a project to see its memory.</div></div>';
+  if (m.error) return html + '<div class="livecode-settings-group"><div class="livecode-settings-empty">' + _livecodeEscapeHtml(m.error) + "</div></div>";
+  const list = (m.files || []).map(function(f) {
+    const active = f.path === m.active;
+    const when = f.modified ? new Date(f.modified * 1000).toLocaleString() : "Not written yet";
+    const size = f.exists ? (f.size < 1024 ? f.size + " B" : (f.size / 1024).toFixed(1) + " KB") : "";
+    return '<button type="button" class="lc-btn livecode-memory-file' + (active ? " is-active" : "") + '" data-settings-action="memory-open" data-path="' + _livecodeEscapeHtml(f.path) + '"' + (active ? ' aria-current="true"' : "") + ">" +
+      '<span class="livecode-memory-file-name">' + _livecodeEscapeHtml(f.source === "workspace" ? "MEMORY.md" : f.name) + "</span>" +
+      '<span class="livecode-memory-file-meta">' + _livecodeEscapeHtml(f.source === "workspace" ? "Project memory" : "Session log") + " · " + _livecodeEscapeHtml(when) + (size ? " · " + size : "") + "</span></button>";
+  }).join("");
+  const dirty = _livecodeMemoryDirty();
+  html += '<div class="livecode-memory">' +
+    '<div class="livecode-memory-list" role="list">' + list + "</div>" +
+    '<div class="livecode-memory-editor">' +
+      '<div class="livecode-memory-editor-head"><span class="livecode-memory-editor-title">' + _livecodeEscapeHtml(m.active || "") + (dirty ? ' <span class="livecode-settings-badge">Edited</span>' : "") + "</span>" +
+        '<span class="livecode-memory-editor-status">' + _livecodeEscapeHtml(m.status || "") + "</span>" +
+        _livecodeSettingsButton("Revert", "memory-revert", dirty ? "" : " disabled") + " " +
+        _livecodeSettingsButton(m.saving ? "Saving…" : "Save", "memory-save", dirty && !m.saving ? "" : " disabled", true) + "</div>" +
+      '<textarea class="livecode-memory-text" data-memory-editor spellcheck="false" aria-label="' + _livecodeEscapeHtml(m.active || "Memory file") + '" placeholder="' +
+        (m.active === "MEMORY.md" ? "Nothing remembered yet. Notes you write here are read by the agent at the start of each turn." : "") + '">' + _livecodeEscapeHtml(m.content || "") + "</textarea>" +
+    "</div></div>";
+  return html;
+}
+
+function _livecodeSettingsShowsBrowserRows() {
+  return _livecodeSettingsSection === "browser" || _livecodeSettingsSection === "design";
+}
+
 function _livecodeSettingsAgentHtml() {
   const mode = window.livecodeChatMode || "agent";
   const seg = LIVECODE_CHAT_MODES.map(function(m) {
@@ -17751,23 +18063,6 @@ function _livecodeSettingsAgentHtml() {
   html += _livecodeSettingsRowHtml("Default mode", "Agent edits and runs commands, Plan writes a plan first, Ask only reads.", '<div class="lc-segmented" role="radiogroup" aria-label="Default mode">' + seg + "</div>");
   html += _livecodeSettingSwitchHtml("requireApproval", "Ask before edits, commands, and MCP tools", "The agent waits for your approval before it writes a file, runs a command, or calls an MCP tool. Destructive commands (rm -rf, git reset --hard, force push) always ask.");
   html += _livecodeSettingSwitchHtml("webTools", "Web search and fetch", "Let the agent search the web and read pages. It can always do this when you ask for it in your message.");
-  html += "</div>";
-  html += '<h3 class="livecode-settings-subh">Browser</h3><div class="livecode-settings-group">';
-  html += _livecodeSettingSwitchHtml("browserTools", "Built-in browser", "Let the agent open pages in the Browser tab, click and type in them, run page scripts, and take screenshots. Clicks, typing, and scripts ask first when approvals are on.");
-  const attached = !!(_livecodeBrowserConnection && _livecodeBrowserConnection.engine === "chrome");
-  html += _livecodeSettingsRowHtml("Cookies", attached
-    ? "Your attached Chrome signs in with its own cookies; imported ones are for the built-in browser."
-    : "Import cookies from your own browser so pages open signed in. They stay in this project’s browser profile.",
-    (attached ? "" : _livecodeSettingsButton("Manage…", "browser-cookies") + " ") + _livecodeSettingsButton("Open browser", "open-browser"));
-  html += _livecodeSettingsMatchRowHtml();
-  html += _livecodeSettingsCompareContentRowHtml();
-  html += _livecodeSettingsDesignGateRowHtml();
-  html += _livecodeBrowserSwitchRowHtml("ui_verify", "Check UI changes in the browser",
-    "After changing components, pages or styles, the agent asks whether to check the change in the Browser tab, and on Yes looks at just that element. It checks without asking when your request asks to see it.");
-  html += _livecodeSettingsBrowserViewRowsHtml();
-  html += _livecodeSettingsAutomationRowHtml();
-  html += _livecodeSettingsChromeRowHtml();
-  html += _livecodeSettingsFigmaRowHtml();
   html += "</div>";
   const density = _livecodeConversationDensity();
   const densitySeg = LIVECODE_CONVERSATION_DENSITIES.map(function(d) {
@@ -17795,7 +18090,7 @@ function _livecodeLoadBrowserConnection() {
     .then(function(resp) { return resp.json(); })
     .then(function(data) {
       _livecodeBrowserConnection = data && data.success ? data : { engine: "builtin" };
-      if (_livecodeSettingsSection === "agent") _livecodeRenderSettingsPage();
+      if (_livecodeSettingsShowsBrowserRows()) _livecodeRenderSettingsPage();
     })
     .catch(function() {});
 }
@@ -17828,7 +18123,7 @@ function _livecodeLoadFigmaStatus() {
     .then(function(resp) { return resp.json(); })
     .then(function(data) {
       _livecodeFigmaStatus = data && data.success ? data : { configured: false, source: "" };
-      if (_livecodeSettingsSection === "agent") _livecodeRenderSettingsPage();
+      if (_livecodeSettingsShowsBrowserRows()) _livecodeRenderSettingsPage();
     })
     .catch(function() {});
 }
@@ -17840,12 +18135,12 @@ function _livecodeLoadBrowserSettings() {
     .then(function(resp) { return resp.json(); })
     .then(function(data) {
       _livecodeBrowserSettings = data && data.success ? data : Object.assign({}, _LIVECODE_BROWSER_SETTING_DEFAULTS);
-      if (_livecodeSettingsSection === "agent") _livecodeRenderSettingsPage();
+      if (_livecodeSettingsShowsBrowserRows()) _livecodeRenderSettingsPage();
     })
     .catch(function() {
       if (_livecodeBrowserSettings) return;
       _livecodeBrowserSettings = Object.assign({}, _LIVECODE_BROWSER_SETTING_DEFAULTS);
-      if (_livecodeSettingsSection === "agent") _livecodeRenderSettingsPage();
+      if (_livecodeSettingsShowsBrowserRows()) _livecodeRenderSettingsPage();
     });
 }
 
@@ -18409,6 +18704,7 @@ function _livecodeBindSettingsOnce(view) {
       e.preventDefault();
       _livecodeSettingsSection = sectionBtn.getAttribute("data-settings-section");
       if (_livecodeSettingsSection === "rules") _livecodeSettingsRules = null;
+      if (_livecodeSettingsSection === "memory" && !_livecodeMemoryDirty()) _livecodeSettingsMemory = null;
       _livecodeRenderSettings();
       if (_livecodeSettingsSection === "mcp") refreshLiveCodeMcpStatus({ probeServers: Array.from(livecodeMcpSelectedServers), preserveList: true });
       return;
@@ -18437,6 +18733,21 @@ function _livecodeBindSettingsOnce(view) {
       try { localStorage.setItem(LIVECODE_CHAT_MODE_STORAGE_KEY, mode); } catch (err) {}
       _livecodeApplyChatModeToUI();
       _livecodeRenderSettingsPage();
+    } else if (action === "memory-open" && path) {
+      _livecodeOpenMemoryFile(path);
+    } else if (action === "memory-save") {
+      _livecodeSaveMemoryFile();
+    } else if (action === "memory-revert") {
+      if (_livecodeSettingsMemory) _livecodeSettingsMemory = Object.assign({}, _livecodeSettingsMemory, { content: _livecodeSettingsMemory.original, status: "" });
+      _livecodeRenderSettingsPage();
+    } else if (action === "set-choice") {
+      _livecodeSettingsSet(btn.getAttribute("data-setting-key"), btn.getAttribute("data-value"));
+      _livecodeRenderSettingsPage();
+    } else if (action === "reset-all") {
+      _livecodeModalConfirm({ title: "Reset all settings?", message: "Editor, terminal, agent, browser and design settings go back to their defaults. Model keys, MCP servers, rules, memory and an attached Chrome are kept.", confirmText: "Reset all", danger: true }).then(function(ok) {
+        if (!ok) return;
+        _livecodeResetAllSettings().catch(function(err) { _livecodeShowIdeToast(err.message || String(err)); });
+      });
     } else if (action === "set-density") {
       _livecodeSettingsSet("conversationDensity", btn.getAttribute("data-density") || "detailed");
       _livecodeApplyConversationDensity();
@@ -18526,6 +18837,21 @@ function _livecodeBindSettingsOnce(view) {
   });
   view.addEventListener("input", function(e) {
     const input = e.target;
+    if (input && input.hasAttribute && input.hasAttribute("data-memory-editor") && _livecodeSettingsMemory) {
+      const wasDirty = _livecodeMemoryDirty();
+      _livecodeSettingsMemory.content = input.value;
+      _livecodeSettingsMemory.status = "";
+      if (wasDirty !== _livecodeMemoryDirty()) {
+        const head = view.querySelector(".livecode-memory-editor-head");
+        if (head) {
+          const dirty = _livecodeMemoryDirty();
+          head.querySelectorAll('[data-settings-action="memory-save"], [data-settings-action="memory-revert"]').forEach(function(b) { b.disabled = !dirty; });
+          const title = head.querySelector(".livecode-memory-editor-title");
+          if (title) title.innerHTML = _livecodeEscapeHtml(_livecodeSettingsMemory.active || "") + (dirty ? ' <span class="livecode-settings-badge">Edited</span>' : "");
+        }
+      }
+      return;
+    }
     if (!input || !input.hasAttribute || !input.hasAttribute("data-design-accuracy")) return;
     const number = Number(input.value);
     if (!Number.isFinite(number)) return;
@@ -18534,6 +18860,12 @@ function _livecodeBindSettingsOnce(view) {
     const fallback = (_livecodeBrowserSettings && Number(_livecodeBrowserSettings.default_design_accuracy)) || 90;
     if (meaning) meaning.textContent = _livecodeAccuracyMeaning(number, fallback);
   });
+  view.addEventListener("keydown", function(e) {
+    if ((e.metaKey || e.ctrlKey) && (e.key === "s" || e.key === "S") && e.target && e.target.hasAttribute && e.target.hasAttribute("data-memory-editor")) {
+      e.preventDefault();
+      if (_livecodeMemoryDirty()) _livecodeSaveMemoryFile();
+    }
+  });
   view.addEventListener("change", function(e) {
     const input = e.target;
     if (input && input.getAttribute && input.getAttribute("data-llm-toggle") === "best_auto") {
@@ -18541,6 +18873,18 @@ function _livecodeBindSettingsOnce(view) {
       return;
     }
     if (!input || input.tagName !== "INPUT") return;
+    const numberKey = input.getAttribute("data-setting-number");
+    if (numberKey) {
+      const number = Number(input.value);
+      const min = Number(input.getAttribute("min")), max = Number(input.getAttribute("max"));
+      if (!Number.isFinite(number) || number < min || number > max) {
+        _livecodeShowIdeToast("Enter a number from " + min + " to " + max + ".");
+        _livecodeRenderSettingsPage();
+        return;
+      }
+      _livecodeSettingsSet(numberKey, number);
+      return;
+    }
     const setting = input.getAttribute("data-setting");
     if (setting) {
       _livecodeSettingsSet(setting, !!input.checked);

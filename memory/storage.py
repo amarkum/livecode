@@ -225,3 +225,91 @@ def _normalize_memory_content(content: str) -> str:
             text = f"- {text}"
         text = f"## Notes\n\n{text}"
     return text
+
+
+_SESSION_LOG_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}\.md$")
+MAX_EDITABLE_CHARS = 2_000_000
+
+
+def editable_memory_rel(rel_path: str) -> str | None:
+    """The memory files the Settings view may open and save: MEMORY.md and the session logs, nothing else."""
+    rel = str(rel_path or "").replace("\\", "/").strip().lstrip("/")
+    if rel == MEMORY_FILENAME:
+        return rel
+    head, _, name = rel.partition("/")
+    if head == SESSIONS_DIRNAME and "/" not in name and _SESSION_LOG_NAME_RE.match(name):
+        return rel
+    return None
+
+
+def list_editable_memory(project_path: str) -> list[dict[str, Any]]:
+    """MEMORY.md first (listed even before it exists, so it can be written), then the session logs, newest first."""
+    root = memory_root(project_path, create=False)
+    entries: list[dict[str, Any]] = []
+    md = os.path.join(root, MEMORY_FILENAME)
+    entries.append(_memory_entry(MEMORY_FILENAME, "workspace", md))
+    sess = os.path.join(root, SESSIONS_DIRNAME)
+    logs: list[dict[str, Any]] = []
+    if os.path.isdir(sess):
+        for name in os.listdir(sess):
+            rel = f"{SESSIONS_DIRNAME}/{name}"
+            abs_path = os.path.join(sess, name)
+            if editable_memory_rel(rel) and os.path.isfile(abs_path):
+                logs.append(_memory_entry(rel, "session", abs_path))
+    logs.sort(key=lambda e: (e["modified"] or 0, e["path"]), reverse=True)
+    return entries + logs
+
+
+def _memory_entry(rel: str, source: str, abs_path: str) -> dict[str, Any]:
+    try:
+        info = os.stat(abs_path)
+        size, modified, exists = info.st_size, info.st_mtime, True
+    except OSError:
+        size, modified, exists = 0, None, False
+    return {"path": rel, "name": os.path.basename(rel), "source": source, "size": size, "modified": modified, "exists": exists}
+
+
+def _editable_abs_path(project_path: str, rel: str) -> str:
+    root = os.path.realpath(memory_root(project_path, create=False))
+    abs_path = os.path.realpath(os.path.join(root, rel))
+    if not abs_path.startswith(root + os.sep):
+        raise ValueError("path escapes the memory folder")
+    return abs_path
+
+
+def read_editable_memory(project_path: str, rel_path: str) -> dict[str, Any]:
+    rel = editable_memory_rel(rel_path)
+    if rel is None:
+        raise ValueError(f"not an editable memory file: {rel_path}")
+    abs_path = _editable_abs_path(project_path, rel)
+    if not os.path.isfile(abs_path):
+        if rel == MEMORY_FILENAME:
+            return {"path": rel, "content": "", "exists": False}
+        raise FileNotFoundError(f"{rel} does not exist")
+    with open(abs_path, "rb") as f:
+        raw = f.read()
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError(f"{rel} is not UTF-8 text") from None
+    return {"path": rel, "content": content, "exists": True, "size": len(raw)}
+
+
+def save_editable_memory(project_path: str, rel_path: str, content: Any) -> dict[str, Any]:
+    """Saves one memory file atomically under the project's memory lock. Ephemeral workspaces keep no memory."""
+    rel = editable_memory_rel(rel_path)
+    if rel is None:
+        raise ValueError(f"not an editable memory file: {rel_path}")
+    if not isinstance(content, str) or "\x00" in content:
+        raise ValueError("content must be text")
+    if len(content) > MAX_EDITABLE_CHARS:
+        raise ValueError(f"content is longer than {MAX_EDITABLE_CHARS} characters")
+    if _skip_workspace_write(project_path):
+        return {"path": rel, "saved": False, "skipped": "This workspace is temporary, so it keeps no memory."}
+    memory_root(project_path, create=True)
+    if rel.startswith(SESSIONS_DIRNAME + "/"):
+        sessions_dir(project_path, create=True)
+    abs_path = _editable_abs_path(project_path, rel)
+    with memory_lock(project_path):
+        write_text_atomic(abs_path, content)
+    return {"path": rel, "saved": True, "abs_path": abs_path, "size": len(content.encode("utf-8"))}

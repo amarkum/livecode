@@ -115,3 +115,11 @@ def design_shots(site, browser_ready):
     if done.returncode:
         pytest.skip("could not take the design screenshots: " + (done.stderr or done.stdout)[-400:])
     return {name[:-4]: os.path.join(out, name) for name in os.listdir(out)}
+
+
+@pytest.fixture(scope="session")
+def app_client():
+    """The real LiveCode Flask app (every route registered), driven through Flask's test client."""
+    import importlib
+    server = importlib.import_module("livecode.server")
+    return server.app.test_client()

@@ -307,7 +307,7 @@ class _Worker:
                 raise BrowserUnavailable(
                     f"Could not attach to the Chrome at {endpoint} ({_first_line(exc)}). Start it with "
                     "--remote-debugging-port=9222 --user-data-dir=<a profile folder>, or disconnect it in "
-                    "Settings > Agent > Browser to use the built-in browser."
+                    "Settings > Browser to use the built-in browser."
                 ) from exc
             self.remote = True
             try:
@@ -6829,6 +6829,21 @@ def save_browser_settings(data: dict[str, Any]) -> dict[str, Any]:
     return browser_settings()
 
 
+# The Settings view's browser and design preferences. "Reset all" clears these and leaves the rest of
+# browser.json (the attached Chrome, a launched Chrome's profile) alone.
+BROWSER_PREFERENCE_KEYS = ("design_accuracy", "match_threshold", "compare_content", "ui_verify", "reduce_automation_signals",
+                           "design_gate", "agent_tabs", "view_quality", "default_viewport")
+
+
+def reset_browser_settings() -> dict[str, Any]:
+    settings = _read_browser_settings()
+    if any(key in settings for key in BROWSER_PREFERENCE_KEYS):
+        for key in BROWSER_PREFERENCE_KEYS:
+            settings.pop(key, None)
+        _write_browser_settings(settings)
+    return browser_settings()
+
+
 def automation_signals_reduced() -> bool:
     return _read_browser_settings().get("reduce_automation_signals", True) not in (False, "false", 0)
 
@@ -8422,7 +8437,7 @@ def parse_cookies(text: str, *, domain: str = "") -> tuple[list[dict[str, Any]],
 
 
 _ATTACHED_COOKIES = ("The browser is your own Chrome (attached over CDP), which keeps its own cookies: sign in there, "
-                     "or disconnect it in Settings > Agent > Browser to use imported cookies.")
+                     "or disconnect it in Settings > Browser to use imported cookies.")
 
 
 def import_cookies(state_path: str, cookies: list[dict[str, Any]], source: str = "") -> dict[str, Any]:

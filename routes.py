@@ -945,7 +945,7 @@ def register_livecode_routes(app, socketio, rt):
 
     @app.route("/livecode/rules", methods=["GET", "POST"])
     def livecode_rules():
-        from livecode.rules import discover_project_rules
+        from livecode.rules import discover_project_rules, file_identity
         data = (request.get_json(silent=True) or {}) if request.method == "POST" else {}
         project_path = (data.get("project_path") or request.args.get("project_path") or "").strip()
         workspace_payload = data.get("workspace") if isinstance(data.get("workspace"), dict) else None
@@ -959,9 +959,10 @@ def register_livecode_routes(app, socketio, rt):
         seen = set()
         for folder in workspace.folders:
             for rule in discover_project_rules(folder.path):
-                if rule.file_path in seen:
+                ident = file_identity(rule.file_path)
+                if ident in seen:
                     continue
-                seen.add(rule.file_path)
+                seen.add(ident)
                 files.append({
                     "name": rule.file_name,
                     "path": rule.file_path,
@@ -969,6 +970,43 @@ def register_livecode_routes(app, socketio, rt):
                     "chars": len(rule.content),
                 })
         return jsonify({"success": True, "files": files, "primary_path": workspace.primary_path})
+
+    def _memory_project_path(data):
+        project_path = (data.get("project_path") or request.args.get("project_path") or "").strip()
+        return os.path.abspath(os.path.expanduser(project_path)) if project_path else ""
+
+    @app.route("/livecode/memory", methods=["GET", "POST"])
+    def livecode_memory():
+        # {success, files: [{path, name, source, size, modified, exists}]}: MEMORY.md, then session logs newest first.
+        from livecode.memory import list_editable_memory
+        data = (request.get_json(silent=True) or {}) if request.method == "POST" else {}
+        project_path = _memory_project_path(data)
+        if not project_path:
+            return jsonify({"error": "project_path required"}), 400
+        try:
+            return jsonify({"success": True, "files": list_editable_memory(project_path)})
+        except OSError as e:
+            return jsonify({"error": f"Could not list memory files: {e.strerror or e}"}), 500
+
+    @app.route("/livecode/memory/file", methods=["POST"])
+    def livecode_memory_file():
+        # {project_path, path} reads a memory file; with content it saves it. Only MEMORY.md and session logs.
+        from livecode.memory import read_editable_memory, save_memory_file
+        data = request.get_json(silent=True) or {}
+        project_path = _memory_project_path(data)
+        rel = str(data.get("path") or "")
+        if not project_path:
+            return jsonify({"error": "project_path required"}), 400
+        try:
+            if "content" not in data or data.get("content") is None:
+                return jsonify({"success": True, **read_editable_memory(project_path, rel)})
+            return jsonify({"success": True, **save_memory_file(project_path, rel, data.get("content"))})
+        except FileNotFoundError as e:
+            return jsonify({"error": str(e)}), 404
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        except OSError as e:
+            return jsonify({"error": f"Could not {'save' if 'content' in data else 'read'} {rel}: {e.strerror or e}"}), 500
 
     @app.route("/livecode/rules/create", methods=["POST"])
     def livecode_rules_create():
@@ -1385,6 +1423,34 @@ def register_livecode_routes(app, socketio, rt):
             return jsonify({"error": str(e)}), 400
         except OSError as e:
             return jsonify({"error": f"Could not save the setting: {e.strerror or e}"}), 500
+
+    from livecode import settings_store
+
+    @app.route("/livecode/settings", methods=["GET", "POST"])
+    def livecode_settings():
+        # GET: {success, settings}. POST {settings: {key: value | null}} merges them (null removes a key) and
+        # replies {success, settings, rejected: {key: reason}}; valid keys are saved even when others are rejected.
+        if request.method == "GET":
+            return jsonify({"success": True, "settings": settings_store.load_settings()})
+        data = request.get_json(silent=True) or {}
+        updates = data.get("settings")
+        if not isinstance(updates, dict):
+            return jsonify({"error": "settings must be an object"}), 400
+        try:
+            stored, rejected = settings_store.save_settings(updates)
+        except OSError as e:
+            return jsonify({"error": f"Could not save settings: {e.strerror or e}"}), 500
+        return jsonify({"success": True, "settings": stored, "rejected": rejected})
+
+    @app.route("/livecode/settings/reset", methods=["POST"])
+    def livecode_settings_reset():
+        # Reset all: LiveCode's settings file and the browser and design preferences (the attached Chrome stays).
+        try:
+            settings_store.reset_settings()
+            browser = livecode_browser.reset_browser_settings()
+        except OSError as e:
+            return jsonify({"error": f"Could not reset settings: {e.strerror or e}"}), 500
+        return jsonify({"success": True, "settings": {}, "browser": browser})
 
     @app.route("/livecode/browser/connection", methods=["GET", "POST"])
     def livecode_browser_connection():

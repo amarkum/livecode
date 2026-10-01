@@ -372,7 +372,7 @@ def _overview_lines(over: dict[str, Any]) -> list[str]:
     blocked = over.get("blocked")
     if blocked:
         lines.append(f"- BLOCKED ({blocked.get('kind')}): {blocked.get('reason')} Scripts and scrolling will not get past this: "
-                     "tell the user, or ask them to attach their own Chrome (Settings > Agent > Browser) or import their cookies.")
+                     "tell the user, or ask them to attach their own Chrome (Settings > Browser) or import their cookies.")
     if over.get("type") == "login":
         lines.append("- This is a sign-in page: the browser is not signed in to this site. Never type credentials. Ask the user to sign in in the "
                      "Browser tab (they can take control), or to import cookies from their browser / attach their Chrome in Settings, then continue.")
