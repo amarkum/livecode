@@ -524,7 +524,7 @@ function _livecodeRestoreEditorTabs(projectPath) {
       return;
     }
     if (filePath === LIVECODE_SETTINGS_TAB_KEY) {
-      ideOpenFiles[filePath] = { isSettings: true, path: filePath, name: "LiveCode Settings", content: "", originalContent: "", modified: false };
+      ideOpenFiles[filePath] = { isSettings: true, path: filePath, name: "Settings", content: "", originalContent: "", modified: false };
       onDone();
       return;
     }
@@ -17422,7 +17422,7 @@ window.openLiveCodeSettings = function(section) {
     ideOpenFiles[LIVECODE_SETTINGS_TAB_KEY] = {
       isSettings: true,
       path: LIVECODE_SETTINGS_TAB_KEY,
-      name: "LiveCode Settings",
+      name: "Settings",
       content: "",
       originalContent: "",
       modified: false,
@@ -17471,7 +17471,7 @@ function _livecodeRenderSettings() {
   const search = '<div class="livecode-settings-search"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>' +
     '<input type="search" data-settings-search placeholder="Search settings" value="' + _livecodeEscapeHtml(query).replace(/"/g, "&quot;") + '" aria-label="Search settings" spellcheck="false" autocomplete="off"></div>';
   view.innerHTML =
-    '<nav class="livecode-settings-nav" aria-label="Settings sections"><div class="livecode-settings-nav-title">LiveCode Settings</div>' + search + nav + "</nav>" +
+    '<nav class="livecode-settings-nav" aria-label="Settings sections"><div class="livecode-settings-nav-title">Settings</div>' + search + nav + "</nav>" +
     '<div class="livecode-settings-main"><div class="livecode-settings-page" id="livecode-settings-page"></div></div>';
   _livecodeRenderSettingsPage();
 }
