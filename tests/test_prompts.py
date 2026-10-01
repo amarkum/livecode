@@ -34,3 +34,22 @@ def test_ui_verify_ask_reminder_asks_the_question_in_the_card():
 def test_system_prompt_asks_before_verifying_ui():
     text = prompts.build_system_prompt("/tmp/project", has_project_rules=False)
     assert prompts.UI_VERIFY_QUESTION in text
+
+
+def test_no_hardcoded_python_quality_guidance_or_commit_trailer():
+    text = prompts.build_system_prompt("/tmp/project", has_project_rules=False)
+    for gone in ("pre-commit", "SonarQube", "ruff", "black --check", "committer@livecode.ai"):
+        assert gone not in text and gone not in prompts.LIVECODE_COMPACT_SYSTEM_PROMPT
+
+
+def test_ui_checks_crop_the_shared_parent_and_measure():
+    for text in (prompts.UI_VERIFY_TEMPLATE.format(files="a.tsx", why=""),
+                 prompts.build_system_prompt("/tmp/project", has_project_rules=False)):
+        assert "shared parent container" in text and "measurement" in text
+
+
+def test_git_commits_run_as_written():
+    from livecode import tools
+    assert not hasattr(tools, "inject_livecode_commit_coauthor")
+    spec = next(t for t in tools.LIVECODE_TOOLS if t["function"]["name"] == "run_command")
+    assert "Co-authored-by" not in spec["function"]["description"]

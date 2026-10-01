@@ -68,57 +68,6 @@ def _resolve_flexible_project_path(project_path: str, rel_path: str) -> str | No
             return candidate
     return scoped_path
 
-LIVECODE_COAUTHOR_NAME = "LiveCode"
-LIVECODE_COAUTHOR_EMAIL = "committer@livecode.ai"
-LIVECODE_COAUTHOR_TRAILER = (
-    f"Co-authored-by: {LIVECODE_COAUTHOR_NAME} <{LIVECODE_COAUTHOR_EMAIL}>"
-)
-
-def _segment_looks_like_git_commit(segment: str) -> bool:
-    low = (segment or "").lower()
-    if not re.search(r"\bgit\b", low):
-        return False
-    if not re.search(r"\bcommit\b", low):
-        return False
-    if re.search(r"\bcommit-(tree|graph)\b", low):
-        return False
-    if re.search(r"\bcommit\b[^\n]*--help\b", low):
-        return False
-    return True
-
-def _inject_livecode_coauthor_into_commit_segment(segment: str) -> str:
-    if not _segment_looks_like_git_commit(segment):
-        return segment
-    if LIVECODE_COAUTHOR_EMAIL.lower() in segment.lower():
-        return segment
-    if re.search(r"co-authored-by:\s*livecode\b", segment, re.I):
-        return segment
-
-    has_message_flag = bool(
-        re.search(r"(?:^|[\s])(-m|--message|--file|-F)\b", segment)
-        or "<<" in segment
-    )
-    trailer = LIVECODE_COAUTHOR_TRAILER
-    if has_message_flag:
-        suffix = f' -m "{trailer}"'
-    else:
-        suffix = f' --trailer "{trailer}"'
-    return segment.rstrip() + suffix
-
-def inject_livecode_commit_coauthor(command: str) -> str:
-    cmd = command or ""
-    if not re.search(r"\bgit\b", cmd, re.I) or not re.search(r"\bcommit\b", cmd, re.I):
-        return cmd
-
-    parts = re.split(r"(&&|\|\||;)", cmd)
-    out: list[str] = []
-    for part in parts:
-        if part in ("&&", "||", ";"):
-            out.append(part)
-            continue
-        out.append(_inject_livecode_coauthor_into_commit_segment(part))
-    return "".join(out)
-
 LIVECODE_TOOLS = [
     {
         "type": "function",
@@ -465,8 +414,7 @@ LIVECODE_TOOLS = [
                 "long builds). For dev servers, watchers, and other processes that keep running, set "
                 "background=true: it returns a command_id right away, then use command_status to read "
                 "output and kill_command to stop it. stdin is closed, so pass non-interactive flags "
-                "(e.g. --yes). Do NOT use for git history — use git_log instead. Every git commit is "
-                "automatically tagged with Co-authored-by: LiveCode <committer@livecode.ai>."
+                "(e.g. --yes). Do NOT use for git history — use git_log instead."
             ),
             "parameters": {
                 "type": "object",
@@ -1871,7 +1819,6 @@ def _livecode_run_command(
     cmd = command.strip()
     if not cmd:
         return {"error": "Empty command"}
-    cmd = inject_livecode_commit_coauthor(cmd)
     blocked = ["rm -rf /", "mkfs", ":(){ :|:& };:"]
     low = cmd.lower()
     for b in blocked:
@@ -2702,8 +2649,6 @@ def dispatch_tool(
         except (TypeError, ValueError):
             return {"error": "port is a number.", "error_kind": "invalid_input"}
         command = str(args.get("command") or "").strip()
-        if command:
-            command = inject_livecode_commit_coauthor(command)
         return restart_background(
             str(args.get("command_id") or "").strip(),
             command=command,
