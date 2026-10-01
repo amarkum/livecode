@@ -497,7 +497,7 @@ function _livecodeBindEditorAutosaveOnce() {
       clearTimeout(_livecodeEditorAutosaveTimer);
       _livecodeEditorAutosaveTimer = setTimeout(function() {
         autoSaveIDEFile(ideActiveFile);
-      }, 1e3);
+      }, typeof window._livecodeEditorAutosaveDelay === "function" ? window._livecodeEditorAutosaveDelay() : 1e3);
     }
   });
 }
@@ -2307,15 +2307,16 @@ function initializeIDEEditor() {
       theme: "livecode-dynamic-theme",
       automaticLayout: true,
       fixedOverflowWidgets: true,
-      minimap: _livecodeEditorOptionsFromSettings().minimap,
+      minimap: {
+        enabled: false
+      },
       scrollBeyondLastLine: false,
-      wordWrap: _livecodeEditorOptionsFromSettings().wordWrap,
-      fontSize: _livecodeEditorOptionsFromSettings().fontSize,
-      lineNumbers: _livecodeEditorOptionsFromSettings().lineNumbers,
+      wordWrap: "on",
+      fontSize: 13,
       fontLigatures: false,
       fontWeight: "400",
       fontFamily: window.LIVECODE_MONACO_FONT || "'LivecodeMono', 'Prima Sans Mono W01 Roman', 'PrimaSansMonoW01-Roman', Consolas, 'Liberation Mono', 'Courier New', ui-monospace, SFMono-Regular, Menlo, Monaco, monospace",
-      tabSize: Number(_livecodeSettingsGet("editorTabSize")) || 4,
+      tabSize: 4,
       insertSpaces: true,
       renderWhitespace: "boundary",
       cursorBlinking: "solid",
@@ -2340,12 +2341,6 @@ function initializeIDEEditor() {
         handleMouseWheel: true
       }
     });
-    if (monaco.editor.onDidCreateModel && !window._livecodeTabSizeHooked) {
-      window._livecodeTabSizeHooked = true;
-      monaco.editor.onDidCreateModel(function(model) {
-        try { model.updateOptions({ tabSize: Number(_livecodeSettingsGet("editorTabSize")) || 4 }); } catch (e) {}
-      });
-    }
     try {
       monaco.editor.remeasureFonts();
     } catch (e) {}
@@ -2358,6 +2353,7 @@ function initializeIDEEditor() {
     });
     ideEditor = window.ideEditor;
     window.ideEditorReady = true;
+    if (typeof window._livecodeApplyEditorSettings === "function") window._livecodeApplyEditorSettings();
     _livecodeBindEditorAutosaveOnce();
     _livecodeBindPlanMonacoAutosave();
     try { if (typeof window.installLivecodeTsIntel === "function") window.installLivecodeTsIntel(); } catch (e) {}
@@ -11981,6 +11977,9 @@ function handleLiveCodeProgress(data) {
   }
 
   const isActiveTab = _livecodeIsActiveTab(targetTab);
+  if (typeof window._livecodeNotifyProgress === "function") {
+    try { window._livecodeNotifyProgress(data); } catch (e) {}
+  }
   if (data.status === "complete") {
     const completeCost = Number(data.cost_usd || 0);
     if (completeCost > 0) {
@@ -12062,6 +12061,9 @@ function handleLiveCodeProgress(data) {
       if (planFile) {
         _livecodeFinalizeRunningActivity({ pastTense: true }, output);
         _livecodeAppendPlanCard({ file: planFile, title: planTitle, overview: data.overview || "" }, output, targetTab);
+        if (isActiveTab && _livecodeSettingsGet("planAutoOpen")) {
+          try { window.openLiveCodePlanTab(planFile, planTitle); } catch (e) {}
+        }
       }
     } else if (progressType === "compaction") {
       _livecodeResolveRunningActivityEl(output);
@@ -13072,11 +13074,6 @@ const _LIVECODE_SETTING_DEFAULTS = {
   browserTools: true,
   conversationDensity: "detailed",
   stepGrouping: "grouped",
-  editorFontSize: 13,
-  editorTabSize: 4,
-  editorWordWrap: true,
-  editorMinimap: false,
-  editorLineNumbers: true,
   terminalFontSize: 13,
   terminalCursorStyle: "bar",
   terminalCursorBlink: true,
@@ -13156,20 +13153,6 @@ function _livecodeLoadServerSettings() {
   }).catch(function() {});
 }
 
-function _livecodeResetAllSettings() {
-  return fetch("/livecode/settings/reset", { method: "POST" }).then(function(resp) { return resp.json(); }).then(function(data) {
-    if (!data || !data.success) throw new Error((data && data.error) || "Could not reset settings");
-    _livecodeServerSettings = {};
-    _livecodeSettingsPending = {};
-    _livecodeSettingsMirror({});
-    _livecodeBrowserSettings = data.browser ? Object.assign({ success: true }, data.browser) : null;
-    _livecodeApplyEditorTerminalSettings();
-    if (typeof _livecodeApplyConversationDensity === "function") _livecodeApplyConversationDensity();
-    _livecodeRenderSettingsPage();
-    _livecodeShowIdeToast("Settings reset to their defaults");
-  });
-}
-
 function _livecodeApplyPanelSizes() {
   const sidebar = document.getElementById("ide-sidebar");
   const explorer = Number(_livecodeSettingsGet("explorerWidth")) || 0;
@@ -13183,15 +13166,6 @@ function _livecodeApplyPanelSizes() {
   if (window.ideEditor) setTimeout(function() { try { window.ideEditor.layout(); } catch (_) {} }, 50);
 }
 
-function _livecodeEditorOptionsFromSettings() {
-  return {
-    fontSize: Number(_livecodeSettingsGet("editorFontSize")) || 13,
-    wordWrap: _livecodeSettingsGet("editorWordWrap") ? "on" : "off",
-    minimap: { enabled: !!_livecodeSettingsGet("editorMinimap") },
-    lineNumbers: _livecodeSettingsGet("editorLineNumbers") === false ? "off" : "on",
-  };
-}
-
 function _livecodeTerminalOptionsFromSettings() {
   return {
     fontSize: Number(_livecodeSettingsGet("terminalFontSize")) || 13,
@@ -13202,13 +13176,7 @@ function _livecodeTerminalOptionsFromSettings() {
 }
 
 function _livecodeApplyEditorTerminalSettings() {
-  if (window.ideEditor && typeof window.ideEditor.updateOptions === "function") {
-    try { window.ideEditor.updateOptions(_livecodeEditorOptionsFromSettings()); } catch (e) {}
-  }
-  if (window.monaco && monaco.editor && typeof monaco.editor.getModels === "function") {
-    const tabSize = Number(_livecodeSettingsGet("editorTabSize")) || 4;
-    monaco.editor.getModels().forEach(function(model) { try { model.updateOptions({ tabSize: tabSize }); } catch (e) {} });
-  }
+  if (typeof window._livecodeApplyEditorSettings === "function") window._livecodeApplyEditorSettings();
   if (typeof ideTerminalTabs !== "undefined") {
     const opts = _livecodeTerminalOptionsFromSettings();
     ideTerminalTabs.forEach(function(tab) {
@@ -17693,14 +17661,15 @@ const _LIVECODE_SETTINGS_TAB_ICON = "data:image/svg+xml;utf8," + encodeURICompon
 
 const _LIVECODE_SETTINGS_SECTIONS = [
   { id: "general", label: "General", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"></path></svg>' },
+  { id: "appearance", label: "Appearance", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="13.5" cy="6.5" r="1.2"></circle><circle cx="17.5" cy="10.5" r="1.2"></circle><circle cx="8.5" cy="7.5" r="1.2"></circle><circle cx="6.5" cy="12.5" r="1.2"></circle><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.9 0 1.7-.8 1.7-1.7 0-.4-.2-.8-.4-1.1-.3-.3-.4-.7-.4-1.1 0-.9.8-1.7 1.7-1.7h2c3 0 5.5-2.5 5.5-5.5C22 6 17.5 2 12 2z"></path></svg>' },
   { id: "agent", label: "Agent", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9z"></path><path d="M19 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"></path></svg>' },
+  { id: "harness", label: "Harness", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"></path></svg>' },
+  { id: "plan", label: "Plan mode", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"></path><rect x="9" y="3" width="6" height="4" rx="1"></rect><path d="M9 12l2 2 4-4"></path></svg>' },
+  { id: "memory", label: "Memory", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24A2.5 2.5 0 0 1 9.5 2z"></path><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24A2.5 2.5 0 0 0 14.5 2z"></path></svg>' },
+  { id: "browser", label: "Browser", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"></path></svg>' },
   { id: "models", label: "Models", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="13" width="3.5" height="7" rx="1"></rect><rect x="10.25" y="8" width="3.5" height="12" rx="1"></rect><rect x="16.5" y="4" width="3.5" height="16" rx="1"></rect></svg>' },
-  { id: "editor", label: "Editor", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>' },
   { id: "terminal", label: "Terminal", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"></rect><polyline points="7 9 10 12 7 15"></polyline><line x1="12" y1="15" x2="16" y2="15"></line></svg>' },
-  { id: "browser", label: "Browser", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18"></path><path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18"></path></svg>' },
-  { id: "design", label: "Design", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l9 5-9 5-9-5z"></path><path d="M3 13l9 5 9-5"></path></svg>' },
   { id: "rules", label: "Rules", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path><path d="M14 3v5h5"></path><line x1="9" y1="13" x2="15" y2="13"></line><line x1="9" y1="17" x2="13" y2="17"></line></svg>' },
-  { id: "memory", label: "Memory", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4h6a2 2 0 0 1 2 2v14l-5-3-5 3V6a2 2 0 0 1 2-2z"></path></svg>' },
   { id: "mcp", label: "MCP", icon: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 1.75v3M10 1.75v3"></path><path d="M4.25 4.75h7.5v2.5a3.75 3.75 0 0 1-7.5 0z"></path><path d="M8 11v3.25"></path></svg>' },
   { id: "indexing", label: "Indexing", icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="5.5" rx="7.5" ry="2.5"></ellipse><path d="M4.5 5.5v6c0 1.4 3.4 2.5 7.5 2.5s7.5-1.1 7.5-2.5v-6"></path><path d="M4.5 11.5v6c0 1.4 3.4 2.5 7.5 2.5s7.5-1.1 7.5-2.5v-6"></path></svg>' },
 ];
@@ -17759,14 +17728,34 @@ function _livecodeRenderSettings() {
   if (!view) return;
   _livecodeBindSettingsOnce(view);
   const nav = _LIVECODE_SETTINGS_SECTIONS.map(function(s) {
-    const active = s.id === _livecodeSettingsSection;
+    const active = s.id === _livecodeSettingsSection && !String(window._livecodeSettingsQuery || "").trim();
     return '<button type="button" class="livecode-settings-nav-item lc-btn' + (active ? " is-active" : "") + '" data-settings-section="' + s.id + '" title="' + s.label + '" aria-label="' + s.label + '"' + (active ? ' aria-current="page"' : "") + ">" +
       s.icon + "<span>" + s.label + "</span></button>";
   }).join("");
+  const query = String(window._livecodeSettingsQuery || "");
+  const search = '<div class="livecode-settings-search"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>' +
+    '<input type="search" data-settings-search placeholder="Search settings" value="' + _livecodeEscapeHtml(query).replace(/"/g, "&quot;") + '" aria-label="Search settings" spellcheck="false" autocomplete="off"></div>';
   view.innerHTML =
-    '<nav class="livecode-settings-nav" aria-label="Settings sections"><div class="livecode-settings-nav-title">Settings</div>' + nav + "</nav>" +
+    '<nav class="livecode-settings-nav" aria-label="Settings sections"><div class="livecode-settings-nav-title">Settings</div>' + search + nav + "</nav>" +
     '<div class="livecode-settings-main"><div class="livecode-settings-page" id="livecode-settings-page"></div></div>';
   _livecodeRenderSettingsPage();
+}
+
+function _livecodeSettingsRenderers() {
+  return {
+    general: _livecodeSettingsGeneralHtml,
+    appearance: window._livecodeSettingsAppearanceHtml,
+    agent: _livecodeSettingsAgentHtml,
+    harness: window._livecodeSettingsHarnessHtml,
+    plan: window._livecodeSettingsPlanHtml,
+    memory: window._livecodeSettingsMemoryHtml,
+    browser: window._livecodeSettingsBrowserHtml,
+    models: _livecodeSettingsModelsHtml,
+    terminal: _livecodeSettingsTerminalHtml,
+    rules: _livecodeSettingsRulesHtml,
+    mcp: _livecodeSettingsMcpHtml,
+    indexing: _livecodeSettingsIndexingHtml,
+  };
 }
 
 function _livecodeRenderSettingsPage() {
@@ -17774,23 +17763,13 @@ function _livecodeRenderSettingsPage() {
   if (!page) return;
   const main = page.parentElement;
   const keepScroll = main ? main.scrollTop : 0;
-  const render = {
-    general: _livecodeSettingsGeneralHtml,
-    agent: _livecodeSettingsAgentHtml,
-    models: _livecodeSettingsModelsHtml,
-    editor: _livecodeSettingsEditorHtml,
-    terminal: _livecodeSettingsTerminalHtml,
-    browser: _livecodeSettingsBrowserHtml,
-    design: _livecodeSettingsDesignHtml,
-    rules: _livecodeSettingsRulesHtml,
-    memory: _livecodeSettingsMemoryHtml,
-    mcp: _livecodeSettingsMcpHtml,
-    indexing: _livecodeSettingsIndexingHtml,
-  }[_livecodeSettingsSection] || _livecodeSettingsGeneralHtml;
+  const query = String(window._livecodeSettingsQuery || "").trim();
+  const render = query && window._livecodeSettingsSearchHtml
+    ? function() { return window._livecodeSettingsSearchHtml(query); }
+    : _livecodeSettingsRenderers()[_livecodeSettingsSection] || _livecodeSettingsGeneralHtml;
   page.innerHTML = render();
   if (main) main.scrollTop = keepScroll;
   if (_livecodeSettingsSection === "rules" && _livecodeSettingsRules === null) _livecodeLoadSettingsRules();
-  if (_livecodeSettingsSection === "memory" && _livecodeSettingsMemory === null) _livecodeLoadSettingsMemory();
   if (_livecodeSettingsSection === "mcp" && _livecodeSettingsMcpFocus) {
     const card = page.querySelector('[data-mcp-card="' + CSS.escape(_livecodeSettingsMcpFocus) + '"]');
     _livecodeSettingsMcpFocus = "";
@@ -17856,10 +17835,6 @@ function _livecodeSettingsGeneralHtml() {
   html += '<h3 class="livecode-settings-subh">Folder browser</h3><div class="livecode-settings-group">';
   html += _livecodeSettingSwitchHtml("showHiddenFiles", "Show hidden files", "List dotfiles and hidden folders when opening a project.");
   html += "</div>";
-  html += '<h3 class="livecode-settings-subh">Reset</h3><div class="livecode-settings-group">';
-  html += _livecodeSettingsRowHtml("Reset all settings", "Editor, terminal, agent, browser and design settings go back to their defaults. Model keys, MCP servers, rules, memory and an attached Chrome stay.",
-    _livecodeSettingsButton("Reset all…", "reset-all"));
-  html += "</div>";
   const recents = getLiveCodeRecentProjects();
   html += '<h3 class="livecode-settings-subh">Recent projects</h3><div class="livecode-settings-group">';
   if (!recents.length) {
@@ -17875,6 +17850,7 @@ function _livecodeSettingsGeneralHtml() {
     }).join("");
   }
   html += "</div>";
+  if (typeof window._livecodeSettingsGeneralExtraHtml === "function") html += window._livecodeSettingsGeneralExtraHtml();
   return html;
 }
 
@@ -17893,17 +17869,6 @@ function _livecodeSettingsChoiceHtml(key, title, desc, choices) {
   return _livecodeSettingsRowHtml(title, desc, '<div class="lc-segmented" role="radiogroup" aria-label="' + _livecodeEscapeHtml(title) + '">' + seg + "</div>");
 }
 
-function _livecodeSettingsEditorHtml() {
-  let html = '<h2 class="livecode-settings-h">Editor</h2><div class="livecode-settings-group">';
-  html += _livecodeSettingsNumberHtml("editorFontSize", "Font size", "Text size in the code editor.", 9, 32, 1, "px");
-  html += _livecodeSettingsNumberHtml("editorTabSize", "Tab size", "Spaces a tab stands for.", 1, 8, 1, "");
-  html += _livecodeSettingSwitchHtml("editorWordWrap", "Word wrap", "Wrap long lines at the edge of the editor instead of scrolling sideways.");
-  html += _livecodeSettingSwitchHtml("editorLineNumbers", "Line numbers", "Show line numbers in the gutter.");
-  html += _livecodeSettingSwitchHtml("editorMinimap", "Minimap", "Show an overview of the file at the right edge.");
-  html += "</div>";
-  return html;
-}
-
 function _livecodeSettingsTerminalHtml() {
   let html = '<h2 class="livecode-settings-h">Terminal</h2><div class="livecode-settings-group">';
   html += _livecodeSettingsNumberHtml("terminalFontSize", "Font size", "Text size in the terminal.", 9, 32, 1, "px");
@@ -17913,138 +17878,6 @@ function _livecodeSettingsTerminalHtml() {
   html += _livecodeSettingsNumberHtml("terminalScrollback", "Scrollback", "Lines the terminal keeps above the screen.", 100, 100000, 100, "lines");
   html += "</div>";
   return html;
-}
-
-function _livecodeSettingsBrowserHtml() {
-  let html = '<h2 class="livecode-settings-h">Browser</h2><div class="livecode-settings-group">';
-  html += _livecodeSettingSwitchHtml("browserTools", "Built-in browser", "Let the agent open pages in the Browser tab, click and type in them, run page scripts, and take screenshots. Clicks, typing, and scripts ask first when approvals are on.");
-  html += _livecodeSettingsChromeRowHtml();
-  const attached = !!(_livecodeBrowserConnection && _livecodeBrowserConnection.engine === "chrome");
-  html += _livecodeSettingsRowHtml("Cookies", attached
-    ? "Your attached Chrome signs in with its own cookies; imported ones are for the built-in browser."
-    : "Import cookies from your own browser so pages open signed in. They stay in this project’s browser profile.",
-    (attached ? "" : _livecodeSettingsButton("Manage…", "browser-cookies") + " ") + _livecodeSettingsButton("Open browser", "open-browser"));
-  html += "</div>";
-  html += '<h3 class="livecode-settings-subh">Live view</h3><div class="livecode-settings-group">';
-  html += _livecodeSettingsBrowserViewRowsHtml();
-  html += _livecodeSettingsAutomationRowHtml();
-  html += "</div>";
-  return html;
-}
-
-function _livecodeSettingsDesignHtml() {
-  let html = '<h2 class="livecode-settings-h">Design</h2><div class="livecode-settings-group">';
-  html += _livecodeSettingsMatchRowHtml();
-  html += _livecodeSettingsCompareContentRowHtml();
-  html += _livecodeSettingsDesignGateRowHtml();
-  html += _livecodeBrowserSwitchRowHtml("ui_verify", "Check UI changes in the browser",
-    "After changing components, pages or styles, the agent asks whether to check the change in the Browser tab, and on Yes looks at just that element. It checks without asking when your request asks to see it.");
-  html += _livecodeSettingsFigmaRowHtml();
-  html += "</div>";
-  return html;
-}
-
-let _livecodeSettingsMemory = null;
-
-function _livecodeMemoryPost(url, body) {
-  return fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
-    .then(function(resp) { return resp.json().then(function(data) { return { ok: resp.ok, data: data || {} }; }); })
-    .then(function(res) {
-      if (!res.ok || !res.data.success) throw new Error(res.data.error || "Memory request failed");
-      return res.data;
-    });
-}
-
-function _livecodeLoadSettingsMemory() {
-  if (!livecodeProjectPath) {
-    _livecodeSettingsMemory = { files: [], noProject: true };
-    if (_livecodeSettingsVisible("memory")) _livecodeRenderSettingsPage();
-    return Promise.resolve();
-  }
-  const previous = _livecodeSettingsMemory || {};
-  _livecodeSettingsMemory = Object.assign({}, previous, { loading: true, files: previous.files || [] });
-  return _livecodeMemoryPost("/livecode/memory", { project_path: livecodeProjectPath }).then(function(data) {
-    _livecodeSettingsMemory = Object.assign({}, _livecodeSettingsMemory, { loading: false, files: data.files || [], error: "" });
-    const active = _livecodeSettingsMemory.active;
-    if (!active || !(data.files || []).some(function(f) { return f.path === active; })) return _livecodeOpenMemoryFile("MEMORY.md");
-    if (_livecodeSettingsVisible("memory")) _livecodeRenderSettingsPage();
-  }).catch(function(err) {
-    _livecodeSettingsMemory = Object.assign({}, _livecodeSettingsMemory, { loading: false, error: err.message || String(err) });
-    if (_livecodeSettingsVisible("memory")) _livecodeRenderSettingsPage();
-  });
-}
-
-function _livecodeMemoryDirty() {
-  const m = _livecodeSettingsMemory;
-  return !!(m && m.active && m.content !== m.original);
-}
-
-function _livecodeOpenMemoryFile(path) {
-  const m = _livecodeSettingsMemory || {};
-  const go = function() {
-    return _livecodeMemoryPost("/livecode/memory/file", { project_path: livecodeProjectPath, path: path }).then(function(data) {
-      _livecodeSettingsMemory = Object.assign({}, _livecodeSettingsMemory, { active: data.path, content: data.content || "", original: data.content || "", status: "", error: "" });
-      if (_livecodeSettingsVisible("memory")) _livecodeRenderSettingsPage();
-    }).catch(function(err) { _livecodeShowIdeToast(err.message || String(err)); });
-  };
-  if (m.active && m.active !== path && _livecodeMemoryDirty()) {
-    return _livecodeModalConfirm({ title: "Discard changes to " + m.active + "?", message: "Your edits to this memory file are not saved.", confirmText: "Discard", danger: true })
-      .then(function(ok) { if (ok) return go(); });
-  }
-  return go();
-}
-
-function _livecodeSaveMemoryFile() {
-  const m = _livecodeSettingsMemory;
-  if (!m || !m.active || m.saving) return;
-  _livecodeSettingsMemory = Object.assign({}, m, { saving: true });
-  _livecodeRenderSettingsPage();
-  _livecodeMemoryPost("/livecode/memory/file", { project_path: livecodeProjectPath, path: m.active, content: m.content }).then(function(data) {
-    if (!data.saved) {
-      _livecodeSettingsMemory = Object.assign({}, _livecodeSettingsMemory, { saving: false, status: data.skipped || "Not saved." });
-      _livecodeRenderSettingsPage();
-      return;
-    }
-    _livecodeSettingsMemory = Object.assign({}, _livecodeSettingsMemory, { saving: false, original: m.content, status: "Saved." });
-    _livecodeLoadSettingsMemory();
-  }).catch(function(err) {
-    _livecodeSettingsMemory = Object.assign({}, _livecodeSettingsMemory, { saving: false });
-    _livecodeRenderSettingsPage();
-    _livecodeShowIdeToast(err.message || String(err));
-  });
-}
-
-function _livecodeSettingsMemoryHtml() {
-  let html = '<h2 class="livecode-settings-h">Memory</h2>';
-  const m = _livecodeSettingsMemory;
-  html += '<p class="livecode-settings-lead">What the agent remembers about this project: MEMORY.md, which it reads at the start of each turn, and the logs it keeps of past sessions. Edit them here; the agent sees the change on its next turn.</p>';
-  if (!m || (m.loading && !(m.files || []).length)) return html + '<div class="livecode-settings-group"><div class="livecode-settings-empty">Loading…</div></div>';
-  if (m.noProject) return html + '<div class="livecode-settings-group"><div class="livecode-settings-empty">Open a project to see its memory.</div></div>';
-  if (m.error) return html + '<div class="livecode-settings-group"><div class="livecode-settings-empty">' + _livecodeEscapeHtml(m.error) + "</div></div>";
-  const list = (m.files || []).map(function(f) {
-    const active = f.path === m.active;
-    const when = f.modified ? new Date(f.modified * 1000).toLocaleString() : "Not written yet";
-    const size = f.exists ? (f.size < 1024 ? f.size + " B" : (f.size / 1024).toFixed(1) + " KB") : "";
-    return '<button type="button" class="lc-btn livecode-memory-file' + (active ? " is-active" : "") + '" data-settings-action="memory-open" data-path="' + _livecodeEscapeHtml(f.path) + '"' + (active ? ' aria-current="true"' : "") + ">" +
-      '<span class="livecode-memory-file-name">' + _livecodeEscapeHtml(f.source === "workspace" ? "MEMORY.md" : f.name) + "</span>" +
-      '<span class="livecode-memory-file-meta">' + _livecodeEscapeHtml(f.source === "workspace" ? "Project memory" : "Session log") + " · " + _livecodeEscapeHtml(when) + (size ? " · " + size : "") + "</span></button>";
-  }).join("");
-  const dirty = _livecodeMemoryDirty();
-  html += '<div class="livecode-memory">' +
-    '<div class="livecode-memory-list" role="list">' + list + "</div>" +
-    '<div class="livecode-memory-editor">' +
-      '<div class="livecode-memory-editor-head"><span class="livecode-memory-editor-title">' + _livecodeEscapeHtml(m.active || "") + (dirty ? ' <span class="livecode-settings-badge">Edited</span>' : "") + "</span>" +
-        '<span class="livecode-memory-editor-status">' + _livecodeEscapeHtml(m.status || "") + "</span>" +
-        _livecodeSettingsButton("Revert", "memory-revert", dirty ? "" : " disabled") + " " +
-        _livecodeSettingsButton(m.saving ? "Saving…" : "Save", "memory-save", dirty && !m.saving ? "" : " disabled", true) + "</div>" +
-      '<textarea class="livecode-memory-text" data-memory-editor spellcheck="false" aria-label="' + _livecodeEscapeHtml(m.active || "Memory file") + '" placeholder="' +
-        (m.active === "MEMORY.md" ? "Nothing remembered yet. Notes you write here are read by the agent at the start of each turn." : "") + '">' + _livecodeEscapeHtml(m.content || "") + "</textarea>" +
-    "</div></div>";
-  return html;
-}
-
-function _livecodeSettingsShowsBrowserRows() {
-  return _livecodeSettingsSection === "browser" || _livecodeSettingsSection === "design";
 }
 
 function _livecodeSettingsAgentHtml() {
@@ -18057,22 +17890,15 @@ function _livecodeSettingsAgentHtml() {
   html += _livecodeSettingSwitchHtml("requireApproval", "Ask before edits, commands, and MCP tools", "The agent waits for your approval before it writes a file, runs a command, or calls an MCP tool. Destructive commands (rm -rf, git reset --hard, force push) always ask.");
   html += _livecodeSettingSwitchHtml("webTools", "Web search and fetch", "Let the agent search the web and read pages. It can always do this when you ask for it in your message.");
   html += "</div>";
-  const density = _livecodeConversationDensity();
-  const densitySeg = LIVECODE_CONVERSATION_DENSITIES.map(function(d) {
-    return '<button type="button" class="lc-btn' + (d.value === density ? " is-active" : "") + '" data-settings-action="set-density" data-density="' + d.value + '" role="radio" aria-checked="' + (d.value === density) + '">' + d.label + "</button>";
-  }).join("");
-  html += '<h3 class="livecode-settings-subh">Conversation</h3><div class="livecode-settings-group">';
-  html += _livecodeSettingsRowHtml("Conversation density", "Choose how much detail Agent tool calls show in the conversation. Detailed shows each file edit's diff and each command's output; Balanced shows them as one line each.", '<div class="lc-segmented" role="radiogroup" aria-label="Conversation density">' + densitySeg + "</div>");
-  const grouping = _livecodeStepGrouping();
-  const groupingSeg = LIVECODE_STEP_GROUPINGS.map(function(g) {
-    return '<button type="button" class="lc-btn' + (g.value === grouping ? " is-active" : "") + '" data-settings-action="set-step-grouping" data-grouping="' + g.value + '" role="radio" aria-checked="' + (g.value === grouping) + '">' + g.label + "</button>";
-  }).join("");
-  html += _livecodeSettingsRowHtml("Group tool calls", "Grouped folds consecutive reads, searches, and other tool calls into one collapsible summary line. Ungrouped lists every tool call on its own line.", '<div class="lc-segmented" role="radiogroup" aria-label="Group tool calls">' + groupingSeg + "</div>");
+  html += '<h3 class="livecode-settings-subh">More agent settings</h3><div class="livecode-settings-group">';
+  html += _livecodeSettingsRowHtml("Browser, display and limits", "The agent's browser is under Browser, conversation display under Appearance, and step limits, retries and safety rails under Harness.",
+    _livecodeSettingsButton("Browser", "goto-section", ' data-section="browser"') + _livecodeSettingsButton("Harness", "goto-section", ' data-section="harness"'));
   html += "</div>";
   html += '<h3 class="livecode-settings-subh">Queued messages</h3><div class="livecode-settings-group">';
   html += _livecodeSettingSwitchHtml("autoRunQueue", "Run queued messages automatically", "Messages you send while the agent works start one after another when each turn ends. Turn off to send each one yourself.");
   html += _livecodeSettingsRowHtml("Keys", "Enter queues a message while the agent works · ⌘/Ctrl+Enter stops the turn and sends it now · Stop pauses the queue.", "");
   html += "</div>";
+  if (typeof window._livecodeSettingsAgentExtraHtml === "function") html += window._livecodeSettingsAgentExtraHtml();
   return html;
 }
 
@@ -18084,7 +17910,7 @@ function _livecodeLoadBrowserConnection() {
     .then(function(resp) { return resp.json(); })
     .then(function(data) {
       _livecodeBrowserConnection = data && data.success ? data : { engine: "builtin" };
-      if (_livecodeSettingsShowsBrowserRows()) _livecodeRenderSettingsPage();
+      if (_livecodeSettingsSection === "browser" || window._livecodeSettingsQuery) _livecodeRenderSettingsPage();
     })
     .catch(function() {});
 }
@@ -18123,7 +17949,7 @@ function _livecodeLoadFigmaStatus() {
     .then(function(resp) { return resp.json(); })
     .then(function(data) {
       _livecodeFigmaStatus = data && data.success ? data : { configured: false, source: "" };
-      if (_livecodeSettingsShowsBrowserRows()) _livecodeRenderSettingsPage();
+      if (_livecodeSettingsSection === "browser" || window._livecodeSettingsQuery) _livecodeRenderSettingsPage();
     })
     .catch(function() {});
 }
@@ -18135,12 +17961,12 @@ function _livecodeLoadBrowserSettings() {
     .then(function(resp) { return resp.json(); })
     .then(function(data) {
       _livecodeBrowserSettings = data && data.success ? data : Object.assign({}, _LIVECODE_BROWSER_SETTING_DEFAULTS);
-      if (_livecodeSettingsShowsBrowserRows()) _livecodeRenderSettingsPage();
+      if (_livecodeSettingsSection === "browser" || window._livecodeSettingsQuery) _livecodeRenderSettingsPage();
     })
     .catch(function() {
       if (_livecodeBrowserSettings) return;
       _livecodeBrowserSettings = Object.assign({}, _LIVECODE_BROWSER_SETTING_DEFAULTS);
-      if (_livecodeSettingsShowsBrowserRows()) _livecodeRenderSettingsPage();
+      if (_livecodeSettingsSection === "browser" || window._livecodeSettingsQuery) _livecodeRenderSettingsPage();
     });
 }
 
@@ -18720,13 +18546,21 @@ async function _livecodeRemoveMcpServer(name) {
 function _livecodeBindSettingsOnce(view) {
   if (view._livecodeSettingsBound) return;
   view._livecodeSettingsBound = true;
+  view.addEventListener("keydown", function(e) {
+    const input = e.target;
+    if (e.key !== "Escape" || !input || !input.hasAttribute || !input.hasAttribute("data-settings-search") || !input.value) return;
+    e.stopPropagation();
+    input.value = "";
+    window._livecodeSettingsQuery = "";
+    _livecodeRenderSettings();
+  });
   view.addEventListener("click", function(e) {
     const sectionBtn = e.target.closest ? e.target.closest("[data-settings-section]") : null;
     if (sectionBtn) {
       e.preventDefault();
+      window._livecodeSettingsQuery = "";
       _livecodeSettingsSection = sectionBtn.getAttribute("data-settings-section");
       if (_livecodeSettingsSection === "rules") _livecodeSettingsRules = null;
-      if (_livecodeSettingsSection === "memory" && !_livecodeMemoryDirty()) _livecodeSettingsMemory = null;
       _livecodeRenderSettings();
       if (_livecodeSettingsSection === "mcp") refreshLiveCodeMcpStatus({ probeServers: Array.from(livecodeMcpSelectedServers), preserveList: true });
       return;
@@ -18737,6 +18571,7 @@ function _livecodeBindSettingsOnce(view) {
     const action = btn.getAttribute("data-settings-action");
     const path = btn.getAttribute("data-path") || "";
     const server = btn.getAttribute("data-server") || "";
+    if (typeof window._livecodeHandleSettingsActionExt === "function" && window._livecodeHandleSettingsActionExt(action, btn)) return;
     if (action === "open-project") openLiveCodeProjectBrowser();
     else if (action === "clone") openLiveCodeCloneDialog();
     else if (action === "workspace-manager") openLiveCodeWorkspaceManager();
@@ -18749,27 +18584,19 @@ function _livecodeBindSettingsOnce(view) {
         removeLiveCodeRecentProject(path);
         _livecodeRenderSettingsPage();
       });
+    } else if (action === "goto-section") {
+      window._livecodeSettingsQuery = "";
+      _livecodeSettingsSection = btn.getAttribute("data-section") || "general";
+      _livecodeRenderSettings();
     } else if (action === "set-mode") {
       const mode = btn.getAttribute("data-mode") || "agent";
       window.livecodeChatMode = mode;
       try { localStorage.setItem(LIVECODE_CHAT_MODE_STORAGE_KEY, mode); } catch (err) {}
       _livecodeApplyChatModeToUI();
       _livecodeRenderSettingsPage();
-    } else if (action === "memory-open" && path) {
-      _livecodeOpenMemoryFile(path);
-    } else if (action === "memory-save") {
-      _livecodeSaveMemoryFile();
-    } else if (action === "memory-revert") {
-      if (_livecodeSettingsMemory) _livecodeSettingsMemory = Object.assign({}, _livecodeSettingsMemory, { content: _livecodeSettingsMemory.original, status: "" });
-      _livecodeRenderSettingsPage();
     } else if (action === "set-choice") {
       _livecodeSettingsSet(btn.getAttribute("data-setting-key"), btn.getAttribute("data-value"));
       _livecodeRenderSettingsPage();
-    } else if (action === "reset-all") {
-      _livecodeModalConfirm({ title: "Reset all settings?", message: "Editor, terminal, agent, browser and design settings go back to their defaults. Model keys, MCP servers, rules, memory and an attached Chrome are kept.", confirmText: "Reset all", danger: true }).then(function(ok) {
-        if (!ok) return;
-        _livecodeResetAllSettings().catch(function(err) { _livecodeShowIdeToast(err.message || String(err)); });
-      });
     } else if (action === "set-density") {
       _livecodeSettingsSet("conversationDensity", btn.getAttribute("data-density") || "detailed");
       _livecodeApplyConversationDensity();
@@ -18867,21 +18694,7 @@ function _livecodeBindSettingsOnce(view) {
   });
   view.addEventListener("input", function(e) {
     const input = e.target;
-    if (input && input.hasAttribute && input.hasAttribute("data-memory-editor") && _livecodeSettingsMemory) {
-      const wasDirty = _livecodeMemoryDirty();
-      _livecodeSettingsMemory.content = input.value;
-      _livecodeSettingsMemory.status = "";
-      if (wasDirty !== _livecodeMemoryDirty()) {
-        const head = view.querySelector(".livecode-memory-editor-head");
-        if (head) {
-          const dirty = _livecodeMemoryDirty();
-          head.querySelectorAll('[data-settings-action="memory-save"], [data-settings-action="memory-revert"]').forEach(function(b) { b.disabled = !dirty; });
-          const title = head.querySelector(".livecode-memory-editor-title");
-          if (title) title.innerHTML = _livecodeEscapeHtml(_livecodeSettingsMemory.active || "") + (dirty ? ' <span class="livecode-settings-badge">Edited</span>' : "");
-        }
-      }
-      return;
-    }
+    if (input && typeof window._livecodeHandleSettingsInputExt === "function") window._livecodeHandleSettingsInputExt(input);
     if (!input || !input.hasAttribute || !input.hasAttribute("data-design-accuracy")) return;
     const number = Number(input.value);
     if (!Number.isFinite(number)) return;
@@ -18890,18 +18703,13 @@ function _livecodeBindSettingsOnce(view) {
     const fallback = (_livecodeBrowserSettings && Number(_livecodeBrowserSettings.default_design_accuracy)) || 90;
     if (meaning) meaning.textContent = _livecodeAccuracyMeaning(number, fallback);
   });
-  view.addEventListener("keydown", function(e) {
-    if ((e.metaKey || e.ctrlKey) && (e.key === "s" || e.key === "S") && e.target && e.target.hasAttribute && e.target.hasAttribute("data-memory-editor")) {
-      e.preventDefault();
-      if (_livecodeMemoryDirty()) _livecodeSaveMemoryFile();
-    }
-  });
   view.addEventListener("change", function(e) {
     const input = e.target;
     if (input && input.getAttribute && input.getAttribute("data-llm-toggle") === "best_auto") {
       _livecodeSaveLlmSettings({ best_auto: !!input.checked });
       return;
     }
+    if (input && input.getAttribute && typeof window._livecodeHandleSettingsChangeExt === "function" && window._livecodeHandleSettingsChangeExt(input)) return;
     if (!input || input.tagName !== "INPUT") return;
     const numberKey = input.getAttribute("data-setting-number");
     if (numberKey) {

@@ -100,3 +100,9 @@ def test_routes(project, app_client, monkeypatch):
     monkeypatch.setattr(storage, "write_text_atomic", boom)
     reply = app_client.post("/livecode/memory/file", json={"project_path": project, "path": "MEMORY.md", "content": "x"})
     assert reply.status_code == 500 and "Permission denied" in reply.get_json()["error"]
+
+
+def test_without_a_path_the_file_route_returns_memory_md_to_open(project, app_client):
+    reply = app_client.post("/livecode/memory/file", json={"project_path": project}).get_json()
+    assert reply["success"] and reply["path"].endswith("MEMORY.md")
+    assert open(reply["path"]).read().startswith("## Notes")

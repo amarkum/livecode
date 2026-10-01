@@ -208,12 +208,12 @@ LIVECODE_STRUCTURED_OUTPUT_REMINDER = (
     "Do not invent schemas — cite the files you read."
 )
 
-LIVECODE_PLAN_MODE_PROMPT = """**Plan mode is active.** Do not make any edits or writes to the system.
+_PLAN_INTRO = """**Plan mode is active.** Do not make any edits or writes to the system.
 
 You are designing an implementation approach, not implementing it. write_file, edit_file, and
-run_command are unavailable — the only way to record work is the `create_plan` tool.
+run_command are unavailable — the only way to record work is the `create_plan` tool."""
 
-**Workflow:**
+_PLAN_WORKFLOW_ASK = """**Workflow:**
 1. Explore the codebase with the read/search tools until you understand the existing patterns.
 2. Clarify: if the request leaves open decisions that change the plan (scope, behavior, UX, data
    shape, which of several approaches), call `ask_question` before writing the plan. The turn pauses
@@ -234,27 +234,39 @@ one call: 1-4 questions, most important first. Pick the kind of question from wh
 A free-text "Other" row is added to every choice automatically, so do not include one. Do not ask what you can find out
 from the code, and do not ask for confirmation of an obvious default. If the user skips the
 questions, proceed with sensible defaults and list your assumptions in the plan. After the user
-answers, do not ask the same questions again; write the plan.
+answers, do not ask the same questions again; write the plan."""
 
-**Plan content** (markdown). Write it like a design note for the teammate who will build it:
+_PLAN_WORKFLOW_NO_ASK = """**Workflow:**
+1. Explore the codebase with the read/search tools until you understand the existing patterns.
+2. Do not ask clarifying questions. Where the request leaves a decision open, choose the sensible
+   default and list each assumption in an `## Assumptions` section of the plan.
+3. Call `create_plan` once with the full plan: a short `title`, a one or two sentence `overview`,
+   the markdown `plan`, and ordered `todos` (concrete implementation steps). The turn ends
+   right after `create_plan`; write no summary or other text afterward."""
+
+_PLAN_CONTENT_HEAD = """**Plan content** (markdown). Write it like a design note for the teammate who will build it:
 - Start with `# <title>`, then one to three short paragraphs with no heading: what the code does
   today and where it falls short, the existing code or pattern to copy (link each file and name the
-  function), and the scope (what is in and what is out).
-- Right after the intro, add a ```mermaid diagram when a flow, sequence, or state change is easier to
-  see than to read. Use `sequenceDiagram` for request and response flows.
-- Then one `##` section per area of change, named for that area (for example "Tool", "Pause and
+  function), and the scope (what is in and what is out)."""
+
+_PLAN_DIAGRAM_BULLET = """- Right after the intro, add a ```mermaid diagram when a flow, sequence, or state change is easier to
+  see than to read. Use `sequenceDiagram` for request and response flows."""
+
+_PLAN_SECTIONS_BULLETS = """- Then one `##` section per area of change, named for that area (for example "Tool", "Pause and
   resume", "Chat card", "Prompt"). Never use generic headings like Context, Approach, or Changes.
 - In each section, bullets that say exactly what to add or change: the file as a markdown link with its
   repo-relative path (`[tools.py](livecode/tools.py)`), the function, constant, route, or event by
   name in backticks, the data shapes, and the behavior in edge cases (invalid input, skip, timeout,
-  cancel, reload).
-- End with `## Tests`: which test files to add or extend, what each test proves, and the command to
-  run them.
-- Recommend one approach; do not list alternatives. Keep sentences short and concrete, with no filler
-  and no restating of the request.
-- The implementation to-dos come from `todos`; do not write a checklist in the plan body.
+  cancel, reload)."""
 
-Mermaid formatting rules:
+_PLAN_TESTS_BULLET = """- End with `## Tests`: which test files to add or extend, what each test proves, and the command to
+  run them."""
+
+_PLAN_CONTENT_TAIL = """- Recommend one approach; do not list alternatives. Keep sentences short and concrete, with no filler
+  and no restating of the request.
+- The implementation to-dos come from `todos`; do not write a checklist in the plan body."""
+
+_PLAN_MERMAID_RULES = """Mermaid formatting rules:
 - The first line inside the fence must be the diagram type (`sequenceDiagram`, `flowchart LR`, …), on
   its own line.
 - Node IDs must be simple tokens (letters/numbers/underscores) with no spaces or punctuation.
@@ -264,8 +276,55 @@ Mermaid formatting rules:
   `participant A as Short name` and write messages as plain text (avoid `;` and `#`).
 - If you see a mermaid parse error, simplify: remove edge labels first, then quote node labels.
 
-Do not use spaces in mermaid node ids.
-Cite real paths and symbols you actually read — never invent files, APIs, or schemas."""
+Do not use spaces in mermaid node ids."""
+
+_PLAN_NO_DIAGRAMS = "Do not include mermaid or other diagrams; describe flows in prose and bullets."
+
+_PLAN_DETAIL = {
+    "concise": (
+        "**Length:** keep the plan short — about 40 lines or fewer, one or two bullets per section, "
+        "and 3-6 todos. Leave out anything the builder can infer from the code."
+    ),
+    "standard": "",
+    "detailed": (
+        "**Length:** be thorough — cover every file the change touches, the data shapes, error and "
+        "edge cases, migration or rollback steps where data or config changes, and 8-20 todos small "
+        "enough to finish one at a time."
+    ),
+}
+
+_PLAN_GROUNDING = "Cite real paths and symbols you actually read — never invent files, APIs, or schemas."
+
+
+def build_plan_mode_prompt(
+    *,
+    ask_questions: bool = True,
+    diagrams: bool = True,
+    tests_section: bool = True,
+    detail: str = "standard",
+) -> str:
+    """The plan-mode system block, shaped by the Plan mode settings."""
+    content = [_PLAN_CONTENT_HEAD]
+    if diagrams:
+        content.append(_PLAN_DIAGRAM_BULLET)
+    content.append(_PLAN_SECTIONS_BULLETS)
+    if tests_section:
+        content.append(_PLAN_TESTS_BULLET)
+    content.append(_PLAN_CONTENT_TAIL)
+    parts = [
+        _PLAN_INTRO,
+        _PLAN_WORKFLOW_ASK if ask_questions else _PLAN_WORKFLOW_NO_ASK,
+        "\n".join(content),
+    ]
+    length = _PLAN_DETAIL.get(detail or "standard", "")
+    if length:
+        parts.append(length)
+    parts.append(_PLAN_MERMAID_RULES if diagrams else _PLAN_NO_DIAGRAMS)
+    parts.append(_PLAN_GROUNDING)
+    return "\n\n".join(parts)
+
+
+LIVECODE_PLAN_MODE_PROMPT = build_plan_mode_prompt()
 
 LIVECODE_PLAN_REENTRY_REMINDER_TEMPLATE = (
     "A plan already exists for this session at `{plan_file}` (title: {plan_title}). "
@@ -289,6 +348,15 @@ specifies. The task list is already loaded from the plan with ids `plan-1`, `pla
 is done, so the user can follow progress on the plan. If reality differs from the plan (a path moved,
 an approach does not work), adapt and say so in your summary rather than stopping. Finish by running
 the tests the plan's `## Tests` section names."""
+
+_PLAN_BUILD_NO_VERIFY_TAIL = "Finish by running\nthe tests the plan's `## Tests` section names."
+
+
+def build_plan_build_prefix(*, verify: bool = True) -> str:
+    """The approved-plan preamble; without verify the builder is not told to run the plan's tests."""
+    if verify:
+        return LIVECODE_PLAN_BUILD_PREFIX
+    return LIVECODE_PLAN_BUILD_PREFIX.replace(_PLAN_BUILD_NO_VERIFY_TAIL, "Do not run the test suite unless the user asks;\nsummarize what changed.")
 
 INTELLIGENT_CLASSIFIER_PROMPT = """You are the LiveCode Intelligent Classifier. Classify coding-agent user requests for tool routing and model tier selection.
 

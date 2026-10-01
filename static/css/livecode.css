@@ -20827,3 +20827,329 @@ body.pink-theme #ide-editor-section #livecode-chat-mode-trigger.chatbot-composer
 }
 body.dark-theme .livecode-accuracy-range,
 body.black-theme .livecode-accuracy-range { accent-color: #3b82f6; }
+
+/* ---- Settings: search, new controls, theme cards, responsive rows ---- */
+
+#ide-editor-inner .livecode-settings-search {
+	position: relative;
+	display: flex;
+	align-items: center;
+	margin: 0 0 12px;
+	color: var(--lc-text-3);
+}
+
+#ide-editor-inner .livecode-settings-search svg {
+	position: absolute;
+	left: 9px;
+	pointer-events: none;
+}
+
+#ide-editor-inner .livecode-settings-search input {
+	box-sizing: border-box;
+	width: 100%;
+	height: 28px;
+	padding: 0 8px 0 28px;
+	border: 1px solid var(--lc-stroke-2);
+	border-radius: 6px;
+	background: transparent;
+	color: var(--lc-text-1);
+	font: inherit;
+	font-size: 12.5px;
+}
+
+#ide-editor-inner .livecode-settings-search input:focus {
+	outline: none;
+	border-color: var(--lc-link, #81a1c1);
+}
+
+#ide-editor-inner .livecode-settings-search-head {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 12px;
+}
+
+#ide-editor-inner .livecode-settings-search-head .livecode-settings-subh {
+	margin-bottom: 10px;
+}
+
+#ide-editor-inner .livecode-settings-group-gap {
+	margin-top: 12px;
+}
+
+#ide-editor-inner .livecode-settings-row-control {
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: flex-end;
+	max-width: 100%;
+	min-width: 0;
+}
+
+#ide-editor-inner .livecode-settings-view .lc-segmented {
+	flex-wrap: wrap;
+	max-width: 100%;
+}
+
+#ide-editor-inner .livecode-settings-view .lc-segmented button {
+	white-space: nowrap;
+}
+
+#ide-editor-inner .livecode-settings-modified {
+	margin-left: 6px;
+	padding: 1px 6px;
+	border: 0;
+	border-radius: 4px;
+	background: rgb(210 153 34 / 0.16);
+	color: #d29922;
+	font: inherit;
+	font-size: 11px;
+	vertical-align: 1px;
+	cursor: pointer;
+}
+
+#ide-editor-inner .livecode-settings-modified:hover {
+	background: rgb(210 153 34 / 0.26);
+}
+
+#ide-editor-inner .livecode-settings-default {
+	color: var(--lc-text-3);
+	opacity: 0.85;
+}
+
+#ide-editor-inner .livecode-settings-number-wrap {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+}
+
+#ide-editor-inner .livecode-settings-unit {
+	min-width: 1.5em;
+	color: var(--lc-text-3);
+	font-size: 12px;
+}
+
+#ide-editor-inner .livecode-settings-view .livecode-settings-text,
+#ide-editor-inner .livecode-settings-view .livecode-settings-textarea {
+	box-sizing: border-box;
+	min-width: 0;
+	border: 1px solid var(--lc-stroke-2);
+	border-radius: 5px;
+	background: transparent;
+	color: var(--lc-text-1);
+	font: inherit;
+	font-size: 12.5px;
+}
+
+#ide-editor-inner .livecode-settings-view .livecode-settings-text {
+	width: 220px;
+	max-width: 100%;
+	height: 26px;
+	padding: 0 8px;
+}
+
+#ide-editor-inner .livecode-settings-view .livecode-settings-text.is-wide {
+	width: 300px;
+}
+
+#ide-editor-inner .livecode-settings-view .livecode-settings-text:disabled {
+	opacity: 0.6;
+}
+
+#ide-editor-inner .livecode-settings-view .livecode-settings-textarea {
+	display: block;
+	width: 100%;
+	min-height: 96px;
+	padding: 8px 10px;
+	line-height: 1.5;
+	resize: vertical;
+}
+
+#ide-editor-inner .livecode-settings-view .livecode-settings-text:focus,
+#ide-editor-inner .livecode-settings-view .livecode-settings-textarea:focus {
+	outline: none;
+	border-color: var(--lc-link, #81a1c1);
+}
+
+#ide-editor-inner .livecode-settings-row.livecode-settings-row-stack {
+	flex-direction: column;
+	align-items: stretch;
+}
+
+#ide-editor-inner .livecode-settings-counter {
+	align-self: flex-end;
+	color: var(--lc-text-3);
+	font-size: 11px;
+	font-variant-numeric: tabular-nums;
+}
+
+#ide-editor-inner .livecode-settings-status {
+	display: inline-block;
+	margin-right: 4px;
+	padding: 0 6px;
+	border-radius: 4px;
+	font-size: 11px;
+	line-height: 17px;
+}
+
+#ide-editor-inner .livecode-settings-status.is-ok {
+	background: rgb(63 185 80 / 0.15);
+	color: #3fb950;
+}
+
+#ide-editor-inner .livecode-settings-status.is-warn {
+	background: rgb(210 153 34 / 0.16);
+	color: #d29922;
+}
+
+#ide-editor-inner .livecode-settings-row-desc code {
+	padding: 0 4px;
+	border-radius: 3px;
+	background: var(--lc-fill-3);
+	font-family: var(--lc-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+	font-size: 11.5px;
+}
+
+#ide-editor-inner .livecode-cdp-card .livecode-settings-row-text {
+	flex-basis: 100%;
+}
+
+#ide-editor-inner .livecode-cdp-inline {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+	margin-top: 10px;
+}
+
+#ide-editor-inner .livecode-cdp-inline .livecode-settings-text.is-wide {
+	flex: 1 1 220px;
+	width: auto;
+}
+
+#ide-editor-inner .livecode-theme-cards {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+	gap: 10px;
+}
+
+#ide-editor-inner .livecode-theme-card {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	padding: 8px;
+	border: 0;
+	border-radius: 8px;
+	background: rgb(var(--lc-fg) / 0.035);
+	box-shadow: inset 0 0 0 1px var(--lc-stroke-3);
+	color: var(--lc-text-2);
+	font: inherit;
+	font-size: 12.5px;
+	text-align: left;
+	cursor: pointer;
+}
+
+#ide-editor-inner .livecode-theme-card:hover {
+	color: var(--lc-text-1);
+	box-shadow: inset 0 0 0 1px var(--lc-stroke-1, var(--lc-text-3));
+}
+
+#ide-editor-inner .livecode-theme-card.is-active {
+	color: var(--lc-text-1);
+	box-shadow: inset 0 0 0 2px var(--lc-link, #81a1c1);
+}
+
+#ide-editor-inner .livecode-theme-card.is-system {
+	box-shadow: inset 0 0 0 1px var(--lc-link, #81a1c1);
+}
+
+#ide-editor-inner .livecode-theme-card-swatch {
+	display: grid;
+	grid-template-columns: 30% 1fr;
+	grid-template-rows: 1fr 1fr;
+	gap: 3px;
+	height: 54px;
+	padding: 4px;
+	border-radius: 5px;
+	box-sizing: border-box;
+}
+
+#ide-editor-inner .livecode-theme-card-swatch span {
+	border-radius: 3px;
+}
+
+#ide-editor-inner .livecode-theme-card-swatch span:first-child {
+	grid-row: 1 / 3;
+}
+
+#ide-editor-inner .livecode-theme-card-swatch.is-dark { background: #0f172a; }
+#ide-editor-inner .livecode-theme-card-swatch.is-dark span { background: #1e293b; }
+#ide-editor-inner .livecode-theme-card-swatch.is-dark span:last-child { background: #3b82f6; }
+#ide-editor-inner .livecode-theme-card-swatch.is-white { background: #e2e8f0; }
+#ide-editor-inner .livecode-theme-card-swatch.is-white span { background: #ffffff; }
+#ide-editor-inner .livecode-theme-card-swatch.is-white span:last-child { background: #2563eb; }
+#ide-editor-inner .livecode-theme-card-swatch.is-black { background: #000000; }
+#ide-editor-inner .livecode-theme-card-swatch.is-black span { background: #1a1a1a; }
+#ide-editor-inner .livecode-theme-card-swatch.is-black span:last-child { background: #525252; }
+#ide-editor-inner .livecode-theme-card-swatch.is-pink { background: #fce7f3; }
+#ide-editor-inner .livecode-theme-card-swatch.is-pink span { background: #fdf2f8; }
+#ide-editor-inner .livecode-theme-card-swatch.is-pink span:last-child { background: #ec4899; }
+
+@container livecode-settings (max-width: 600px) {
+	#ide-editor-inner .livecode-settings-search {
+		display: none;
+	}
+	#ide-editor-inner .livecode-settings-row-control {
+		justify-content: flex-start;
+	}
+}
+
+@container livecode-settings (max-width: 460px) {
+	#ide-editor-inner .livecode-settings-row-text {
+		flex-basis: 100%;
+	}
+	#ide-editor-inner .livecode-settings-view .livecode-settings-text,
+	#ide-editor-inner .livecode-settings-view .livecode-settings-text.is-wide {
+		width: 100%;
+	}
+	#ide-editor-inner .livecode-settings-row-control:has(.livecode-settings-text) {
+		flex-basis: 100%;
+	}
+	#ide-editor-inner .livecode-settings-head-row .livecode-settings-h {
+		white-space: normal;
+	}
+}
+
+/* ---- Appearance preferences ---- */
+
+body.lc-chat-zoomed #livecode-chat-messages {
+	zoom: var(--lc-chat-zoom, 1);
+}
+
+body.lc-reduce-motion *,
+body.lc-reduce-motion *::before,
+body.lc-reduce-motion *::after {
+	transition-duration: 0s !important;
+	transition-delay: 0s !important;
+	animation-duration: 0.001s !important;
+	animation-iteration-count: 1 !important;
+	scroll-behavior: auto !important;
+}
+
+/* ---- Pane sizing: a narrow window shrinks the sidebar and agent panel before the editor ----
+   The panes carry inline min-width:0, hence !important. Phones keep the scroll-paged layout above. */
+
+@media (min-width: 641px) {
+	#ide-editor-section #ide-main-row > #ide-sidebar {
+		flex-shrink: 1 !important;
+		min-width: 170px !important;
+	}
+	#ide-editor-section #ide-main-row > #ide-center-column {
+		min-width: min(640px, calc(100vw - 190px)) !important;
+	}
+	#ide-editor-section #ide-center-column > #ide-main-container {
+		min-width: min(320px, 40vw) !important;
+	}
+	#ide-editor-section #ide-center-column > #livecode-agent-panel {
+		flex-shrink: 1 !important;
+	}
+}

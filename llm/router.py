@@ -191,6 +191,32 @@ class LLMRouter:
         return self._client(provider).stream(model_id, self._for_model(provider, model_id, messages),
                                              max_tokens=max_tokens, timeout=timeout)
 
-    def complete_with_tools(self, model: str, messages: list[dict], tools: list[dict], **kwargs: Any) -> dict[str, Any]:
+    def complete_with_tools(
+        self,
+        model: str,
+        messages: list[dict],
+        tools: list[dict],
+        *,
+        max_completion_tokens: int = 16000,
+        tool_choice: str = "auto",
+        prompt_cache_key: str | None = None,
+        on_thought_delta: Callable[[str], None] | None = None,
+        on_reasoning_delta: Callable[[str], None] | None = None,
+        on_content_delta: Callable[[str], None] | None = None,
+        on_tool_call_delta: Callable[[dict], None] | None = None,
+        on_retry: Callable[[int, int, Exception], None] | None = None,
+    ) -> dict[str, Any]:
+        # Explicit keywords, so the harness sees that answer text, reasoning and tool-call
+        # arguments stream separately; the clients report reasoning through on_thought_delta.
         provider, model_id = self._resolve(model)
+        kwargs: dict[str, Any] = {
+            "max_completion_tokens": max_completion_tokens,
+            "tool_choice": tool_choice,
+            "on_thought_delta": on_reasoning_delta or on_thought_delta,
+            "on_content_delta": on_content_delta,
+            "on_tool_call_delta": on_tool_call_delta,
+            "on_retry": on_retry,
+        }
+        if prompt_cache_key:
+            kwargs["prompt_cache_key"] = prompt_cache_key
         return self._client(provider).complete_with_tools(model_id, self._for_model(provider, model_id, messages), tools, **kwargs)

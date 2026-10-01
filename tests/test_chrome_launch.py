@@ -94,3 +94,22 @@ def test_the_connection_route_launches(app_client, monkeypatch):
     assert reply["success"] and reply["managed_launch"] and calls == [9555]
     status = app_client.get("/livecode/browser/connection").get_json()
     assert "managed_launch" in status
+
+
+def test_a_chrome_already_on_the_port_is_reused_not_relaunched(fake_chrome, monkeypatch, tmp_path):
+    import subprocess
+    port = _free_port()
+    running = subprocess.Popen([str(fake_chrome), f"--remote-debugging-port={port}"])
+    try:
+        import time
+        for _ in range(50):
+            if browser._debug_port_answers(port):
+                break
+            time.sleep(0.1)
+        attached = []
+        monkeypatch.setattr(browser, "set_cdp_endpoint", lambda url: attached.append(url) or {"engine": "chrome"})
+        status = browser.launch_debug_chrome(port)
+        assert attached == [f"http://127.0.0.1:{port}"] and status["profile"] == browser.CHROME_DEBUG_PROFILE
+        assert not browser._managed_chrome, "a Chrome LiveCode did not start is not LiveCode's to close"
+    finally:
+        running.terminate()

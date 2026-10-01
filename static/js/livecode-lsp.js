@@ -95,6 +95,7 @@
       this.ws = ws;
       ws.onopen = function () {
         self.reconnects = 0;
+        self.everOpened = true;
         setStatus("connecting", "Python LSP: starting");
         self._initialize();
       };
@@ -111,7 +112,10 @@
         self.ready = false;
         if (self.disposed) return;
         var reason = ev && ev.reason ? ev.reason : "Language server connection closed";
-        if (self.reconnects++ < MAX_RECONNECT) {
+        // A socket that never opened means the server has no language-server bridge
+        // (e.g. flask-sock is not installed): one retry, not a reconnect loop.
+        var limit = self.everOpened ? MAX_RECONNECT : 1;
+        if (self.reconnects++ < limit) {
           setStatus("reconnecting", "Python LSP: reconnecting", reason);
           setTimeout(function () {
             self._connect();

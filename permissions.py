@@ -4,9 +4,10 @@ import re
 import threading
 import time
 import uuid
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
-PermissionDecision = Literal["approved", "denied", "expired", "missing"]
+PermissionDecision = Literal["approved", "denied", "expired", "missing", "cancelled"]
+_POLL_S = 0.5
 
 _PERMISSIONS: dict[str, dict[str, Any]] = {}
 _LOCK = threading.Lock()
@@ -66,7 +67,8 @@ def resolve_permission(request_id: str, approved: bool) -> bool:
         entry["event"].set()
         return True
 
-def wait_for_permission_result(request_id: str) -> PermissionDecision:
+def wait_for_permission_result(request_id: str, cancel_check: Callable[[], bool] | None = None) -> PermissionDecision:
+    """Waits for the user's decision; with cancel_check, pressing Stop ends the wait as "cancelled"."""
     with _LOCK:
         entry = _PERMISSIONS.get(request_id)
         if not entry:
@@ -74,22 +76,35 @@ def wait_for_permission_result(request_id: str) -> PermissionDecision:
         event = entry["event"]
         raw_timeout = entry.get("timeout_s")
         timeout_s = _DEFAULT_TIMEOUT_S if raw_timeout is None else max(0.0, float(raw_timeout))
-    event.wait(timeout=timeout_s)
+    deadline = time.monotonic() + timeout_s
+    cancelled = False
+    while not event.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        if cancel_check is not None:
+            try:
+                cancelled = bool(cancel_check())
+            except Exception:
+                cancelled = False
+            if cancelled:
+                break
+        event.wait(timeout=min(_POLL_S, remaining))
     with _LOCK:
         entry = _PERMISSIONS.get(request_id)
         if not entry:
             return "missing"
         decision = entry.get("decision")
         if decision is None:
-            entry["decision"] = "expired"
-            decision = "expired"
+            decision = "cancelled" if cancelled else "expired"
+            entry["decision"] = decision
         _PERMISSIONS.pop(request_id, None)
-    return decision if decision in {"approved", "denied", "expired"} else "missing"
+    return decision if decision in {"approved", "denied", "expired", "cancelled"} else "missing"
 
 
 def wait_for_permission(request_id: str) -> bool | None:
     result = wait_for_permission_result(request_id)
-    if result in {"expired", "missing"}:
+    if result in {"expired", "missing", "cancelled"}:
         return None
     return result == "approved"
 

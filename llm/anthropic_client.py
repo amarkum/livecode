@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
-import time
 from typing import Any, Callable, Iterator
 
 import requests
+
+from .retry import call_with_retries, raise_for_status, stream_error
 
 ANTHROPIC_VERSION = "2023-06-01"
 _STOP = {"end_turn": "stop", "stop_sequence": "stop", "max_tokens": "length", "tool_use": "tool_calls", "refusal": "content_filter"}
@@ -121,8 +122,7 @@ class AnthropicClient:
         headers = {"x-api-key": cfg["api_key"], "anthropic-version": ANTHROPIC_VERSION, "content-type": "application/json"}
         resp = requests.post(f"{cfg.get('base_url') or 'https://api.anthropic.com/v1'}/messages",
                              headers=headers, json=payload, stream=stream, timeout=timeout)
-        if resp.status_code != 200:
-            raise Exception(f"Anthropic API error: {resp.status_code} - {resp.text[:2000]}")
+        raise_for_status(resp, "Anthropic")
         return resp
 
     def _payload(self, model_id, messages, *, max_tokens, temperature=None, tools=None, tool_choice=None, stream=False):
@@ -142,7 +142,8 @@ class AnthropicClient:
         return payload
 
     def complete(self, model_id: str, messages: list[dict], *, timeout=30, **_: Any) -> str:
-        data = self._post(self._payload(model_id, messages, max_tokens=4096, temperature=0.3), stream=False, timeout=timeout).json()
+        payload = self._payload(model_id, messages, max_tokens=4096, temperature=0.3)
+        data = call_with_retries(lambda: self._post(payload, stream=False, timeout=timeout).json(), retries=2)
         return "".join(b.get("text") or "" for b in data.get("content") or [] if b.get("type") == "text")
 
     @staticmethod
@@ -179,20 +180,14 @@ class AnthropicClient:
         **_: Any,
     ) -> dict[str, Any]:
         payload = self._payload(model_id, messages, max_tokens=max_completion_tokens, tools=tools, tool_choice=tool_choice, stream=True)
-        for attempt in range(3):
-            try:
-                resp = self._post(payload, stream=True, timeout=(30, 300))
-                break
-            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
-                if attempt == 2:
-                    raise
-                if on_retry:
-                    try:
-                        on_retry(attempt, 3, e)
-                    except Exception:
-                        pass
-                time.sleep(2 ** attempt)
 
+        def _attempt() -> dict[str, Any]:
+            resp = self._post(payload, stream=True, timeout=(30, 300))
+            return self._collect(resp, on_thought_delta, on_content_delta, on_tool_call_delta)
+
+        return call_with_retries(_attempt, on_retry=on_retry)
+
+    def _collect(self, resp, on_thought_delta, on_content_delta, on_tool_call_delta) -> dict[str, Any]:
         content: list[str] = []
         reasoning: list[str] = []
         blocks: dict[int, dict] = {}
@@ -242,7 +237,7 @@ class AnthropicClient:
                 if u.get("output_tokens") is not None:
                     usage["completion_tokens"] = int(u["output_tokens"])
             elif kind == "error":
-                raise Exception(f"Anthropic stream error: {ev.get('error')}")
+                raise stream_error("Anthropic", ev.get("error"))
         tool_calls = [{"id": blocks[i]["id"], "type": "function",
                        "function": {"name": blocks[i]["name"], "arguments": blocks[i]["json"] or "{}"}} for i in tool_order]
         if usage.get("prompt_tokens") is not None or usage.get("completion_tokens") is not None:
