@@ -109,7 +109,7 @@ const LIVECODE_CHAT_MODE_STORAGE_KEY = "livecode-chat-mode";
 const _LIVECODE_MODE_ICON_PATHS = {
   agent: '<path fill-rule="evenodd" clip-rule="evenodd" d="M6.75 9C5.1393 9 3.75 10.1979 3.75 12C3.75 13.8021 5.1393 15 6.75 15C8.93215 15 9.96658 13.7213 11.0909 12.0197C9.9648 10.2963 8.94769 9 6.75 9ZM11.9886 10.6591C10.9022 9.07118 9.47531 7.5 6.75 7.5C4.37993 7.5 2.25 9.30208 2.25 12C2.25 14.6979 4.37993 16.5 6.75 16.5C9.45251 16.5 10.8909 14.9553 11.9845 13.3798C12.4189 14.0069 12.9091 14.6294 13.5048 15.1451C14.4451 15.9593 15.6342 16.5 17.25 16.5C19.6201 16.5 21.75 14.6979 21.75 12C21.75 9.30208 19.6201 7.5 17.25 7.5C14.5253 7.5 13.0855 9.07015 11.9886 10.6591ZM12.8809 12.023C13.3905 12.8006 13.8793 13.4853 14.4866 14.0111C15.1705 14.6032 16.0158 15 17.25 15C18.8607 15 20.25 13.8021 20.25 12C20.25 10.1979 18.8607 9 17.25 9C15.0496 9 14.0162 10.3002 12.8809 12.023Z" fill="currentColor"></path>',
   plan: '<line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><circle cx="4" cy="6" r="1.5" fill="currentColor" stroke="none"></circle><circle cx="4" cy="12" r="1.5" fill="currentColor" stroke="none"></circle><circle cx="4" cy="18" r="1.5" fill="currentColor" stroke="none"></circle>',
-  ask: '<path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" fill="none"></path>',
+  ask: '<path d="M5 4.5h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-7.5L7 21v-3.5H5a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2z" fill="none"></path><line x1="7.5" y1="9.5" x2="16.5" y2="9.5"></line><line x1="7.5" y1="13" x2="13.5" y2="13"></line>',
 };
 
 const _LIVECODE_MODE_DROPDOWN_STYLE =
@@ -2828,7 +2828,16 @@ function _livecodeGetTerminalTheme() {
   const selectionBackground = read("--ide-terminal-selection-bg", "rgba(148, 163, 184, 0.35)");
   const selectionForeground = read("--ide-terminal-selection-fg", fg);
 
-  return {
+  // ANSI colours tuned per theme: xterm's defaults are harsh on dark backgrounds and unreadable on light ones.
+  const light = document.body.classList.contains("white-theme") || document.body.classList.contains("pink-theme");
+  const ansi = light ? {
+    black: "#24292f", red: "#cf222e", green: "#116329", yellow: "#7d4e00", blue: "#0550ae", magenta: "#8250df", cyan: "#1b7c83", white: "#6e7781",
+    brightBlack: "#57606a", brightRed: "#a40e26", brightGreen: "#1a7f37", brightYellow: "#633c01", brightBlue: "#0969da", brightMagenta: "#a475f9", brightCyan: "#3192aa", brightWhite: "#8c959f",
+  } : {
+    black: "#3b4252", red: "#f07178", green: "#a5d6a7", yellow: "#ffcb6b", blue: "#82aaff", magenta: "#c792ea", cyan: "#89ddff", white: "#d0d7de",
+    brightBlack: "#6b7280", brightRed: "#ff8b92", brightGreen: "#c3e88d", brightYellow: "#ffe08a", brightBlue: "#9cc4ff", brightMagenta: "#ddb3ff", brightCyan: "#a6f0ff", brightWhite: "#ffffff",
+  };
+  return Object.assign({
     background: bg,
     foreground: fg,
     cursor: fg,
@@ -2837,7 +2846,7 @@ function _livecodeGetTerminalTheme() {
     selection: selectionBackground,
     selectionBackground: selectionBackground,
     selectionForeground: selectionForeground
-  };
+  }, ansi);
 }
 
 function _livecodeApplyTerminalTheme() {
@@ -2915,7 +2924,7 @@ function initializeTerminalForTab(tabData, container) {
   const terminalWrapper = document.createElement("div");
   terminalWrapper.id = `ide-terminal-wrapper-${tabData.id}`;
   terminalWrapper.style.cssText = "width:100%;height:100%;position:relative;";
-  terminalWrapper.style.padding = "0";
+  terminalWrapper.style.padding = "6px 8px 4px 12px";
   terminalWrapper.style.boxSizing = "border-box";
   container.appendChild(terminalWrapper);
 
@@ -3097,7 +3106,8 @@ function showIDETerminal() {
     const ideEditorInner = document.getElementById("ide-editor-inner");
     if (ideEditorInner) {
       const sectionHeight = ideEditorInner.getBoundingClientRect().height || 499;
-      const terminalHeight = Math.round(sectionHeight * .3);
+      const savedHeight = Number(_livecodeSettingsGet("terminalHeight")) || 0;
+      const terminalHeight = savedHeight >= 100 ? Math.min(savedHeight, Math.max(100, sectionHeight - 100)) : Math.round(sectionHeight * .3);
       if (!terminalPanel.style.height || terminalPanel.style.height === "100px" || terminalPanel.style.height === "150px") {
         terminalPanel.style.height = terminalHeight + "px";
       }
@@ -11100,7 +11110,8 @@ function _livecodeRenderQuestionsBar() {
   const allAnswered = _livecodeQuestionsAllAnswered(state);
   const activeAnswered = _livecodeQuestionAnswered(state, state.questions[state.active]);
   const canContinue = (allAnswered || activeAnswered) && !state.submitting;
-  const continueLabel = allAnswered ? "Continue" : "Next";
+  const othersOpen = state.questions.some(function(q, i) { return i !== state.active && !_livecodeQuestionAnswered(state, q); });
+  const continueLabel = othersOpen ? "Next" : "Continue";
   const headerRight = state.collapsed
     ? '<span class="livecode-questions-answered">' + answered + " of " + total + " answered</span>"
     : '<span class="livecode-questions-stepper">' +
@@ -13140,6 +13151,7 @@ function _livecodeLoadServerSettings() {
     }
     _livecodeSettingsMirror(_livecodeServerSettings);
     _livecodeApplyEditorTerminalSettings();
+    _livecodeApplyPanelSizes();
     if (_livecodeSettingsVisible()) _livecodeRenderSettingsPage();
   }).catch(function() {});
 }
@@ -13156,6 +13168,19 @@ function _livecodeResetAllSettings() {
     _livecodeRenderSettingsPage();
     _livecodeShowIdeToast("Settings reset to their defaults");
   });
+}
+
+function _livecodeApplyPanelSizes() {
+  const sidebar = document.getElementById("ide-sidebar");
+  const explorer = Number(_livecodeSettingsGet("explorerWidth")) || 0;
+  if (sidebar && explorer >= 150 && explorer <= 700) sidebar.style.width = explorer + "px";
+  const agent = document.getElementById("livecode-agent-panel");
+  const chat = Number(_livecodeSettingsGet("chatPanelWidth")) || 0;
+  if (agent && chat >= 280) agent.style.width = chat + "px";
+  const terminal = document.getElementById("ide-terminal-panel");
+  const height = Number(_livecodeSettingsGet("terminalHeight")) || 0;
+  if (terminal && height >= 100 && terminal.style.display !== "none") terminal.style.height = height + "px";
+  if (window.ideEditor) setTimeout(function() { try { window.ideEditor.layout(); } catch (_) {} }, 50);
 }
 
 function _livecodeEditorOptionsFromSettings() {
@@ -14311,10 +14336,13 @@ window.initLivecodeModeSelector = function() {
   const handle = document.getElementById("ide-sidebar-divider-handle");
   const sidebar = document.getElementById("ide-sidebar");
   if (!divider || !sidebar) return;
-  try {
-    const saved = parseInt(localStorage.getItem("livecodeSidebarWidth") || "", 10);
-    if (saved >= 150 && saved <= 700) sidebar.style.width = saved + "px";
-  } catch (e) {}
+  // Panel sizes are settings (explorerWidth, terminalHeight, chatPanelWidth), so they follow you to a new
+  // browser profile; the old localStorage keys are read once when there is no setting yet.
+  let savedSidebar = Number(_livecodeSettingsGet("explorerWidth")) || 0;
+  if (!savedSidebar) {
+    try { savedSidebar = parseInt(localStorage.getItem("livecodeSidebarWidth") || "", 10) || 0; } catch (e) {}
+  }
+  if (savedSidebar >= 150 && savedSidebar <= 700) sidebar.style.width = savedSidebar + "px";
   divider.onmousedown = function(e) {
     if (e.button !== 0) return;
     isResizingSidebar = true;
@@ -14345,7 +14373,7 @@ window.initLivecodeModeSelector = function() {
     document.body.style.cursor = "";
     document.body.style.userSelect = "";
     sidebar.style.transition = "";
-    try { localStorage.setItem("livecodeSidebarWidth", String(sidebar.offsetWidth)); } catch (e) {}
+    _livecodeSettingsSet("explorerWidth", sidebar.offsetWidth);
     if (window.ideEditor) {
       setTimeout(function() { try { window.ideEditor.layout(); } catch (_) {} }, 50);
     }
@@ -14388,6 +14416,7 @@ window.initLivecodeModeSelector = function() {
     document.body.style.cursor = "";
     document.body.style.userSelect = "";
     terminalPanel.style.transition = "";
+    _livecodeSettingsSet("terminalHeight", terminalPanel.offsetHeight);
   };
   document.addEventListener("mousemove", handleTerminalMove, { passive: false });
   document.addEventListener("mouseup", stopTerminalResizing);
@@ -14401,10 +14430,11 @@ window.initLivecodeModeSelector = function() {
   const agentPanel = document.getElementById("livecode-agent-panel");
   if (!divider || !agentPanel) return;
   let agentWidth = LIVECODE_AGENT_DEFAULT_WIDTH;
-  try {
-    const saved = parseInt(localStorage.getItem("livecodeAgentWidth") || "", 10);
-    if (saved >= 280) agentWidth = saved;
-  } catch (e) {}
+  let savedAgent = Number(_livecodeSettingsGet("chatPanelWidth")) || 0;
+  if (!savedAgent) {
+    try { savedAgent = parseInt(localStorage.getItem("livecodeAgentWidth") || "", 10) || 0; } catch (e) {}
+  }
+  if (savedAgent >= 280) agentWidth = savedAgent;
   agentPanel.style.width = agentWidth + "px";
   window._livecodeAgentDefaultWidthApplied = true;
   divider.addEventListener("mousedown", function(e) {
@@ -14443,7 +14473,7 @@ window.initLivecodeModeSelector = function() {
       agentPanel.style.transition = "";
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
-      try { localStorage.setItem("livecodeAgentWidth", String(agentPanel.offsetWidth)); } catch (e) {}
+      _livecodeSettingsSet("chatPanelWidth", agentPanel.offsetWidth);
       if (window.ideEditor) {
         setTimeout(function() { try { window.ideEditor.layout(); } catch (_) {} }, 50);
       }

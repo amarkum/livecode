@@ -2,6 +2,72 @@
 
 Notes for the agent harness: what was added, and which files changed. Newest first.
 
+## Settings, memory, transcripts and Chrome launch, October 2026
+
+Ported from IntelIDE's change list, saved in `docs/ports/intelide-2026-10.md`. Its Files/S3 and Workbench shell sections have no counterpart in LiveCode and were not ported.
+
+### Settings backed by a file
+
+- **`settings_store.py`** keeps LiveCode's preferences in `~/.livecode/settings.json`. Keys match `^[A-Za-z][A-Za-z0-9_]{0,63}$`, at most 200 of them; values are bool, number or string, strings up to 500 characters. Writes are atomic (temp file and `os.replace`) under a lock.
+- **Routes:** `GET/POST /livecode/settings` (`{settings: {key: value | null}}`, null removes; rejected keys come back in `rejected`) and `POST /livecode/settings/reset`, which also clears the browser and design preferences through `reset_browser_settings()` and keeps an attached Chrome.
+- **The page** loads settings from the server, mirrors them to localStorage, and moves values from before the server kept them. Panel sizes (`explorerWidth`, `terminalHeight`, `chatPanelWidth`) are settings too.
+- **The view** is renamed Settings and regrouped: Editor (font size, tab size, word wrap, line numbers, minimap; applied live), Terminal (font size, cursor, blink, scrollback; applied live), Browser and Design (the rows that were under Agent > Browser), Memory, and Reset all under General. Messages point to "Settings > Browser".
+
+### Rules
+
+- The rules list is deduplicated by file identity (`st_dev`, `st_ino`) instead of the real path, in `rules.py` (`file_identity`) and the rules route, so a symlink or hard link to a rule file shows once.
+
+### Memory tab
+
+- `memory/storage.py` gains `editable_memory_rel` (only `MEMORY.md` and `sessions/*.md`), `list_editable_memory`, `read_editable_memory` and `save_editable_memory`: per-project lock, atomic writes, nothing written for ephemeral workspaces. `memory.save_memory_file` also refreshes the search index.
+- **Routes:** `GET/POST /livecode/memory` (listing) and `POST /livecode/memory/file` (reads without `content`, saves with it). 400 for other paths or non-text content, 404 for a missing log, 500 with a readable message on OS errors.
+
+### Chats saved as the rendered transcript
+
+- Each session keeps `transcript.html`, the HTML the page rendered (40 MB cap, written atomically). Loading a chat returns `transcript_html` and `message_count`.
+- **Route:** `POST /livecode/session/transcript` with `project_path`, `session_id` and `html`. 400 when the chat is not in that workspace; over the cap it answers `success: false, reason: "too_large"`, not an error. The page sends the transcript after each turn, only for the open workspace.
+- **Removed:** `save_diff_record`, `load_diff_records`, `save_tool_artifact`, `load_tool_artifacts`, `format_messages_for_display` and their helpers in `session.py`, their callers in `harness.py`, `display_subagent_result` in `subagent.py`, and the page's JSON-history renderer. A chat saved before transcripts shows a note that its history is still there for the agent.
+- **Chat:** the questions card shows one question at a time (Next, then Continue); a finished command's long output fades before the card folds; the view stays pinned to the bottom while a reply streams and unpins only when the reader scrolls up.
+
+### Browser
+
+- **`launch_chrome_and_attach(port=9222)`** finds Chrome on mac, Windows or Linux (or `LIVECODE_CHROME_EXECUTABLE`), starts it with `--remote-debugging-port` and a profile at `~/.livecode/chrome-debug-profile` (log in `chrome-debug.log`), waits up to 12 s for the port, then attaches. Ports 1024 to 65535; refused when `LIVECODE_BROWSER_CDP_URL` is set. Turning the connection off closes a Chrome LiveCode started.
+- `connection_status()` reports `managed_launch`, `pid`, `profile_dir` and `port`. `_browser_connection_update()` handles launch, attach and disconnect for the HTTP route and a new Socket.IO pair, `livecode_browser_connection` and `livecode_browser_connection_result`.
+- **UI:** a Launch Chrome button in Settings > Browser; in the Browser tab an engine chip (Chromium, Chrome, Chrome launched), a resolution chip that always shows the page size, and a theme-aware stage background.
+
+### Prompts and tools
+
+- The hardcoded Python-quality guidance (pre-commit, ruff, black, SonarQube) is gone from `prompts.py`.
+- `git commit` runs as written: the `Co-authored-by: LiveCode` trailer is no longer injected (`tools.py`), and the tool description and prompt no longer mention it.
+- **`UI_VERIFY_CROP_GUIDE`:** when checking UI, crop the shared parent container so neighbouring elements show together, and back the crop with a measurement.
+
+### UI polish
+
+- The mode chip is tinted per mode (Agent neutral, Plan amber, Ask blue with a chat-bubble icon).
+- Dividers have wider grab areas.
+- The terminal has inner padding and an ANSI palette per light or dark theme.
+- The design accuracy slider has a clear accent in the dark themes.
+
+### Legacy storage removed
+
+- `project_store.py` no longer migrates old slug-keyed project folders or adopts old multi-folder workspace storage. `project_dir`, `existing_project_dir` and `workspace_state_path` use the hashed key only. **Impact:** project folders that were never migrated, and chats that exist only as message JSON, are not migrated or shown any more. Their files stay on disk, and the agent still reads a chat's history.
+
+### Files changed
+
+| File | Change |
+| --- | --- |
+| `settings_store.py` | New: the settings file |
+| `routes.py` | Settings, memory and transcript routes; connection update and Socket.IO pair; rules by file identity |
+| `rules.py` | `file_identity` |
+| `memory/storage.py`, `memory/__init__.py` | Editable memory files |
+| `session.py`, `subagent.py`, `harness.py` | Transcript save/load; display records removed |
+| `browser.py`, `browser_snapshot.py` | Chrome launch, managed status, `reset_browser_settings`, "Settings > Browser" |
+| `prompts.py`, `tools.py` | Quality guidance and trailer removed; crop guide |
+| `project_store.py` | Legacy migration removed |
+| `static/js/livecode.js`, `static/css/livecode.css` | Settings tabs and server-backed settings, Memory tab, transcripts, questions one at a time, pinned scroll, command fade, Chrome launch, chips, mode chip, panel sizes, dividers, terminal |
+| `README.md` | Settings tabs, new files and variables |
+| `tests/` | `test_settings_store.py`, `test_memory_editor.py`, `test_rules.py`, `test_transcript.py`, `test_chrome_launch.py`, `test_project_store.py`, prompt tests; `app_client` fixture |
+
 ## Chat fixes and asking before a UI check, September 2026
 
 Ported from the same fixes in IntelIDE.

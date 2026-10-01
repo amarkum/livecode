@@ -12371,8 +12371,11 @@ body .livecode-dialog .livecode-settings-btn.is-primary:hover {
 	min-height: 420px;
 }
 
-@container (max-width: 560px) {
+#ide-editor-inner .livecode-settings-page:has(.livecode-memory) { container-type: inline-size; }
+
+@container (max-width: 620px) {
 	#ide-editor-inner .livecode-memory { grid-template-columns: minmax(0, 1fr); }
+	#ide-editor-inner .livecode-memory-list { max-height: 168px; }
 }
 
 #ide-editor-inner .livecode-memory-list {
@@ -12430,8 +12433,9 @@ body .livecode-dialog .livecode-settings-btn.is-primary:hover {
 
 #ide-editor-inner .livecode-memory-editor-head {
 	display: flex;
+	flex-wrap: wrap;
 	align-items: center;
-	gap: 8px;
+	gap: 6px 8px;
 	padding: 8px 10px;
 	border-bottom: 1px solid var(--lc-stroke-3);
 }
@@ -12447,10 +12451,15 @@ body .livecode-dialog .livecode-settings-btn.is-primary:hover {
 }
 
 #ide-editor-inner .livecode-memory-editor-status {
-	margin-left: auto;
+	order: 3;
+	flex: 1 0 100%;
 	color: var(--lc-text-3);
 	font-size: 12px;
 }
+
+#ide-editor-inner .livecode-memory-editor-status:empty { display: none; }
+
+#ide-editor-inner .livecode-memory-editor-title { flex: 1 1 auto; }
 
 #ide-editor-inner .livecode-memory-text {
 	flex: 1 1 auto;
@@ -20758,3 +20767,63 @@ body.white-theme #chatbot-model-dropdown.chatbot-model-dropdown,body.pink-theme 
 #livecode-chat-messages .livecode-term-card.is-fading-out > .livecode-term-body {
 	opacity: 0;
 }
+
+/* Mode chip: one pill per mode, tinted so the mode reads at a glance. Agent stays neutral, Plan is amber
+   (its Build button is yellow), Ask is blue with a chat-bubble icon. */
+#ide-editor-section #livecode-chat-mode-trigger.chatbot-composer-mode-wrap {
+	--lc-mode-tint: 148, 163, 184;
+	--lc-mode-ink: #cbd5e1;
+	gap: 6px;
+	height: 26px;
+	padding: 0 9px 0 8px !important;
+	background: rgba(var(--lc-mode-tint), 0.14) !important;
+	border-color: rgba(var(--lc-mode-tint), 0.28) !important;
+	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+#ide-editor-section #livecode-chat-mode-trigger.chatbot-composer-mode-wrap[data-mode="plan"] { --lc-mode-tint: 234, 179, 8; --lc-mode-ink: #facc15; }
+#ide-editor-section #livecode-chat-mode-trigger.chatbot-composer-mode-wrap[data-mode="ask"] { --lc-mode-tint: 59, 130, 246; --lc-mode-ink: #93c5fd; }
+#ide-editor-section #livecode-chat-mode-trigger.chatbot-composer-mode-wrap:hover,
+#ide-editor-section #livecode-chat-mode-trigger.chatbot-composer-mode-wrap[aria-expanded="true"] {
+	background: rgba(var(--lc-mode-tint), 0.24) !important;
+	border-color: rgba(var(--lc-mode-tint), 0.42) !important;
+}
+#ide-editor-section #livecode-chat-mode-trigger .chatbot-composer-mode-label,
+#ide-editor-section #livecode-chat-mode-trigger .chatbot-composer-mode-icon,
+#ide-editor-section #livecode-chat-mode-trigger svg {
+	color: var(--lc-mode-ink) !important;
+}
+#ide-editor-section #livecode-chat-mode-trigger .chatbot-composer-mode-label { font-weight: 600; letter-spacing: 0.01em; }
+#ide-editor-section #livecode-chat-mode-trigger .chatbot-composer-model-chevron { opacity: 0.65; }
+body.white-theme #ide-editor-section #livecode-chat-mode-trigger.chatbot-composer-mode-wrap,
+body.pink-theme #ide-editor-section #livecode-chat-mode-trigger.chatbot-composer-mode-wrap { --lc-mode-tint: 100, 116, 139; --lc-mode-ink: #334155; }
+body.white-theme #ide-editor-section #livecode-chat-mode-trigger.chatbot-composer-mode-wrap[data-mode="plan"],
+body.pink-theme #ide-editor-section #livecode-chat-mode-trigger.chatbot-composer-mode-wrap[data-mode="plan"] { --lc-mode-tint: 202, 138, 4; --lc-mode-ink: #92400e; }
+body.white-theme #ide-editor-section #livecode-chat-mode-trigger.chatbot-composer-mode-wrap[data-mode="ask"],
+body.pink-theme #ide-editor-section #livecode-chat-mode-trigger.chatbot-composer-mode-wrap[data-mode="ask"] { --lc-mode-tint: 37, 99, 235; --lc-mode-ink: #1d4ed8; }
+
+/* Dividers: a wider grab area than the line they draw, so they are easy to catch. */
+#ide-sidebar-divider,
+#ide-agent-divider { position: relative; }
+#ide-sidebar-divider::before,
+#ide-agent-divider::before {
+	content: "";
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	left: -5px;
+	right: -5px;
+	z-index: 30;
+	cursor: col-resize;
+}
+#ide-terminal-divider::before {
+	content: "";
+	position: absolute;
+	left: 0;
+	right: 0;
+	top: -5px;
+	bottom: -5px;
+	z-index: 30;
+	cursor: row-resize;
+}
+body.dark-theme .livecode-accuracy-range,
+body.black-theme .livecode-accuracy-range { accent-color: #3b82f6; }
