@@ -132,8 +132,6 @@ from livecode.session import (
     has_valid_compaction,
     load_session,
     sanitize_messages_for_api,
-    save_diff_record,
-    save_tool_artifact,
 )
 from livecode.mcp_bridge import MCPToolBinding
 from livecode.project_store import workspace_state_identity
@@ -1913,21 +1911,6 @@ def run_livecode_turn(
         except Exception:
             if logger:
                 _ide_log(logger, "debug", "diff emit failed", file_name, sid=_log_session_id(session_id), exc_info=True)
-        try:
-            save_diff_record(
-                state_path,
-                session_id,
-                tool_call_id,
-                file_name=file_name,
-                diff_html=result.get("diff_html", ""),
-                additions=additions,
-                deletions=deletions,
-                absolute_path=absolute_path,
-                created=created,
-            )
-        except Exception:
-            if logger:
-                _ide_log(logger, "exception", "Failed to persist diff artifact", sid=_log_session_id(session_id), exc_info=True)
 
     allowed_mcp_tools: dict[str, MCPToolBinding] = {}
 
@@ -3140,20 +3123,6 @@ def run_livecode_turn(
                     compacted = item["compacted"]
                     tool_call_id = item["tool_call_id"]
                     tool_args = item.get("tool_args") or {}
-                    try:
-                        save_tool_artifact(
-                            state_path,
-                            session_id,
-                            tool_call_id,
-                            tool_name=tool_name,
-                            tool_args=tool_args,
-                            result=result,
-                            iteration=iteration,
-                        )
-                    except Exception:
-                        if logger:
-                            _ide_log(logger, "exception", "Failed to persist tool artifact", sid=_log_session_id(session_id), exc_info=True)
-
                     stationarity.observe(
                         _tool_call_signature(tool_name, tool_args),
                         tool_name,

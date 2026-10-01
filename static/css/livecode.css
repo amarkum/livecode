@@ -10638,14 +10638,11 @@ body.pink-theme #ide-plan-view {
 	margin-left: 4px;
 	animation: livecodeQuestionIn 0.3s ease-out;
 }
-.livecode-questions-bar .livecode-questions-question:last-child:not(:first-child) {
-	min-height: 200px;
-}
 @keyframes livecodeQuestionIn {
 	from { opacity: 0; transform: translateY(4px); }
 	to { opacity: 1; transform: none; }
 }
-/* The card rebuilds on every click; fade in only when a question set first appears. */
+/* The card rebuilds on every click; a question fades in only when it first shows, not on each click. */
 .livecode-questions-bar.is-settled .livecode-questions-question { animation: none; }
 @media (prefers-reduced-motion: reduce) {
 	.livecode-questions-bar .livecode-questions-question { animation: none; }
@@ -20753,3 +20750,11 @@ body.white-theme #chatbot-model-dropdown.chatbot-model-dropdown,body.pink-theme 
 .livecode-accuracy-control { display: flex; align-items: center; gap: 10px; white-space: nowrap; }
 .livecode-accuracy-range { width: 140px; accent-color: var(--ide-browser-accent, var(--lc-link, #569cd6)); cursor: pointer; }
 .livecode-accuracy-meaning { color: var(--livecode-text-secondary); }
+
+/* A finished command's long output fades before the card folds (see _livecodeSettleFinishedTerminalCard). */
+#livecode-chat-messages .livecode-term-card > .livecode-term-body {
+	transition: opacity 0.22s ease;
+}
+#livecode-chat-messages .livecode-term-card.is-fading-out > .livecode-term-body {
+	opacity: 0;
+}

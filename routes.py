@@ -29,15 +29,15 @@ def register_livecode_routes(app, socketio, rt):
         append_turn_messages,
         append_turn_summary,
         delete_session,
-        format_messages_for_display,
         fork_session,
         list_sessions,
-        load_diff_records,
         load_session,
-        load_tool_artifacts,
+        load_transcript,
         message_index_for_user_turn,
         rename_session,
         rewind_to_message,
+        save_transcript,
+        session_exists,
         set_session_title,
         _sanitize_display_payload,
     )
@@ -247,21 +247,48 @@ def register_livecode_routes(app, socketio, rt):
         expanded = os.path.abspath(os.path.expanduser(project_path))
         if not os.path.isdir(expanded):
             return jsonify({"error": f"Project path not found: {project_path}"}), 400
+        # The chat is shown as it was rendered (transcript.html); message_count says whether there is a
+        # history at all, so a chat saved before transcripts existed can say so instead of showing nothing.
         try:
             state_path = _livecode_state_path(expanded, workspace_payload)
             session = load_session(state_path, session_id)
-            diffs = load_diff_records(state_path, session_id)
-            tool_artifacts = load_tool_artifacts(state_path, session_id)
-            display_messages = format_messages_for_display(session.get("messages") or [], diffs, tool_artifacts)
             return jsonify({
                 "success": True,
                 "session_id": session_id,
                 "summary": session.get("summary") or {},
-                "messages": display_messages,
+                "transcript_html": load_transcript(state_path, session_id),
+                "message_count": len(session.get("messages") or []),
             })
         except Exception as e:
             LIVECODE_LOGGER.exception("livecode load session error")
             return jsonify({"error": str(e)}), 500
+
+    @app.route("/livecode/session/transcript", methods=["POST"])
+    def livecode_save_transcript():
+        # {project_path, session_id, html, workspace?} -> {success}. success is false (not an error) when the
+        # transcript is over the 40 MB cap. 400 when the session is not in that project's workspace: the page
+        # only sends a chat to the workspace it belongs to.
+        data = request.get_json(silent=True) or {}
+        project_path = str(data.get("project_path") or "").strip()
+        session_id = str(data.get("session_id") or "").strip()
+        html = data.get("html")
+        workspace_payload = data.get("workspace") if isinstance(data.get("workspace"), dict) else None
+        if not project_path or not session_id or not isinstance(html, str):
+            return jsonify({"error": "project_path, session_id and html required"}), 400
+        expanded = os.path.abspath(os.path.expanduser(project_path))
+        if not os.path.isdir(expanded):
+            return jsonify({"error": f"Project path not found: {project_path}"}), 400
+        try:
+            state_path = _livecode_state_path(expanded, workspace_payload)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        if not session_exists(state_path, session_id):
+            return jsonify({"error": "This chat is not in that workspace."}), 400
+        try:
+            saved = save_transcript(state_path, session_id, html)
+        except OSError as e:
+            return jsonify({"error": f"Could not save the chat: {e.strerror or e}"}), 500
+        return jsonify({"success": bool(saved), **({} if saved else {"reason": "too_large"})})
 
     @app.route("/livecode/project-storage", methods=["DELETE", "POST"])
     def livecode_delete_project_storage():

@@ -330,8 +330,15 @@ function _livecodePersistChatSnapshot(projectPath, tab, stateKey) {
     tab.messagesHtml = tmp.innerHTML;
   } catch (e) {}
 
+  _livecodeSaveTranscript(projectPath, tab, stateKey);
   const key = _livecodeChatSnapshotKey(projectPath, tab.sessionId, stateKey);
   if (!key) return;
+  // A small local copy for an instant restore; the server's transcript is the one that counts, so a chat
+  // too big for localStorage just skips this.
+  if (tab.messagesHtml.length > LIVECODE_LOCAL_SNAPSHOT_MAX_CHARS) {
+    _livecodeStorageRemove(key);
+    return;
+  }
   try {
     _livecodeStorageSet(key, JSON.stringify({
       messagesHtml: tab.messagesHtml,
@@ -340,6 +347,32 @@ function _livecodePersistChatSnapshot(projectPath, tab, stateKey) {
       updatedAt: Date.now(),
     }));
   } catch (e) {}
+}
+
+const LIVECODE_LOCAL_SNAPSHOT_MAX_CHARS = 1500000;
+const _livecodeTranscriptTimers = {};
+
+// The chat as rendered goes to the server (transcript.html), which is what reloading it shows. Only for the
+// workspace that is open: the server would file it under whichever workspace the payload names.
+function _livecodeSaveTranscript(projectPath, tab, stateKey) {
+  if (!tab || !tab.sessionId || !tab.messagesHtml || !livecodeProjectPath) return;
+  if (_livecodeNormalizeProjectKey(projectPath) !== _livecodeNormalizeProjectKey(livecodeProjectPath)) return;
+  if (stateKey && stateKey !== (_livecodeWorkspaceStateKey() || _livecodeNormalizeProjectKey(livecodeProjectPath))) return;
+  const sessionId = tab.sessionId;
+  const body = { project_path: livecodeProjectPath, session_id: sessionId, html: tab.messagesHtml, workspace: _livecodeCurrentWorkspacePayload() };
+  if (_livecodeTranscriptTimers[sessionId]) clearTimeout(_livecodeTranscriptTimers[sessionId]);
+  _livecodeTranscriptTimers[sessionId] = setTimeout(function() {
+    delete _livecodeTranscriptTimers[sessionId];
+    fetch("/livecode/session/transcript", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+      .then(function(resp) { return resp.json(); })
+      .then(function(data) {
+        if (data && data.success === false && data.reason === "too_large" && !tab._transcriptTooLargeWarned) {
+          tab._transcriptTooLargeWarned = true;
+          _livecodeShowIdeToast("This chat is too long to save as shown (over 40 MB); its history is still kept.");
+        }
+      })
+      .catch(function() {});
+  }, 400);
 }
 
 const _LIVECODE_LEGACY_TRANSCRIPT_SELECTOR = [
@@ -610,6 +643,7 @@ function _livecodePostProcessRestoredOutput(out) {
   if (out.querySelector(".livecode-agents-card")) _livecodeBindAgentsCardOnce();
   _livecodeScheduleStickyUserRows(out);
   _livecodeStripErrorActivityRows(out);
+  out.querySelectorAll(".livecode-term-card.is-fading-out").forEach(function(card) { card.classList.remove("is-fading-out"); });
   out.querySelectorAll(".livecode-term-card").forEach(_livecodeTerminalSyncScroll);
   if (typeof window.rehydrateLivecodeChatMarkdown === "function") {
     window.rehydrateLivecodeChatMarkdown(out);
@@ -1907,101 +1941,17 @@ function renderLiveCodeRecentSessions() {
   _livecodeRefreshSessionMenuIfOpen();
 }
 
-function _livecodeRenderSessionMessages(messages, out) {
-  if (!out) return { firstUser: "" };
-  _livecodeResetTurnState();
-  let firstUser = "";
-  const list = messages || [];
-  list.forEach(function(msg, idx) {
-    const role = msg.role;
-    if (role === "diff") {
-      appendLiveCodeDiffBlock({
-        file_name: msg.file_name,
-        diff_html: msg.diff_html,
-        additions: msg.additions || 0,
-        deletions: msg.deletions || 0,
-        absolute_path: msg.absolute_path || "",
-        created: !!msg.created,
-      }, out);
-      return;
-    }
-    if (role === "tool_artifact") {
-      _livecodeAppendLoadedToolArtifact(msg, out);
-      return;
-    }
-    if (role === "tool") {
-      const text = String(msg.content || "");
-      if (!text) return;
-      try {
-        const parsed = JSON.parse(text);
-        if (parsed && (parsed.command || parsed.output !== undefined)) {
-          _livecodeAppendLoadedCommandBlock(
-            parsed.command || "",
-            parsed.output || parsed.error || "",
-            parsed.exit_code,
-            out
-          );
-          return;
-        }
-      } catch (_) {}
-      return;
-    }
-    const text = String(msg.content || "");
-    const hasDisplay = msg.display && (
-      msg.display.text || msg.display.segments || msg.display.images
-    );
-    if (!text && !hasDisplay && role !== "activity") return;
-    if (role === "user") {
-      const displayText = (msg.display && msg.display.text) ? String(msg.display.text) : text;
-      firstUser = firstUser || displayText || text;
-      let urow = msg.display ? _livecodeRenderPlanBuildRow(out, msg.display) : null;
-      if (!urow && msg.display && typeof window.renderLivecodeUserMessage === "function") {
-        urow = window.renderLivecodeUserMessage(out, msg.display);
-      }
-      if (!urow) {
-        urow = document.createElement("div");
-        urow.className = "chat-row livecode-user-row";
-        urow.innerHTML = `<div class="chat-msg user"><span class="livecode-user-text">${_livecodeEscapeHtml(text)}</span></div>`;
-        out.appendChild(urow);
-      }
-      _livecodeCurrentUserRow = urow;
-      _livecodeScheduleUserMessageCollapseState(out);
-    } else if (role === "assistant") {
-      if (msg.narration) {
-        _livecodeAppendNarration(text, out);
-        return;
-      }
-      const arow = document.createElement("div");
-      arow.className = "chat-row livecode-assistant-row";
-      const msgEl = document.createElement("div");
-      msgEl.className = "chat-msg assistant livecode-stream-msg livecode-plain-msg";
-      arow.appendChild(msgEl);
-      out.appendChild(arow);
-      _livecodeRenderAssistantMarkdown(msgEl, text);
-    } else if (role === "activity") {
-      if (msg.thought_only) {
-        const thought = String(msg.thought_content != null ? msg.thought_content : (msg.content || "")).trim();
-        const secs = Number(msg.thinking_s) || 0;
-        const ms = Number(msg.thinking_ms) || 0;
-        if (thought || secs > 0 || ms > 0) {
-          const wrap = _livecodeAppendActivityParts({
-            verb: "Thought",
-            detail: _livecodeThoughtDurationLabel(secs, ms),
-            meta: "",
-            thoughtContent: thought,
-          }, false, out);
-          _livecodeFillThoughtBody(wrap, thought);
-        }
-      } else if (msg.tool_calls && msg.tool_calls.length) {
-        _livecodeAppendLoadedToolActivity(msg, out, list[idx + 1]);
-      } else if (text) {
-        _livecodeAppendLoadedActivitySummary(text, out);
-      }
-    }
-  });
-  _livecodeRegroupTranscript(out);
-  _livecodeSyncTurnPointersFromDom();
-  return { firstUser: firstUser };
+// A chat from before LiveCode kept the rendered transcript: its history is still there for the agent, but
+// there is nothing to show.
+function _livecodeNoTranscriptHtml() {
+  return '<div class="chat-row livecode-status-row livecode-no-transcript"><div class="chat-msg assistant livecode-plain-msg">' +
+    "This chat was saved before LiveCode kept chats as they were shown, so its messages can’t be displayed. " +
+    "The agent still has its history: carry on here and it picks up where you left off.</div></div>";
+}
+
+function _livecodeTranscriptFirstUser(out) {
+  const first = out && out.querySelector(".chat-row.livecode-user-row .chat-msg.user");
+  return first ? String(first.innerText || first.textContent || "").trim().split("\n")[0].slice(0, 120) : "";
 }
 
 async function _livecodeFetchSessionIntoTab(tab, sessionId, options) {
@@ -2086,8 +2036,9 @@ async function _livecodeFetchSessionIntoTab(tab, sessionId, options) {
       }),
     });
     const data = await resp.json();
-    const messages = data && data.success ? (data.messages || []) : [];
-    if (!messages.length) {
+    const transcript = data && data.success ? String(data.transcript_html || "") : "";
+    const messageCount = data && data.success ? Number(data.message_count) || 0 : 0;
+    if (!transcript.trim() && !messageCount) {
 
       if (silent) return;
       if (_livecodeIsActiveTab(tab)) {
@@ -2106,8 +2057,10 @@ async function _livecodeFetchSessionIntoTab(tab, sessionId, options) {
 
     const renderOut = (isStillActive && !silent) ? getLiveCodeChatOutput() : document.createElement("div");
     if (!renderOut) return;
-    renderOut.innerHTML = "";
-    const rendered = _livecodeRenderSessionMessages(messages, renderOut);
+    _livecodeResetTurnState();
+    renderOut.innerHTML = transcript.trim() ? transcript : _livecodeNoTranscriptHtml();
+    _livecodeSyncTurnPointersFromDom();
+    const rendered = { firstUser: _livecodeTranscriptFirstUser(renderOut) };
     _livecodeStripStaleWelcome(renderOut);
     _livecodeSanitizeLoadedActivityHtml(renderOut);
     _livecodePostProcessRestoredOutput(renderOut);
@@ -7827,12 +7780,25 @@ function _livecodeBindChatScrollWheel() {
       e.stopPropagation();
     }
   }, { passive: true, capture: true });
+  // Pinned to the bottom while a reply streams in: only a move up (wheel, keys, the scrollbar) unpins. Content
+  // growing under the view also makes the gap large for a moment, and that must not count as the reader leaving.
+  let lastTop = out.scrollTop;
   out.addEventListener("scroll", function() {
-    const gap = out.scrollHeight - out.clientHeight - out.scrollTop;
+    const top = out.scrollTop;
+    const gap = out.scrollHeight - out.clientHeight - top;
     if (gap <= 2) _livecodeScrollPinned = true;
-    else if (gap > 40) _livecodeScrollPinned = false;
+    else if (gap > 40 && top < lastTop - 1) _livecodeScrollPinned = false;
+    lastTop = top;
     _livecodeScheduleStickyUserRows(out);
   }, { passive: true });
+  if (typeof MutationObserver !== "undefined") {
+    new MutationObserver(function() {
+      if (_livecodeScrollPinned) _livecodeAutoScroll(out);
+    }).observe(out, { childList: true, subtree: true, characterData: true });
+  }
+  out.addEventListener("load", function() {
+    if (_livecodeScrollPinned) _livecodeAutoScroll(out);
+  }, true);
   if (typeof ResizeObserver !== "undefined") {
     let lastHeight = out.clientHeight;
     new ResizeObserver(function() {
@@ -9953,56 +9919,6 @@ function _livecodeAppendLoadedActivitySummary(text, output) {
   });
 }
 
-function _livecodeAppendLoadedToolArtifact(msg, output) {
-  const tool = msg && msg.tool_name;
-  const result = (msg && msg.result) || {};
-  const args = (msg && msg.tool_args) || {};
-  if (_livecodeIsFileEditTool(tool) && result.diff_html) {
-    appendLiveCodeDiffBlock({
-      file_name: result.file_path || args.file_path || "file",
-      diff_html: result.diff_html,
-      additions: result.additions || 0,
-      deletions: result.deletions || 0,
-      absolute_path: result.absolute_path || "",
-      created: !!result.is_new_file,
-    }, output);
-    return;
-  }
-  if (tool === "run_command") {
-    _livecodeAppendLoadedCommandBlock(result.command || args.command || "", result.output || result.error || "", result.exit_code, output, {
-      description: args.description,
-    });
-    return;
-  }
-  if (tool === "browser") {
-    _livecodeAppendActivityParts(_livecodeBrowserParts(args, result), false, output);
-    return;
-  }
-  if (tool === "ask_question" && !result.error) {
-    const count = Number(result.question_count) || (Array.isArray(args.questions) ? args.questions.length : 0);
-    _livecodeAppendActivityParts({ verb: result.skipped ? "Skipped" : "Asked", detail: count === 1 ? "question" : "questions", meta: "" }, false, output);
-    return;
-  }
-  if (tool === "create_plan" && result.success && result.plan_file) {
-    _livecodeAppendPlanCard({ file: result.plan_file, title: result.title || args.title || "Plan", overview: result.overview || args.overview || "" }, output);
-    return;
-  }
-  if (result.error) {
-    if (_livecodeIsFileEditTool(tool)) {
-      _livecodeRecordEditFailure(args, String(result.error), result.error_kind, output);
-      return;
-    }
-    const full = String(result.error);
-    _livecodeAppendActivityParts({
-      verb: "Failed",
-      detail: _livecodeTruncateMiddle(full, 140),
-      meta: "",
-      isError: true,
-      fullErrorTitle: full,
-    }, false, output);
-  }
-}
-
 function _livecodeAppendLoadedCommandBlock(command, outputText, exitCode, container, opts) {
   container = container || getLiveCodeChatOutput();
   if (!container) return null;
@@ -10192,13 +10108,37 @@ function _livecodeSetTerminalExpanded(card, expanded) {
   }
 }
 
-function _livecodeAutoExpandTerminalCard(card) {
-  if (!card || card.dataset.userToggled || card.classList.contains("is-pending")) return;
+function _livecodeTerminalWantsExpanded(card) {
   const cmd = card.querySelector(".livecode-term-cmdline");
   const out = card.querySelector(".livecode-term-output");
   const lines = _livecodeVisualLineCount(cmd ? cmd.textContent : "") +
     _livecodeVisualLineCount(out && !out.hidden ? out.textContent : "");
-  _livecodeSetTerminalExpanded(card, lines <= LIVECODE_AUTO_EXPAND_SHELL_LINES);
+  return lines <= LIVECODE_AUTO_EXPAND_SHELL_LINES;
+}
+
+function _livecodeAutoExpandTerminalCard(card) {
+  if (!card || card.dataset.userToggled || card.classList.contains("is-pending")) return;
+  _livecodeSetTerminalExpanded(card, _livecodeTerminalWantsExpanded(card));
+}
+
+// A finished command whose output is too long to keep open fades its output out before it folds, instead of
+// snapping shut under the reader.
+const LIVECODE_TERM_FADE_MS = 220;
+function _livecodeSettleFinishedTerminalCard(card) {
+  const folding = card.classList.contains("is-expanded") && !card.dataset.userToggled &&
+    !card.classList.contains("is-pending") && !_livecodeTerminalWantsExpanded(card);
+  const reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (!folding || reduced) {
+    _livecodeAutoExpandTerminalCard(card);
+    _livecodeTerminalSyncScroll(card);
+    return;
+  }
+  card.classList.add("is-fading-out");
+  setTimeout(function() {
+    card.classList.remove("is-fading-out");
+    _livecodeAutoExpandTerminalCard(card);
+    _livecodeTerminalSyncScroll(card);
+  }, LIVECODE_TERM_FADE_MS);
 }
 
 function _livecodeCreateTerminalRow(opts) {
@@ -10292,8 +10232,7 @@ function _livecodeFinishTerminalCard(card, result) {
   } else if (statusEl) {
     statusEl.textContent = failed && r.exit_code != null ? "exit " + r.exit_code : "";
   }
-  _livecodeAutoExpandTerminalCard(card);
-  _livecodeTerminalSyncScroll(card);
+  _livecodeSettleFinishedTerminalCard(card);
   _livecodeScheduleRegroup(card.closest("#livecode-chat-messages") || undefined);
 }
 
@@ -11156,7 +11095,12 @@ function _livecodeRenderQuestionsBar() {
 
   const total = state.questions.length;
   const answered = state.questions.filter(function(q) { return _livecodeQuestionAnswered(state, q); }).length;
-  const canContinue = _livecodeQuestionsAllAnswered(state) && !state.submitting;
+  // One question at a time: the card shows the active question, Next moves on to the next unanswered one,
+  // and Continue sends the answers once every question has one.
+  const allAnswered = _livecodeQuestionsAllAnswered(state);
+  const activeAnswered = _livecodeQuestionAnswered(state, state.questions[state.active]);
+  const canContinue = (allAnswered || activeAnswered) && !state.submitting;
+  const continueLabel = allAnswered ? "Continue" : "Next";
   const headerRight = state.collapsed
     ? '<span class="livecode-questions-answered">' + answered + " of " + total + " answered</span>"
     : '<span class="livecode-questions-stepper">' +
@@ -11165,6 +11109,7 @@ function _livecodeRenderQuestionsBar() {
         '<button type="button" class="livecode-questions-icon-btn" data-questions-action="next" title="Next question" aria-label="Next question">' + _LIVECODE_CHEVRON_DOWN_SVG + "</button>" +
       "</span>";
   const questionsHtml = state.questions.map(function(q, qIndex) {
+    if (qIndex !== state.active) return "";
     const rows = q.options.map(function(opt, oIndex) {
       return _livecodeQuestionRowHtml(state, q, qIndex, oIndex, opt.id,
         '<span class="livecode-questions-option-label">' + _livecodeEscapeHtml(opt.label) + "</span>");
@@ -11180,8 +11125,9 @@ function _livecodeRenderQuestionsBar() {
 
   bar.hidden = false;
   bar.classList.toggle("is-collapsed", !!state.collapsed);
-  bar.classList.toggle("is-settled", !!state.shown);
+  bar.classList.toggle("is-settled", !!state.shown && state.shownActive === state.active);
   state.shown = true;
+  state.shownActive = state.active;
   bar.innerHTML =
     '<div class="livecode-questions-header" data-questions-action="' + (state.collapsed ? "expand" : "") + '">' +
       _LIVECODE_QUESTION_ICON_SVG +
@@ -11196,7 +11142,7 @@ function _livecodeRenderQuestionsBar() {
       '<div class="livecode-questions-scroll"><div class="livecode-questions-list">' + questionsHtml + "</div></div>" +
       '<div class="livecode-questions-actions">' +
         '<button type="button" class="livecode-btn is-text" data-questions-action="skip"' + (state.submitting ? " disabled" : "") + '>Skip<span class="livecode-kbd">Esc</span></button>' +
-        '<button type="button" class="livecode-btn is-yellow" data-questions-action="continue"' + (canContinue ? "" : " disabled") + '>Continue<span class="livecode-kbd">⏎</span></button>' +
+        '<button type="button" class="livecode-btn is-yellow" data-questions-action="continue"' + (canContinue ? "" : " disabled") + ">" + continueLabel + '<span class="livecode-kbd">⏎</span></button>' +
       "</div>");
 
   bar.querySelectorAll(".livecode-questions-freeform").forEach(function(ta) {
