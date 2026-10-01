@@ -5653,6 +5653,16 @@ body.black-theme #livecode-chat-pill-wrapper {
 	pointer-events: none;
 }
 
+#livecode-chat-messages .livecode-image-thumb-wrap,
+#livecode-chat-messages .livecode-image-thumb-wrap.readonly {
+	pointer-events: auto;
+	cursor: zoom-in;
+}
+
+#livecode-chat-messages .livecode-image-thumb-wrap .livecode-image-thumb {
+	cursor: zoom-in;
+}
+
 .livecode-image-thumb {
 	width: 100%;
 	height: 100%;
@@ -8130,16 +8140,19 @@ body.pink-theme .livecode-dialog-overlay {
 	background: transparent;
 }
 
+/* An empty tail below the last message keeps the chat off the composer.
+   Always there once the chat has a message, never on the empty welcome
+   screen; flex-shrink: 0 stops a long chat from squeezing it to nothing. */
 #ide-editor-inner #livecode-agent-panel #livecode-chat-messages::after {
 	content: "";
 	display: block;
+	flex: 0 0 auto;
 	height: 0;
-	transition: height 0.25s ease;
 }
 
-#ide-editor-inner #livecode-agent-panel #livecode-chat-messages.is-turn-running::after {
-	height: 25%;
-	transition: none;
+#ide-editor-inner #livecode-agent-panel #livecode-chat-messages.is-turn-running::after,
+#ide-editor-inner #livecode-agent-panel #livecode-chat-messages:has(> .chat-row.livecode-user-row)::after {
+	height: 10%;
 }
 
 #ide-editor-inner #livecode-agent-panel #livecode-chat-messages > .chat-row {
@@ -8235,7 +8248,8 @@ body.pink-theme .livecode-dialog-overlay {
 	position: relative !important;
 }
 
-#ide-editor-inner #livecode-agent-panel #livecode-chat-messages > .chat-row.livecode-user-row:not(.is-stuck)::after {
+#ide-editor-inner #livecode-agent-panel #livecode-chat-messages > .chat-row.livecode-user-row:not(.is-stuck)::after,
+#ide-editor-inner #livecode-agent-panel #livecode-chat-messages > .chat-row.livecode-user-row.is-pushed::after {
 	display: none !important;
 }
 
@@ -10602,6 +10616,7 @@ body.pink-theme #ide-plan-view {
 	position: relative;
 	max-height: 200px;
 	overflow-y: auto;
+	padding-bottom: 10px;
 	scrollbar-width: none;
 	overflow-anchor: none;
 	-webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 16px), rgba(0, 0, 0, 0.8) calc(100% - 14px), rgba(0, 0, 0, 0.4) calc(100% - 8px), transparent);
@@ -10630,6 +10645,8 @@ body.pink-theme #ide-plan-view {
 	from { opacity: 0; transform: translateY(4px); }
 	to { opacity: 1; transform: none; }
 }
+/* The card rebuilds on every click; fade in only when a question set first appears. */
+.livecode-questions-bar.is-settled .livecode-questions-question { animation: none; }
 @media (prefers-reduced-motion: reduce) {
 	.livecode-questions-bar .livecode-questions-question { animation: none; }
 }
@@ -11988,30 +12005,6 @@ body.white-theme #ide-editor-inner #livecode-agent-panel .livecode-questions-bar
 	line-height: 1.5;
 }
 
-#ide-editor-inner .livecode-empty-editor-steps {
-	display: flex;
-	flex-direction: column;
-	gap: 10px;
-	width: 100%;
-	max-width: 340px;
-	margin-top: 10px;
-	text-align: left;
-}
-
-#ide-editor-inner .livecode-empty-editor-step {
-	display: flex;
-	align-items: flex-start;
-	gap: 10px;
-	color: var(--lc-text-3);
-	font-size: 13px;
-	line-height: 1.5;
-}
-
-#ide-editor-inner .livecode-empty-editor-step strong {
-	color: var(--lc-text-1);
-	font-weight: 600;
-}
-
 @container (max-width: 300px) {
 	#ide-editor-inner .livecode-empty-editor-logo {
 		width: 56px;
@@ -12021,25 +12014,9 @@ body.white-theme #ide-editor-inner #livecode-agent-panel .livecode-questions-bar
 }
 
 @container (max-height: 420px) {
-	#ide-editor-inner .livecode-empty-editor-logo,
-	#ide-editor-inner .livecode-empty-editor-steps {
+	#ide-editor-inner .livecode-empty-editor-logo {
 		display: none;
 	}
-}
-
-#ide-editor-inner .livecode-empty-editor-step-num {
-	display: inline-flex;
-	flex: none;
-	align-items: center;
-	justify-content: center;
-	width: 18px;
-	height: 18px;
-	border-radius: 50%;
-	margin-top: 1px;
-	background: rgb(var(--lc-fg) / 0.1);
-	color: var(--lc-text-2);
-	font-size: 11px;
-	font-weight: 600;
 }
 
 
@@ -19392,8 +19369,17 @@ body.pink-theme #ide-editor-section #ide-editor-inner #livecode-agent-panel #liv
 	mask-image: linear-gradient(to bottom, transparent 0, #000 16px);
 }
 
+/* Expanded output has one scroller, the inner .livecode-term-scroll. The body
+   used to scroll too (420px around a 480px inner scroller that blocks scroll
+   chaining), which left the last lines of long output out of reach. */
 #ide-editor-section #ide-editor-inner #livecode-agent-panel #livecode-chat-messages .livecode-term-card.is-expanded .livecode-term-body {
-	max-height: 420px;
+	max-height: none;
+	overflow-y: visible !important;
+}
+
+#ide-editor-section #ide-editor-inner #livecode-agent-panel #livecode-chat-messages .livecode-term-card.is-expanded .livecode-term-scroll {
+	max-height: min(420px, 60vh);
+	overflow-y: auto;
 	scrollbar-width: thin;
 	scrollbar-color: var(--lc-scroll) transparent;
 }
@@ -19405,12 +19391,12 @@ body.pink-theme #ide-editor-section #ide-editor-inner #livecode-agent-panel #liv
 	mask-image: none;
 }
 
-#ide-editor-section #ide-editor-inner #livecode-agent-panel #livecode-chat-messages .livecode-term-card.is-expanded .livecode-term-body::-webkit-scrollbar {
+#ide-editor-section #ide-editor-inner #livecode-agent-panel #livecode-chat-messages .livecode-term-card.is-expanded .livecode-term-scroll::-webkit-scrollbar {
 	display: block;
 	width: 7px;
 }
 
-#ide-editor-section #ide-editor-inner #livecode-agent-panel #livecode-chat-messages .livecode-term-card.is-expanded .livecode-term-body::-webkit-scrollbar-thumb {
+#ide-editor-section #ide-editor-inner #livecode-agent-panel #livecode-chat-messages .livecode-term-card.is-expanded .livecode-term-scroll::-webkit-scrollbar-thumb {
 	background: var(--lc-scroll);
 }
 

@@ -6,6 +6,7 @@ import tempfile
 
 import pytest
 
+from test_turns_conversation import _answer_when_asked
 from turn_driver import ScriptedModel, call, reply, run_turn
 
 
@@ -89,25 +90,72 @@ def _edit_button():
 
 
 def _reminders(model):
-    return [i for i, c in enumerate(model.calls) if "You changed UI code" in c.text()]
+    """The calls a UI-check reminder was added before (each call's history holds all earlier ones)."""
+    counts = [c.text().count("You changed UI code") for c in model.calls]
+    return [i for i, n in enumerate(counts) if n > (counts[i - 1] if i else 0)]
 
 
-def test_a_ui_change_is_not_finished_until_it_was_looked_at_in_the_browser(site, browser_ready):
+_VERIFY_Q = "Want me to verify the UI change in the browser?"
+
+
+def _ask_verify():
+    return call("ask_question", questions=[{"id": "verify", "prompt": _VERIFY_Q,
+                                            "options": [{"id": "yes", "label": "Yes"}, {"id": "no", "label": "No"}]}])
+
+
+def test_a_ui_change_asks_first_and_yes_checks_a_crop_of_the_change(site, browser_ready):
     project = _project({"src/components/Button.tsx": BUTTON})
     model = ScriptedModel([
         lambda c: reply("Changing the colour.", _edit_button()),
-        lambda c: reply("The button is blue now."),                       # tries to finish without looking
+        lambda c: reply("The button is blue now."),                       # tries to finish without asking
+        lambda c: reply("", _ask_verify()),
+        lambda c: reply("The button is blue now."),                       # said yes, still has not looked
         lambda c: reply("Checking it.", call("browser", action="navigate", url=site + "/app.html")),
+        lambda c: reply("Looking closer.", call("browser", action="crop", selector="header button")),
         lambda c: reply("Checked it in the browser: the button is blue."),
     ])
+    seen: list = []
+    answerer = _answer_when_asked([{"id": "verify", "selected": ["yes"]}], seen)
     out = run_turn(project, "make the New order button blue", model)
+    answerer.join(timeout=25)
     assert not out["errors"]
     assert "#2563eb" in open(os.path.join(project, "src/components/Button.tsx")).read()
-    first = _reminders(model)
-    assert first and first[0] == 2, "the finish right after the edit is held back"
-    assert "src/components/Button.tsx" in model.calls[2].text()
-    assert len(model.calls) == 4, "once it looked, it may finish"
-    assert out["answer"].startswith("Checked it in the browser")
+    assert _reminders(model) == [2, 4], "held back to ask, then held back again to look after the Yes"
+    assert "ask_question" in model.calls[2].text() and _VERIFY_Q in model.calls[2].text()
+    assert "crop" in model.calls[4].text() and "the user asked you to" in model.calls[4].text()
+    assert seen and seen[0][0]["prompt"] == _VERIFY_Q
+    assert len(model.calls) == 7 and out["answer"].startswith("Checked it in the browser")
+
+
+def test_no_leaves_the_browser_alone_and_says_it_was_not_checked():
+    project = _project({"src/components/Button.tsx": BUTTON})
+    model = ScriptedModel([
+        lambda c: reply("Changing the colour.", _edit_button()),
+        lambda c: reply("The button is blue now."),
+        lambda c: reply("", _ask_verify()),
+        lambda c: reply("The button is blue now; I did not check it in the browser."),
+    ])
+    answerer = _answer_when_asked([{"id": "verify", "selected": ["no"]}], [])
+    out = run_turn(project, "make the New order button blue", model)
+    answerer.join(timeout=25)
+    assert not out["errors"]
+    assert "not checked in the browser" in str(model.calls[3].tool_results()[-1].get("note"))
+    assert len(model.calls) == 4 and len(_reminders(model)) == 1, "no reminder after the No"
+
+
+def test_a_request_to_see_it_goes_straight_to_the_browser(site, browser_ready):
+    project = _project({"src/components/Button.tsx": BUTTON})
+    model = ScriptedModel([
+        lambda c: reply("Changing the colour.", _edit_button()),
+        lambda c: reply("The button is blue now."),
+        lambda c: reply("Checking it.", call("browser", action="navigate", url=site + "/app.html")),
+        lambda c: reply("Checked it: the button is blue."),
+    ])
+    run_turn(project, "make the New order button blue and check it in the browser", model)
+    assert _reminders(model) == [2]
+    text = model.calls[2].text()
+    assert "ask_question" not in text.split("You changed UI code", 1)[1].split("</system-reminder>", 1)[0]
+    assert "crop" in text and len(model.calls) == 4
 
 
 def test_no_reminder_when_it_looks_right_after_the_change(site, browser_ready):

@@ -28,3 +28,57 @@ def test_batches_and_non_ui_files():
     ui.observe_edit("src/pages/index.tsx", 2)
     ui.observe_browser({"action": "batch", "actions": [{"action": "click", "text": "x"}, {"action": "screenshot"}]}, {"success": True}, 3)
     assert ui.reminder() == ""
+
+
+def _answer(ui, selected=None, other=None, skipped=False):
+    args = {"questions": [{"id": "v", "prompt": "Want me to verify the UI change in the browser?",
+                           "options": [{"id": "yes", "label": "Yes"}, {"id": "no", "label": "No"}]}]}
+    if skipped:
+        return ui.observe_question(args, {"success": True, "skipped": True})
+    entry = {"question": args["questions"][0]["prompt"], "selected": selected or []}
+    if other:
+        entry["other"] = other
+    return ui.observe_question(args, {"success": True, "answered": True, "answers": [entry]})
+
+
+def test_without_a_request_to_see_it_the_agent_asks_first():
+    ui = _UiVerify()
+    ui.observe_edit("src/components/Card.tsx", 1)
+    text = ui.reminder()
+    assert "ask_question" in text and "Want me to verify the UI change in the browser?" in text
+
+
+def test_yes_sends_it_to_the_browser_for_a_crop_of_the_change():
+    ui = _UiVerify()
+    ui.observe_edit("src/components/Card.tsx", 1)
+    ui.reminder()
+    assert _answer(ui, ["Yes"]) == ""
+    text = ui.reminder()
+    assert "crop" in text and "the user asked you to" in text
+    ui.observe_browser({"action": "crop", "selector": ".card"}, {"success": True}, 3)
+    assert ui.reminder() == ""
+
+
+def test_no_skip_or_a_typed_answer_stops_the_reminders_and_says_so():
+    for kwargs in ({"selected": ["No"]}, {"skipped": True}, {"selected": [], "other": "later maybe"}):
+        ui = _UiVerify()
+        ui.observe_edit("src/components/Card.tsx", 1)
+        ui.reminder()
+        note = _answer(ui, **kwargs)
+        assert "not checked in the browser" in note, kwargs
+        assert ui.reminder() == "", kwargs
+
+
+def test_other_questions_leave_it_alone():
+    ui = _UiVerify()
+    ui.observe_edit("src/components/Card.tsx", 1)
+    args = {"questions": [{"id": "c", "prompt": "Which colour?", "options": [{"id": "r", "label": "Red"}]}]}
+    assert ui.observe_question(args, {"success": True, "skipped": True}) == ""
+    assert "ask_question" in ui.reminder()
+
+
+def test_a_request_that_asks_to_see_it_goes_straight_to_the_browser():
+    ui = _UiVerify(requested=True)
+    ui.observe_edit("src/components/Card.tsx", 1)
+    text = ui.reminder()
+    assert "ask_question" not in text and "crop" in text
