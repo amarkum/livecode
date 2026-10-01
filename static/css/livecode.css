@@ -3127,7 +3127,7 @@ body.black-theme {
 	background: transparent;
 	font-size: 12px;
 	white-space: nowrap;
-	transition: all 0.2s;
+	transition: background-color 0.2s, color 0.2s, border-color 0.2s, opacity 0.2s;
 	position: relative;
 	gap: 6px;
 	min-width: 80px;
@@ -3147,7 +3147,7 @@ body.black-theme {
 	justify-content: center;
 	border-radius: 2px;
 	opacity: 0;
-	transition: all 0.2s;
+	transition: background-color 0.2s, color 0.2s, border-color 0.2s, opacity 0.2s;
 	flex-shrink: 0;
 	font-size: 14px;
 	line-height: 1;
@@ -3336,7 +3336,7 @@ body.black-theme {
 
 .ide-activity-btn {
 	border-left: 2px solid transparent !important;
-	transition: all 0.2s ease;
+	transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease, opacity 0.2s ease;
 }
 
 .ide-activity-btn.active {
@@ -17012,8 +17012,6 @@ body.pink-theme #ide-editor-inner #ide-browser-view { --ide-browser-stage-bg: #f
 	border: 1px solid rgba(255, 255, 255, .12);
 	border-radius: 999px;
 	background: rgba(24, 24, 27, .78);
-	-webkit-backdrop-filter: blur(10px) saturate(1.4);
-	backdrop-filter: blur(10px) saturate(1.4);
 	box-shadow: 0 2px 6px rgba(0, 0, 0, .18), 0 12px 32px rgba(0, 0, 0, .28);
 	color: #f4f4f5;
 	font-size: clamp(11px, .45cqw + 8px, 13px);
@@ -17021,7 +17019,6 @@ body.pink-theme #ide-editor-inner #ide-browser-view { --ide-browser-stage-bg: #f
 	white-space: nowrap;
 	transform: translateX(-50%);
 	pointer-events: none;
-	animation: ide-browser-badge-in .22s cubic-bezier(.215, .61, .355, 1);
 }
 #ide-editor-inner #ide-browser-view .browser-recording-indicator[hidden] { display: none; }
 #ide-editor-inner #ide-browser-view .browser-recording-indicator .ide-browser-agent-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
@@ -21151,3 +21148,19 @@ body.lc-reduce-motion *::after {
 		flex-shrink: 1 !important;
 	}
 }
+
+/* Toast: its own element, so closing a menu never removes it. */
+.livecode-toast {
+	align-items: center;
+	gap: 8px;
+	padding: 9px 14px;
+	border: 1px solid var(--lc-stroke-3, rgba(148, 163, 184, 0.25));
+	border-radius: 8px;
+	background: var(--lc-bubble-bg, #1f2937);
+	color: var(--lc-text-1, #e5e7eb);
+	box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+	pointer-events: none;
+	line-height: 1.4;
+}
+body.white-theme .livecode-toast,
+body.pink-theme .livecode-toast { background: #ffffff; color: #1f2937; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18); }

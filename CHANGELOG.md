@@ -2,6 +2,28 @@
 
 Notes for the agent harness: what was added, and which files changed. Newest first.
 
+## Harness without patchy edges, and a page that does not flicker, October 2026
+
+### Harness
+
+- **No invented go-aheads.** An answer that ends by asking whether to send, post, submit, book or buy is held: when the request authorised that step the agent is told to do it, when the step is routine (a rename, a dependency, a check-in) it is told to carry on, otherwise it must ask in the questions card (`ASK_IN_CARD_TEMPLATE`, `GO_AHEAD_TEMPLATE`, `_asked_step_authorized`, `_asked_step_is_routine` in `harness.py`).
+- **Every finish goes through the gates.** `attempt_completion` and a plain text answer take the same `_closing_gate`: to-do list, permission, UI check, design match, failing tests, then the project's checks. A stationarity hard stop ends the turn with its reason in the answer.
+- **Checks run after edits** (`verification.py`, `detect_check_command`): a project with `npm test`, `pytest`, `cargo test`, `go test`, `make test` or `tsc` gets its check run when the agent finishes after editing code without testing. The run appears as a command card (`tool_call_id` `auto-check-N`), a failure's tail goes back to the model and holds the turn, twice at most (`AUTO_CHECK_MAX_RUNS`). Settings > Harness > Run the project's checks (`auto_checks`) turns it off.
+- **One reminder a step.** The nudges are one if/elif chain by priority: loop guard, budget, failed edit, failing tests, exploration streak (a late variant when the turn is long), scattered searches, directory drilling, finish after editing, to-do list.
+- **Context measured properly.** Images count as 1,400 tokens each, the tool schemas count against the budget, the budget comes from the model's real working window (`working_context_tokens`). Compaction keeps the failure lines and tail of command output (`command_output_digest`) and browser steps keep action, URL, title and verdict. Session compaction measures the projected history and compacts at a threshold above the in-turn one.
+- **Prompt built from the tools offered** (`build_system_prompt(..., mode, tool_names)`): sections appear only for tools the turn has; the compact prompt is gone.
+- **Routing with fewer false positives** (`routing.py`): closing remarks ("thanks, that fixed it") are chat only, questions are not hard tasks, a version question is not a version bump, "dont check the page" is honoured, URLs quoted as evidence ("the request to localhost:8000 returns 500") do not open the browser, and coding vocabulary ("add a POST endpoint", "wire the submit button") authorises nothing.
+- **Retries:** 409 is not retried; 408, 425, 429, 5xx and 529 are, as are stream drops.
+
+### Page
+
+- **In-place patching** (`_livecodeMorph`): the settings page, questions card, chat tabs, project tabs, queue bar and changes list are patched node by node instead of rebuilt, keyed by `data-key` or `id`, so focus, typed text, scroll position, open menus and running spinners survive a re-render. New nodes are adopted, not cloned, so listeners the renderer attached stay.
+- **Chat:** a finished streamed answer is rendered off screen and patched onto the streamed nodes; command output is written once per frame and only follows its tail while the reader has not scrolled up; pinned user messages move in the same frame as the scroll with their row gaps cached; collapse measurement reads every row before writing; the transcript snapshot is written when the browser is idle and re-parsed only when there is an error row to strip; the thinking label writes only when it changed.
+- **Browser tab:** the last frame stays on screen when the stream closes, the stage follows a pane drag at once and only the viewport resize waits, a changed frame size is re-fitted on the next poll, the agent pill keeps showing for eight seconds between steps and lost its entrance animation and blur.
+- **Settings:** the search filters a beat after the last keystroke; a reply to an earlier save no longer flips a switch toggled while it was in flight; editor and terminal settings re-apply only when one of theirs changed.
+- **Less work on the main thread:** the file tree redraws only when a silent refresh found a change; the toast has a class and is re-attached if it was detached; the body observer highlights scripts only when a script block was added; the MCP tool chip renders the settings page once; `transition: all` became the properties that change; the plan view's theme watcher starts from the right theme name; `static/assets/monaco-themes.json` ships (empty) so the page no longer 404s on load.
+- **Tests:** `tests/test_frontend_morph.py` (Chromium), `test_auto_checks.py`, `test_compaction.py`, `test_retry.py`, `test_classifier.py`, and the turn driver records the page's progress events.
+
 ## Merged with main's settings and harness work, October 2026
 
 Main was rewritten to its own history with a large Settings and harness commit. Both sides are merged here:

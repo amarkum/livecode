@@ -236,14 +236,38 @@
 
   function agentSpec(key) { return (agent && agent.schema[key]) || {}; }
 
+  // Values whose save is still in flight. A reply to an earlier save carries the server's older value for
+  // them, so they are laid over every reply until their own save has answered.
+  const pendingAgent = new Map();
+
   function saveAgent(body, message) {
+    const keys = Object.keys(body || {});
+    const stamp = {};
+    keys.forEach(function(key) {
+      const token = {};
+      stamp[key] = token;
+      pendingAgent.set(key, { token: token, value: body[key] });
+    });
+    const settle = function() {
+      keys.forEach(function(key) {
+        const entry = pendingAgent.get(key);
+        if (entry && entry.token === stamp[key]) pendingAgent.delete(key);
+      });
+    };
+    const overlay = function(data) {
+      if (!data || typeof data !== "object" || !pendingAgent.size) return data;
+      const merged = Object.assign({}, data);
+      pendingAgent.forEach(function(entry, key) { merged[key] = entry.value; });
+      return merged;
+    };
     return postJson("/livecode/agent/settings", body)
       .then(function(data) {
-        agent = data;
+        settle();
+        agent = overlay(data);
         rerender(["agent", "harness", "plan", "memory"]);
         if (message) toast(message);
       })
-      .catch(function(err) { toast(err.message || String(err)); rerender(["agent", "harness", "plan", "memory"]); });
+      .catch(function(err) { settle(); toast(err.message || String(err)); rerender(["agent", "harness", "plan", "memory"]); });
   }
 
   function resetAgentGroup(group, label) {
@@ -396,6 +420,7 @@
       agentNumber("loop_hard_stop", "Stop after repeats", "Identical calls in a row before the loop guard ends the turn.", "calls"),
       agentSwitch("nudges", "Course-correction hints", "Short reminders when the agent scatters searches, re-reads without editing, keeps failing a test, or forgets to finish after editing."),
       agentSwitch("verify_after_edit", "Check diagnostics after edits", "After the agent edits code, language-server errors in those files are fed back so it fixes them before finishing."),
+      agentSwitch("auto_checks", "Run the project's checks", "When the agent finishes after editing code without running the tests itself, the project's own check (npm test, pytest, cargo test, make test...) runs as a command card and a failure holds the turn open."),
       agentSwitch("todo_gate", "Finish the to-do list", "The agent cannot end a turn while its own to-do list has unfinished items, unless it marks them cancelled."),
       agentNumber("model_retries", "Model retries", "How many times a failed model call (rate limit, timeout, server error) is retried with backoff.", "times"),
       agentNumber("command_timeout_s", "Command timeout", "How long a command may run before it is stopped, unless the agent asks for longer.", "s"),
@@ -990,7 +1015,9 @@
     }
     if (input.hasAttribute && input.hasAttribute("data-settings-search")) {
       window._livecodeSettingsQuery = String(input.value || "");
-      _livecodeRenderSettingsPage();
+      // The page follows the search a beat after the last keystroke, not on every one.
+      clearTimeout(window._livecodeSettingsSearchTimer);
+      window._livecodeSettingsSearchTimer = setTimeout(_livecodeRenderSettingsPage, 120);
     }
   };
 

@@ -323,12 +323,14 @@ function _livecodePersistChatSnapshot(projectPath, tab, stateKey) {
   }
   if (!tab.messagesHtml) return;
 
-  try {
-    const tmp = document.createElement("div");
-    tmp.innerHTML = tab.messagesHtml;
-    _livecodeStripErrorActivityRows(tmp);
-    tab.messagesHtml = tmp.innerHTML;
-  } catch (e) {}
+  if (tab.messagesHtml.indexOf("is-error") >= 0) {
+    try {
+      const tmp = document.createElement("div");
+      tmp.innerHTML = tab.messagesHtml;
+      _livecodeStripErrorActivityRows(tmp);
+      tab.messagesHtml = tmp.innerHTML;
+    } catch (e) {}
+  }
 
   _livecodeSaveTranscript(projectPath, tab, stateKey);
   const key = _livecodeChatSnapshotKey(projectPath, tab.sessionId, stateKey);
@@ -3013,13 +3015,8 @@ function initializeTerminalForTab(tabData, container) {
         if (isActive() && ideTerminalVisible) {
           _livecodeFlushTerminalOutput(tabData);
           try {
-            terminal.write(data.output);
+            terminal.write(data.output);  // xterm follows the tail by itself while the viewport is at the bottom
           } catch (e) {}
-          setTimeout(() => {
-            try {
-              terminal.scrollToBottom();
-            } catch (e) {}
-          }, 10);
         } else {
           _livecodeBufferTerminalOutput(tabData, data.output);
         }
@@ -4065,11 +4062,14 @@ function _livecodePlanMermaidThemeVariables() {
 let _livecodePlanThemeObserver = null;
 function _livecodeWatchPlanTheme() {
   if (_livecodePlanThemeObserver || typeof MutationObserver === "undefined") return;
-  let lastTheme = document.body.className;
-  _livecodePlanThemeObserver = new MutationObserver(function() {
-    const theme = ["dark-theme", "white-theme", "pink-theme", "black-theme"].filter(function(c) {
+  const currentTheme = function() {
+    return ["dark-theme", "white-theme", "pink-theme", "black-theme"].filter(function(c) {
       return document.body.classList.contains(c);
     }).join(" ");
+  };
+  let lastTheme = currentTheme();
+  _livecodePlanThemeObserver = new MutationObserver(function() {
+    const theme = currentTheme();
     if (theme === lastTheme) return;
     lastTheme = theme;
     const info = ideActiveFile ? ideOpenFiles[ideActiveFile] : null;
@@ -4365,7 +4365,8 @@ let _livecodeIdeToastTimer = null;
 function _livecodeShowIdeToast(message) {
   if (!_livecodeIdeToastEl) {
     _livecodeIdeToastEl = document.createElement("div");
-    _livecodeIdeToastEl.className = "chat-history-menu theme-transition";
+    _livecodeIdeToastEl.className = "livecode-toast theme-transition";
+    _livecodeIdeToastEl.setAttribute("role", "status");
     _livecodeIdeToastEl.style.position = "fixed";
     _livecodeIdeToastEl.style.top = "auto";
     _livecodeIdeToastEl.style.right = "auto";
@@ -4379,6 +4380,7 @@ function _livecodeShowIdeToast(message) {
     _livecodeIdeToastEl.style.display = "none";
     document.body.appendChild(_livecodeIdeToastEl);
   }
+  if (!_livecodeIdeToastEl.isConnected) document.body.appendChild(_livecodeIdeToastEl);
   _livecodeIdeToastEl.textContent = message;
   _livecodeIdeToastEl.style.display = "flex";
   if (_livecodeIdeToastTimer) clearTimeout(_livecodeIdeToastTimer);
@@ -5016,6 +5018,19 @@ function _livecodeMergeDirListing(node) {
   });
 }
 
+function _livecodeTreeFingerprint(nodes, out) {
+  // Names, kinds and paths of every loaded node: what the tree draws. Equal before and after a refresh
+  // means nothing on disk changed, so the tree is left alone.
+  out = out || [];
+  Object.keys(nodes || {}).sort().forEach(function(name) {
+    const node = nodes[name];
+    if (!node) return;
+    out.push(name, node.is_dir ? "d" : "f", String(node.path || ""), node.loaded ? "1" : "0");
+    if (node.children) _livecodeTreeFingerprint(node.children, out);
+  });
+  return out;
+}
+
 function _livecodeRunSilentTreeRefresh() {
   if (_livecodeTreeRefreshRunning) {
     _livecodeTreeRefreshQueued = true;
@@ -5027,10 +5042,11 @@ function _livecodeRunSilentTreeRefresh() {
   });
   if (!dirs.length) return;
   const snapshot = ideFileTreeData;
+  const before = _livecodeTreeFingerprint(ideFileTreeData).join("\n");
   _livecodeTreeRefreshRunning = true;
   Promise.all(dirs.map(_livecodeMergeDirListing)).catch(function() {}).then(function() {
     _livecodeTreeRefreshRunning = false;
-    if (snapshot === ideFileTreeData) _livecodeRenderWorkspaceTree();
+    if (snapshot === ideFileTreeData && _livecodeTreeFingerprint(ideFileTreeData).join("\n") !== before) _livecodeRenderWorkspaceTree();
     if (_livecodeTreeRefreshQueued) {
       _livecodeTreeRefreshQueued = false;
       _livecodeScheduleSilentTreeRefresh();
@@ -5740,14 +5756,22 @@ function _livecodeRenderProjectTabs() {
     '<svg id="ide-fullscreen-exit-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none;"><path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"></path></svg>' + "</button>";
   strip.hidden = !list.length;
   if (html === _livecodeProjectTabsHtml) return;
-  const focusedKey = document.activeElement && strip.contains(document.activeElement) && document.activeElement.getAttribute("data-project-key");
-  strip.innerHTML = html;
-  _livecodeSyncThemeButton();
-  _livecodeProjectTabsHtml = html;
-  if (focusedKey) {
-    const again = Array.from(strip.querySelectorAll(".ide-project-tab")).find(function(el) { return el.getAttribute("data-project-key") === focusedKey; });
-    if (again) again.focus();
+  const existingList = strip.querySelector(".ide-project-tabs-list");
+  if (existingList && strip.dataset.actionsBuilt === "1") {
+    // Only the tabs changed: patch them in place. The action buttons (run, terminal, fullscreen) carry
+    // live pressed and shown state, so they are never rebuilt.
+    _livecodeMorph(existingList, tabsHtml);
+  } else {
+    const focusedKey = document.activeElement && strip.contains(document.activeElement) && document.activeElement.getAttribute("data-project-key");
+    strip.innerHTML = html;
+    strip.dataset.actionsBuilt = "1";
+    _livecodeSyncThemeButton();
+    if (focusedKey) {
+      const again = Array.from(strip.querySelectorAll(".ide-project-tab")).find(function(el) { return el.getAttribute("data-project-key") === focusedKey; });
+      if (again) again.focus();
+    }
   }
+  _livecodeProjectTabsHtml = html;
   const active = strip.querySelector(".ide-project-tab.is-active");
   const tabsList = strip.querySelector(".ide-project-tabs-list");
   if (active && tabsList) {
@@ -7012,28 +7036,23 @@ function _livecodeSanitizeLoadedActivityHtml(out) {
 
 function _livecodeUpdateUserMessageCollapseState(out) {
   if (!out) return;
+  // scrollHeight is the full content height even when the bubble is clamped, so every row can be
+  // measured first and written after: one layout for the batch instead of one per row.
+  const measured = [];
   Array.from(out.querySelectorAll(".chat-row.livecode-user-row")).forEach(function(row) {
     const msg = row.querySelector(".chat-msg.user");
     if (!msg) return;
-    row.classList.remove("is-collapsible");
-    const isExpanded = row.classList.contains("is-expanded");
-    if (isExpanded) row.classList.remove("is-expanded");
-
     const styles = getComputedStyle(msg);
     let lineHeight = parseFloat(styles.lineHeight || "0");
     if (!Number.isFinite(lineHeight) || lineHeight <= 0) {
       const fontSize = parseFloat(styles.fontSize || "0");
       lineHeight = Number.isFinite(fontSize) && fontSize > 0 ? fontSize * 1.55 : 18;
     }
-    const collapsedHeight = lineHeight * 6.2;
-    const isTooTallForCollapsedRange = msg.scrollHeight > collapsedHeight + 2;
-
-    if (isExpanded) row.classList.add("is-expanded");
-    if (isTooTallForCollapsedRange) {
-      row.classList.add("is-collapsible");
-    } else {
-      row.classList.remove("is-expanded");
-    }
+    measured.push({ row: row, collapsible: msg.scrollHeight > lineHeight * 6.2 + 2 });
+  });
+  measured.forEach(function(item) {
+    item.row.classList.toggle("is-collapsible", item.collapsible);
+    if (!item.collapsible) item.row.classList.remove("is-expanded");
   });
 }
 
@@ -7098,37 +7117,33 @@ function _livecodeLoadChatTabState(tab) {
 function _livecodeRenderChatTabs() {
   const list = document.getElementById("livecode-chat-tabs-list");
   if (!list) return;
-  list.innerHTML = "";
-  livecodeChatTabs.forEach(function(tab) {
-    const tabEl = document.createElement("div");
-    const runningClass = tab.agentRunning ? " is-running" : "";
-    const unreadClass = tab.hasUnread && !tab.agentRunning ? " has-unread" : "";
-    tabEl.className = "livecode-chat-tab theme-transition" + (tab.id === livecodeActiveChatTabId ? " active" : "") + runningClass + unreadClass;
-    tabEl.dataset.tabId = tab.id;
-    tabEl.setAttribute("role", "tab");
-    tabEl.setAttribute("tabindex", tab.id === livecodeActiveChatTabId ? "0" : "-1");
-    tabEl.setAttribute("aria-selected", tab.id === livecodeActiveChatTabId ? "true" : "false");
+  if (!list.dataset.clicksBound) {
+    list.dataset.clicksBound = "1";
+    list.addEventListener("click", function(e) {
+      const tabEl = e.target.closest ? e.target.closest(".livecode-chat-tab") : null;
+      if (!tabEl || !list.contains(tabEl)) return;
+      if (e.target.closest(".livecode-chat-tab-close")) {
+        e.preventDefault();
+        e.stopPropagation();
+        _livecodeCloseChatTab(tabEl.dataset.tabId);
+        return;
+      }
+      _livecodeSwitchChatTab(tabEl.dataset.tabId);
+    });
+  }
+  const html = livecodeChatTabs.map(function(tab) {
+    const active = tab.id === livecodeActiveChatTabId;
     const tabTitle = _livecodeTruncateTabTitle(tab.title);
-    tabEl.innerHTML =
+    return '<div class="livecode-chat-tab theme-transition' + (active ? " active" : "") + (tab.agentRunning ? " is-running" : "") +
+      (tab.hasUnread && !tab.agentRunning ? " has-unread" : "") + '" data-key="' + _livecodeEscapeHtml(String(tab.id)) + '" data-tab-id="' + _livecodeEscapeHtml(String(tab.id)) +
+      '" role="tab" tabindex="' + (active ? "0" : "-1") + '" aria-selected="' + (active ? "true" : "false") + '">' +
       '<span class="livecode-chat-tab-icon">' + _livecodeGetTabIconHtml(tab) + "</span>" +
       '<span class="livecode-chat-tab-label" title="' + _livecodeEscapeHtml(tabTitle) + '">' + _livecodeEscapeHtml(tabTitle) + "</span>" +
       '<button type="button" class="livecode-chat-tab-close theme-transition" title="Close chat" aria-label="Close chat">' +
       '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>' +
-      "</button>";
-    tabEl.addEventListener("click", function(e) {
-      if (e.target.closest(".livecode-chat-tab-close")) return;
-      _livecodeSwitchChatTab(tab.id);
-    });
-    const closeBtn = tabEl.querySelector(".livecode-chat-tab-close");
-    if (closeBtn) {
-      closeBtn.addEventListener("click", function(e) {
-        e.preventDefault();
-        e.stopPropagation();
-        _livecodeCloseChatTab(tab.id);
-      });
-    }
-    list.appendChild(tabEl);
-  });
+      "</button></div>";
+  }).join("");
+  _livecodeMorph(list, html);
   _livecodeUpdateBackgroundStatusPill();
   _livecodeUpdateChatCostDisplay(_livecodeGetActiveChatTab());
   _livecodeUpdateContextRing(_livecodeGetActiveChatTab());
@@ -7709,8 +7724,14 @@ function _livecodeBindUserRevertOnce() {
   }, true);
 }
 
+const _livecodeRowGapCache = new WeakMap();
+
 function _livecodeRowGap(prev, row) {
-  return Math.max(parseFloat(getComputedStyle(prev).marginBottom) || 0, parseFloat(getComputedStyle(row).marginTop) || 0);
+  const cached = _livecodeRowGapCache.get(row);
+  if (cached && cached.prev === prev) return cached.gap;
+  const gap = Math.max(parseFloat(getComputedStyle(prev).marginBottom) || 0, parseFloat(getComputedStyle(row).marginTop) || 0);
+  _livecodeRowGapCache.set(row, { prev: prev, gap: gap });
+  return gap;
 }
 
 // Where each user row would sit if nothing were pinned. A pinned row's
@@ -7795,8 +7816,16 @@ function _livecodeBindChatScrollWheel() {
     if (gap <= 2) _livecodeScrollPinned = true;
     else if (gap > 40 && top < lastTop - 1) _livecodeScrollPinned = false;
     lastTop = top;
-    _livecodeScheduleStickyUserRows(out);
+    // Pinned rows move with this scroll frame, not the next one, so the hand-over never wobbles.
+    _livecodeSyncStickyUserRows(out);
   }, { passive: true });
+  // A command card's output follows its own tail only while the reader has not scrolled up in it.
+  out.addEventListener("scroll", function(e) {
+    const scroll = e.target;
+    if (!scroll || !scroll.classList || !scroll.classList.contains("livecode-term-scroll")) return;
+    const card = scroll.closest(".livecode-term-card");
+    if (card) card._livecodeScrolledUp = scroll.scrollTop + scroll.clientHeight < scroll.scrollHeight - 24;
+  }, { passive: true, capture: true });
   if (typeof MutationObserver !== "undefined") {
     new MutationObserver(function() {
       if (_livecodeScrollPinned) _livecodeAutoScroll(out);
@@ -7854,14 +7883,31 @@ function _livecodeMarkChatOutputForTab(out, tab) {
   else delete out.dataset.livecodeSessionId;
 }
 
+const _livecodeSnapshotTimers = new Map();
+
+function _livecodeScheduleChatSnapshot(projectPath, tab, stateKey) {
+  // Serialising the transcript and writing it to storage is main-thread work; during a turn it is asked
+  // for after every diff and command, so it is coalesced and run when the browser is idle.
+  if (!tab || !tab.sessionId) return;
+  const key = tab.sessionId;
+  const pending = _livecodeSnapshotTimers.get(key);
+  if (pending) return;
+  const run = function() {
+    _livecodeSnapshotTimers.delete(key);
+    _livecodePersistChatSnapshot(projectPath, tab, stateKey);
+  };
+  const handle = typeof window.requestIdleCallback === "function"
+    ? window.requestIdleCallback(run, { timeout: 1500 })
+    : setTimeout(run, 400);
+  _livecodeSnapshotTimers.set(key, handle);
+}
+
 function _livecodeSyncActiveTabMessagesHtml() {
   const tab = _livecodeGetActiveChatTab();
   const out = getLiveCodeChatOutput();
   if (tab && out && _livecodeIsActiveTab(tab) && _livecodeChatOutputBelongsToTab(out, tab)) {
     tab.messagesHtml = out.innerHTML;
-    if (livecodeProjectPath && tab.sessionId && tab.messagesHtml) {
-      _livecodePersistChatSnapshot(livecodeProjectPath, tab);
-    }
+    if (livecodeProjectPath && tab.sessionId && tab.messagesHtml) _livecodeScheduleChatSnapshot(livecodeProjectPath, tab);
   }
 }
 
@@ -8199,8 +8245,7 @@ function _livecodeUpdateThinkingLineLabel() {
   if (!_livecodeRunningActivityEl || !_livecodeIsThinkingLine()) return;
   const textEl = _livecodeRunningActivityEl.querySelector(".livecode-activity-text");
   if (!textEl) return;
-
-  textEl.textContent = _livecodeLastToolLabel;
+  if (textEl.textContent !== _livecodeLastToolLabel) textEl.textContent = _livecodeLastToolLabel;
 }
 
 function _livecodeStartThinkingTicker() {
@@ -10168,7 +10213,7 @@ function _livecodeSetTerminalRunning(card, running) {
 }
 
 function _livecodeTerminalSyncScroll(card) {
-  if (!card) return;
+  if (!card || card._livecodeScrolledUp) return;
   const scroll = card.querySelector(".livecode-term-scroll");
   if (scroll && card.classList.contains("is-running")) scroll.scrollTop = scroll.scrollHeight;
 }
@@ -10177,7 +10222,7 @@ function _livecodeTerminalSetOutput(card, text) {
   const out = card && card.querySelector(".livecode-term-output");
   if (!out) return;
   const clean = _livecodeCleanTerminalText(text).replace(/\s+$/, "");
-  out.textContent = clean;
+  if (out.textContent !== clean) out.textContent = clean;
   out.hidden = !clean;
   _livecodeTerminalSyncScroll(card);
 }
@@ -10186,7 +10231,12 @@ function _livecodeTerminalAppendOutput(card, chunk) {
   const out = card && card.querySelector(".livecode-term-output");
   if (!out || !chunk) return;
   card._livecodeRawOutput = (card._livecodeRawOutput != null ? card._livecodeRawOutput : out.textContent) + String(chunk);
-  _livecodeTerminalSetOutput(card, card._livecodeRawOutput);
+  // Chunks arrive faster than frames are drawn: the card is written once per frame.
+  if (card._livecodeFlushRaf) return;
+  card._livecodeFlushRaf = requestAnimationFrame(function() {
+    card._livecodeFlushRaf = null;
+    if (card._livecodeRawOutput != null) _livecodeTerminalSetOutput(card, card._livecodeRawOutput);
+  });
 }
 
 function _livecodeRunningTerminalCard(output) {
@@ -10544,10 +10594,27 @@ function _livecodeRenderAssistantMarkdown(el, text) {
   const pinned = streamed && el.isConnected ? el.offsetHeight : 0;
   if (pinned) el.style.minHeight = pinned + "px";
   if (hostMount) {
-    window.mountLivecodeChatMarkdown(el, md, {
-      livecode: true,
-      persistRaw: true,
-    });
+    let patched = false;
+    if (streamed && el.childNodes.length) {
+      // Finishing a streamed answer: render the final markdown off screen and patch the streamed nodes to
+      // match it, so the blocks that did not change keep their nodes and nothing blinks or jumps.
+      const scratch = document.createElement("div");
+      scratch.className = el.className;
+      try {
+        window.mountLivecodeChatMarkdown(scratch, md, { livecode: true, persistRaw: true });
+        _livecodeMorphChildren(el, scratch);
+        if (scratch.dataset && scratch.dataset.rawMd != null) el.dataset.rawMd = scratch.dataset.rawMd;
+        patched = true;
+      } catch (e) {
+        patched = false;
+      }
+    }
+    if (!patched) {
+      window.mountLivecodeChatMarkdown(el, md, {
+        livecode: true,
+        persistRaw: true,
+      });
+    }
     _livecodeDecorateFileCodeSpans(el);
   } else if (typeof marked !== "undefined" && typeof DOMPurify !== "undefined") {
     el.innerHTML = _livecodeMarkdownToSafeHtml(md);
@@ -12587,7 +12654,7 @@ function _livecodeRenderChangesBar(files) {
   const toggle = bar.querySelector(".livecode-changes-toggle");
   if (toggle) toggle.disabled = !count;
   const list = document.getElementById("livecode-changes-list");
-  if (list) list.innerHTML = _livecodeChangesFiles.map(_livecodeChangesFileRowHtml).join("");
+  if (list) _livecodeMorph(list, _livecodeChangesFiles.map(_livecodeChangesFileRowHtml).join(""));
   bar.querySelectorAll("[data-changes-action]").forEach(function(btn) {
     const action = btn.getAttribute("data-changes-action");
     if (action === "stop") btn.hidden = !running;
@@ -13128,7 +13195,7 @@ function _livecodeSettingsSet(key, value) {
   _livecodeSettingsPending[key] = value === undefined ? null : value;
   if (_livecodeSettingsSaveTimer) clearTimeout(_livecodeSettingsSaveTimer);
   _livecodeSettingsSaveTimer = setTimeout(_livecodeSettingsFlush, 250);
-  _livecodeApplyEditorTerminalSettings();
+  if (/^(editor|terminal)/.test(String(key))) _livecodeApplyEditorTerminalSettings();
 }
 
 function _livecodeLoadServerSettings() {
@@ -13448,7 +13515,7 @@ function _livecodeRenderQueueBar() {
       "</span>" +
     "</div>";
   }).join("");
-  bar.innerHTML = head + '<div class="livecode-queue-list" role="list" aria-label="Queued messages">' + items + "</div>";
+  _livecodeMorph(bar, head + '<div class="livecode-queue-list" role="list" aria-label="Queued messages">' + items + "</div>");
   _livecodeSyncComposerStack();
 }
 
@@ -15433,7 +15500,23 @@ function _livecodeBrowserStopStream() {
   if (!b.streaming) return;
   b.streaming = false;
   const img = _livecodeBrowserEl(".ide-browser-frame");
-  if (img) img.removeAttribute("src");
+  if (!img) return;
+  // Keep the last frame on screen while the stream is closed, so coming back to the tab shows the page
+  // rather than a blank stage until the new stream's first frame arrives.
+  let still = "";
+  try {
+    if (!img.hidden && img.naturalWidth && img.naturalHeight) {
+      const canvas = document.createElement("canvas");
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      canvas.getContext("2d").drawImage(img, 0, 0);
+      still = canvas.toDataURL("image/jpeg", 0.85);
+    }
+  } catch (e) {
+    still = "";
+  }
+  if (still) img.src = still;
+  else img.removeAttribute("src");
 }
 
 function _livecodeBrowserStreamFailed() {
@@ -15488,6 +15571,7 @@ async function _livecodeBrowserPoll() {
       const shown = _livecodeBrowserEl(".ide-browser-frame");
       if (!_livecodeBrowserHasPage()) _livecodeBrowserStopStream();
       else if (shown && shown.hidden && shown.naturalWidth) _livecodeBrowserStreamLoaded();
+      else if (shown && shown.naturalWidth) _livecodeBrowserLayoutFrame();  // a new frame size after a resize is re-fitted
     }
     const lively = Date.now() - _livecodeBrowser.lastInput < 5000 || _livecodeBrowserAgentActive();
     if (streaming) {
@@ -15576,10 +15660,12 @@ function _livecodeBrowserDesiredViewport(frame) {
 
 function _livecodeBrowserSyncSize(immediate) {
   clearTimeout(_livecodeBrowser.sizeTimer);
+  // The stage follows the pane in the same frame as the drag; only the viewport resize sent to the
+  // browser waits for the drag to settle.
+  if (_livecodeBrowserEl(".browser-frame-container") && _livecodeBrowserVisible()) _livecodeBrowserLayoutFrame();
   const run = function() {
     const frame = _livecodeBrowserEl(".browser-frame-container");
     if (!frame || !_livecodeBrowserVisible() || _livecodeBrowser.unavailable) return;
-    _livecodeBrowserLayoutFrame();
     if (frame.clientWidth < 50 || frame.clientHeight < 50) return;
     if (_livecodeBrowser.viewportMode === "fixed") return;
     const size = _livecodeBrowserDesiredViewport(frame);
@@ -16803,7 +16889,8 @@ function _livecodeBrowserActionShowsPage(args) {
 }
 
 function _livecodeBrowserAgentActivity(done, args) {
-  _livecodeBrowser.agentUntil = Date.now() + (done ? 4000 : 20000);
+  // Between two agent steps the pill would otherwise vanish and reappear; eight seconds covers the gap.
+  _livecodeBrowser.agentUntil = Date.now() + (done ? 8000 : 20000);
   if (!done) _livecodeBrowser.tookControl = false;
   if (!_livecodeBrowserTabInfo() && livecodeProjectPath) {
     window.openLiveCodeBrowser();
@@ -17046,8 +17133,14 @@ function _livecodeBindScriptHighlight() {
   if (_livecodeScriptHighlightBound || !document.body) return;
   _livecodeScriptHighlightBound = true;
   let queued = false;
-  new MutationObserver(function() {
+  new MutationObserver(function(records) {
     if (queued) return;
+    const relevant = records.some(function(record) {
+      return Array.from(record.addedNodes).some(function(node) {
+        return node.nodeType === 1 && (node.matches(".livecode-browser-script-code") || node.querySelector(".livecode-browser-script-code"));
+      });
+    });
+    if (!relevant) return;
     queued = true;
     requestAnimationFrame(function() {
       queued = false;
@@ -17903,14 +17996,19 @@ function _livecodeSettingsAgentHtml() {
 let _livecodeBrowserConnection = null;
 let _livecodeChromeLaunching = false;
 
+let _livecodeBrowserConnectionLoad = null;
+
 function _livecodeLoadBrowserConnection() {
-  return fetch("/livecode/browser/connection")
+  if (_livecodeBrowserConnectionLoad) return _livecodeBrowserConnectionLoad;
+  _livecodeBrowserConnectionLoad = fetch("/livecode/browser/connection")
     .then(function(resp) { return resp.json(); })
     .then(function(data) {
       _livecodeBrowserConnection = data && data.success ? data : { engine: "builtin" };
       if (_livecodeSettingsSection === "browser" || window._livecodeSettingsQuery) _livecodeRenderSettingsPage();
     })
-    .catch(function() {});
+    .catch(function() { if (!_livecodeBrowserConnection) _livecodeBrowserConnection = { engine: "builtin", unknown: true }; })
+    .finally(function() { _livecodeBrowserConnectionLoad = null; });
+  return _livecodeBrowserConnectionLoad;
 }
 
 function _livecodeSettingsChromeRowHtml() {
@@ -17942,20 +18040,28 @@ function _livecodeSettingsChromeRowHtml() {
 
 let _livecodeFigmaStatus = null;
 
+let _livecodeFigmaStatusLoad = null;
+
 function _livecodeLoadFigmaStatus() {
-  return fetch("/livecode/figma/token")
+  if (_livecodeFigmaStatusLoad) return _livecodeFigmaStatusLoad;
+  _livecodeFigmaStatusLoad = fetch("/livecode/figma/token")
     .then(function(resp) { return resp.json(); })
     .then(function(data) {
       _livecodeFigmaStatus = data && data.success ? data : { configured: false, source: "" };
       if (_livecodeSettingsSection === "browser" || window._livecodeSettingsQuery) _livecodeRenderSettingsPage();
     })
-    .catch(function() {});
+    .catch(function() { if (!_livecodeFigmaStatus) _livecodeFigmaStatus = { configured: false, source: "", unknown: true }; })
+    .finally(function() { _livecodeFigmaStatusLoad = null; });
+  return _livecodeFigmaStatusLoad;
 }
 
 let _livecodeBrowserSettings = null;
 
+let _livecodeBrowserSettingsLoad = null;
+
 function _livecodeLoadBrowserSettings() {
-  return fetch("/livecode/browser/settings")
+  if (_livecodeBrowserSettingsLoad) return _livecodeBrowserSettingsLoad;
+  _livecodeBrowserSettingsLoad = fetch("/livecode/browser/settings")
     .then(function(resp) { return resp.json(); })
     .then(function(data) {
       _livecodeBrowserSettings = data && data.success ? data : Object.assign({}, _LIVECODE_BROWSER_SETTING_DEFAULTS);
@@ -17965,7 +18071,9 @@ function _livecodeLoadBrowserSettings() {
       if (_livecodeBrowserSettings) return;
       _livecodeBrowserSettings = Object.assign({}, _LIVECODE_BROWSER_SETTING_DEFAULTS);
       if (_livecodeSettingsSection === "browser" || window._livecodeSettingsQuery) _livecodeRenderSettingsPage();
-    });
+    })
+    .finally(function() { _livecodeBrowserSettingsLoad = null; });
+  return _livecodeBrowserSettingsLoad;
 }
 
 function _livecodeAccuracyMeaning(value, fallback) {
@@ -18686,8 +18794,7 @@ function _livecodeBindSettingsOnce(view) {
       _livecodeRenderSettingsPage();
     } else if (action === "mcp-tool" && server) {
       _livecodeToggleMcpTool(server, btn.getAttribute("data-tool") || "");
-      _livecodeRenderSettingsPage();
-      _livecodeRenderMcpServers();
+      _livecodeRenderMcpServers();  // refreshes the settings page too when it is showing
     }
   });
   view.addEventListener("input", function(e) {
@@ -19086,6 +19193,7 @@ function _livecodeMorphChildren(fromEl, toEl) {
     const k = _livecodeMorphKey(n);
     if (k && !byKey.has(k)) byKey.set(k, n);
   }
+  const placed = new Set();
   let cursor = fromEl.firstChild;
   const wanted = Array.from(toEl.childNodes);
   for (let i = 0; i < wanted.length; i++) {
@@ -19094,21 +19202,23 @@ function _livecodeMorphChildren(fromEl, toEl) {
     let have = null;
     if (key) {
       if (byKey.has(key)) { have = byKey.get(key); byKey.delete(key); }
-    } else if (cursor && !_livecodeMorphKey(cursor) && _livecodeMorphCompatible(cursor, want)) {
-      have = cursor;
+    } else {
+      // An old node that nothing new matches is skipped, so the nodes after it can still be reused.
+      while (cursor && (placed.has(cursor) || (!_livecodeMorphKey(cursor) && !_livecodeMorphCompatible(cursor, want)))) cursor = cursor.nextSibling;
+      if (cursor && !_livecodeMorphKey(cursor)) have = cursor;
     }
     if (have) {
       if (have !== cursor) fromEl.insertBefore(have, cursor);
       else cursor = have.nextSibling;
       _livecodeMorphNode(have, want);
+      placed.add(have);
     } else {
-      fromEl.insertBefore(document.importNode(want, true), cursor);
+      fromEl.insertBefore(want, cursor);  // adopted, not cloned: listeners the renderer attached stay with it
+      placed.add(want);
     }
   }
   // Whatever was not matched is gone from the new markup.
-  const keep = new Set();
-  for (let n = toEl.firstChild, m = fromEl.firstChild; n && m; n = n.nextSibling, m = m.nextSibling) keep.add(m);
-  Array.from(fromEl.childNodes).forEach(function(n) { if (!keep.has(n)) fromEl.removeChild(n); });
+  Array.from(fromEl.childNodes).forEach(function(n) { if (!placed.has(n)) fromEl.removeChild(n); });
 }
 
 const _LIVECODE_MORPH_LIVE_PROPS = { value: true, checked: true, selected: true };
