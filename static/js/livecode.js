@@ -557,7 +557,7 @@ function _livecodeRestoreEditorTabs(projectPath) {
       return;
     }
     if (filePath === LIVECODE_SETTINGS_TAB_KEY) {
-      ideOpenFiles[filePath] = { isSettings: true, path: filePath, name: "LiveCode Settings", content: "", originalContent: "", modified: false };
+      ideOpenFiles[filePath] = { isSettings: true, path: filePath, name: "Settings", content: "", originalContent: "", modified: false };
       onDone();
       return;
     }
