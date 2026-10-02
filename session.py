@@ -570,6 +570,7 @@ def list_sessions(project_path: str, *, limit: int = 30) -> list[dict[str, Any]]
                         meta.update(json.load(f))
                 except (json.JSONDecodeError, OSError):
                     pass
+                meta["session_id"] = name  # the folder is the session, whatever an old summary says
             meta.setdefault("updated_at", os.path.getmtime(sdir))
             message_count = _count_jsonl_lines(history_path)
             meta["message_count"] = message_count
@@ -618,7 +619,7 @@ def rename_session(project_path: str, session_id: str, title: str) -> bool:
         json.dump(summary, f, indent=2)
     return True
 
-def fork_session(project_path: str, session_id: str, new_session_id: str) -> dict[str, Any]:
+def fork_session(project_path: str, session_id: str, new_session_id: str, *, title: str = "") -> dict[str, Any]:
     import shutil
     src = session_dir(project_path, session_id)
     dst = session_dir(project_path, new_session_id)
@@ -629,7 +630,42 @@ def fork_session(project_path: str, session_id: str, new_session_id: str) -> dic
         sp = os.path.join(src, name)
         if os.path.isfile(sp):
             shutil.copy2(sp, os.path.join(dst, name))
+    # The copy is its own chat: its summary names it, and it sorts as just made.
+    summary_path = os.path.join(dst, SUMMARY_FILE)
+    summary: dict[str, Any] = {}
+    if os.path.isfile(summary_path):
+        try:
+            with open(summary_path, "r", encoding="utf-8") as f:
+                summary = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            summary = {}
+    summary["session_id"] = new_session_id
+    summary["updated_at"] = time.time()
+    if title.strip():
+        summary["title"] = title.strip()[:200]
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
     return load_session(project_path, new_session_id)
+
+
+def session_markdown(project_path: str, session_id: str) -> str:
+    """The chat's user and assistant messages as Markdown, for copying out."""
+    try:
+        session = load_session(project_path, session_id)
+    except Exception:
+        return ""
+    title = str((session.get("summary") or {}).get("title") or "").strip()
+    parts: list[str] = [f"# {title}"] if title else []
+    for msg in session.get("messages") or []:
+        role = str(msg.get("role") or "")
+        if role not in ("user", "assistant"):
+            continue
+        display = msg.get("display") or {}
+        text = str(display.get("text") or "").strip() or _message_content_text(msg.get("content"))
+        if not text or text.startswith("[Turn activity summary]") or text.startswith("[Previous conversation summary"):
+            continue
+        parts.append(f"## {'You' if role == 'user' else 'Assistant'}\n\n{text}")
+    return "\n\n".join(parts).strip() + "\n"
 
 def is_user_turn_message(msg: dict[str, Any]) -> bool:
     if msg.get("role") != "user" or msg.get("internal"):

@@ -5150,19 +5150,20 @@ body.white-theme .livecode-chat-session-menu-item-row:has(.livecode-chat-session
 .livecode-chat-session-menu-item-row:focus-within .livecode-chat-session-menu-item-more {
 	opacity: 1;
 }
+/* No box behind the dots: they just brighten under the pointer and while their menu is open. */
 .livecode-chat-session-menu-item-row .livecode-chat-session-menu-item-more:hover,
 .livecode-chat-session-menu-item-row .livecode-chat-session-menu-item-more:active,
 .livecode-chat-session-menu-item-row .livecode-chat-session-menu-item-more[aria-expanded="true"] {
-	background: rgba(148, 163, 184, 0.18) !important;
+	background: transparent !important;
 	border: none !important;
 	box-shadow: none !important;
 	outline: none !important;
 }
-body.white-theme .livecode-chat-session-menu-item-row .livecode-chat-session-menu-item-more:hover,
-body.pink-theme .livecode-chat-session-menu-item-row .livecode-chat-session-menu-item-more:hover {
-	background: rgba(71, 85, 105, 0.12) !important;
+.livecode-chat-session-menu-item-row .livecode-chat-session-menu-item-more:hover svg,
+.livecode-chat-session-menu-item-row .livecode-chat-session-menu-item-more[aria-expanded="true"] svg {
+	opacity: 1;
 }
-.livecode-chat-session-menu-item-row .livecode-chat-session-menu-item-more:hover svg {
+.livecode-chat-session-menu-item-row:has(.livecode-chat-session-menu-item-more[aria-expanded="true"]) .livecode-chat-session-menu-item-more {
 	opacity: 1;
 }
 .livecode-chat-session-menu-item-row .chat-history-menu.livecode-chat-session-item-menu {
@@ -21705,7 +21706,7 @@ body.pink-theme .livecode-toast { background: #ffffff; color: #1f2937; box-shado
 	display: flex;
 	flex-direction: column;
 	gap: 1px;
-	min-width: 148px;
+	min-width: 180px;
 	padding: 4px;
 	border: 1px solid rgba(148, 163, 184, 0.2);
 	border-radius: 8px;
@@ -21750,6 +21751,20 @@ body.black-theme .chat-history-menu.livecode-chat-session-item-menu {
 	cursor: pointer;
 	-webkit-appearance: none;
 	appearance: none;
+}
+.livecode-chat-session-item-menu .chat-history-menu-sep {
+	height: 1px;
+	margin: 3px 6px;
+	background: rgba(148, 163, 184, 0.18);
+}
+body.white-theme .livecode-chat-session-item-menu .chat-history-menu-sep,
+body.pink-theme .livecode-chat-session-item-menu .chat-history-menu-sep {
+	background: rgba(71, 85, 105, 0.14);
+}
+.livecode-chat-session-item-menu .chat-history-menu-item span {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 .livecode-chat-session-item-menu .chat-history-menu-item svg {
 	flex: 0 0 auto;

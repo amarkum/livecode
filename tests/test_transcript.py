@@ -91,3 +91,25 @@ def test_an_oversize_save_is_success_false_not_an_error(project, app_client, mon
     monkeypatch.setattr(session, "TRANSCRIPT_MAX_BYTES", 4)
     reply = app_client.post("/livecode/session/transcript", json={"project_path": project, "session_id": "s1", "html": "<p>too long</p>"})
     assert reply.status_code == 200 and reply.get_json() == {"success": False, "reason": "too_large"}
+
+
+def test_a_duplicate_is_its_own_chat_with_the_same_transcript(project):
+    state = _start_chat(project)
+    session.set_session_title(state, "s1", "Blue button", overwrite=True)
+    session.save_transcript(state, "s1", "<div>shown</div>")
+    session.fork_session(state, "s1", "s2", title="Copy of Blue button")
+    listed = {s["session_id"]: s for s in session.list_sessions(state)}
+    assert set(listed) == {"s1", "s2"}
+    assert listed["s2"]["title"] == "Copy of Blue button"
+    assert listed["s1"]["title"] == "Blue button"
+    assert session.load_transcript(state, "s2") == "<div>shown</div>"
+
+
+def test_markdown_export_has_the_title_and_both_sides(project, app_client):
+    state = _start_chat(project)
+    session.set_session_title(state, "s1", "Blue button", overwrite=True)
+    resp = app_client.post("/livecode/session/export", json={"project_path": project, "session_id": "s1"})
+    md = resp.get_json()["markdown"]
+    assert md.startswith("# Blue button")
+    assert "## You\n\nmake the button blue" in md
+    assert "## Assistant\n\nDone." in md

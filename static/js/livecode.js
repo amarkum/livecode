@@ -948,31 +948,109 @@ function _livecodeCloseSessionItemMenus() {
   }
 }
 
+const _LIVECODE_SESSION_MENU_ICONS = {
+  open: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M3 9h18M12 13v4M10 15h4"></path></svg>',
+  duplicate: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="13" height="13" rx="2"></rect><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"></path></svg>',
+  markdown: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"></rect><path d="M6 15V9l3 3 3-3v6M17 9v6M15 13l2 2 2-2"></path></svg>',
+  rename: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"></path></svg>',
+  delete: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6"></path></svg>',
+};
+
 function _livecodeBuildSessionMoreMenu(sessionId, currentTitle) {
   const menu = document.createElement("div");
   menu.className = "chat-history-menu livecode-chat-session-item-menu";
-  const renameBtn = document.createElement("button");
-  renameBtn.type = "button";
-  renameBtn.className = "chat-history-menu-item";
-  renameBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8.00012L4 16.0001V20.0001L8 20.0001L16 12.0001M12 8.00012L14.8686 5.13146L14.8704 5.12976C15.2652 4.73488 15.463 4.53709 15.691 4.46301C15.8919 4.39775 16.1082 4.39775 16.3091 4.46301C16.5369 4.53704 16.7345 4.7346 17.1288 5.12892L18.8686 6.86872C19.2646 7.26474 19.4627 7.46284 19.5369 7.69117C19.6022 7.89201 19.6021 8.10835 19.5369 8.3092C19.4628 8.53736 19.265 8.73516 18.8695 9.13061L18.8686 9.13146L16 12.0001M12 8.00012L16 12.0001"/></svg>Rename';
-  renameBtn.onclick = function(ev) {
-    ev.stopPropagation();
-    window.renameLiveCodeSession(sessionId, currentTitle, ev);
-    _livecodeCloseSessionItemMenus();
-  };
-  const deleteBtn = document.createElement("button");
-  deleteBtn.type = "button";
-  deleteBtn.className = "chat-history-menu-item danger";
-  deleteBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M9,3H7c0-1.7,1.3-3,3-3v2C9.4,2,9,2.4,9,3z"/><path d="M17,3h-2c0-0.6-0.4-1-1-1V0C15.7,0,17,1.3,17,3z"/><polygon points="17,6 7,6 7,3 9,3 9,4 15,4 15,3 17,3"/><rect x="10" width="4" height="2"/><path d="M21,6H3C2.4,6,2,5.6,2,5s0.4-1,1-1h18c0.6,0,1,0.4,1,1S21.6,6,21,6z"/><path d="M19,24H5c-0.6,0-1-0.4-1-1V9c0-0.6,0.4-1,1-1h14c0.6,0,1,0.4,1,1v14C20,23.6,19.6,24,19,24z M6,22h12V10H6V22z"/><path d="M10,20c-0.6,0-1-0.4-1-1v-6c0-0.6,0.4-1,1-1s1,0.4,1,1v6C11,19.6,10.6,20,10,20z"/><path d="M14,20c-0.6,0-1-0.4-1-1v-6c0-0.6,0.4-1,1-1s1,0.4,1,1v6C15,19.6,14.6,20,14,20z"/></svg>Delete';
-  deleteBtn.onclick = function(ev) {
-    ev.stopPropagation();
-    window.deleteLiveCodeSession(sessionId, ev);
-    _livecodeCloseSessionItemMenus();
-  };
-  menu.appendChild(renameBtn);
-  menu.appendChild(deleteBtn);
+  menu.setAttribute("role", "menu");
+  const items = [
+    { icon: "open", label: "Open in new tab", run: function() { window.openLiveCodeSessionInNewTab(sessionId); } },
+    { icon: "duplicate", label: "Duplicate", run: function() { window.duplicateLiveCodeSession(sessionId, currentTitle); } },
+    { icon: "markdown", label: "Copy as Markdown", run: function() { window.copyLiveCodeSessionMarkdown(sessionId); } },
+    null,
+    { icon: "rename", label: "Rename", run: function(ev) { window.renameLiveCodeSession(sessionId, currentTitle, ev); } },
+    { icon: "delete", label: "Delete", danger: true, run: function(ev) { window.deleteLiveCodeSession(sessionId, ev); } },
+  ];
+  items.forEach(function(item) {
+    if (!item) {
+      const sep = document.createElement("div");
+      sep.className = "chat-history-menu-sep";
+      menu.appendChild(sep);
+      return;
+    }
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "chat-history-menu-item" + (item.danger ? " danger" : "");
+    btn.setAttribute("role", "menuitem");
+    btn.innerHTML = _LIVECODE_SESSION_MENU_ICONS[item.icon] + "<span>" + _livecodeEscapeHtml(item.label) + "</span>";
+    btn.onclick = function(ev) {
+      ev.stopPropagation();
+      _livecodeCloseSessionItemMenus();
+      item.run(ev);
+    };
+    menu.appendChild(btn);
+  });
   return menu;
 }
+
+// Opens a saved chat in a tab of its own (or switches to the tab it is already in).
+window.openLiveCodeSessionInNewTab = function(sessionId) {
+  if (!sessionId || !livecodeProjectPath) return;
+  closeLiveCodeSessionMenu();
+  const open = livecodeChatTabs.find(function(t) { return t.sessionId === sessionId; });
+  if (open) {
+    _livecodeSwitchChatTab(open.id);
+    return;
+  }
+  _livecodeSaveActiveChatTabState();
+  _livecodeCreateChatTab("Loading…", { activate: true });
+  const tab = _livecodeGetActiveChatTab();
+  if (tab) _livecodeFetchSessionIntoTab(tab, sessionId, {});
+};
+
+// A copy of the chat, history and all, to take in another direction; it opens in a new tab.
+window.duplicateLiveCodeSession = function(sessionId, currentTitle) {
+  if (!sessionId || !livecodeProjectPath) return;
+  if (livecodeChatTabs.some(function(t) { return t.sessionId === sessionId && t.agentRunning; })) {
+    _livecodeShowIdeToast("Wait for this chat's agent to finish before duplicating it.");
+    return;
+  }
+  const newId = _livecodeNewChatSessionId();
+  fetch("/livecode/session/fork", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      project_path: livecodeProjectPath,
+      session_id: sessionId,
+      new_session_id: newId,
+      title: "Copy of " + (currentTitle || "chat"),
+      workspace: _livecodeCurrentWorkspacePayload(),
+    }),
+  }).then(function(r) { return r.json(); }).then(function(data) {
+    if (!data || !data.success) {
+      _livecodeShowIdeToast("Couldn't duplicate the chat: " + ((data && data.error) || "unknown error"));
+      return;
+    }
+    renderLiveCodeSessionDropdown();
+    window.openLiveCodeSessionInNewTab(newId);
+  }).catch(function(err) {
+    _livecodeShowIdeToast("Couldn't duplicate the chat: " + (err.message || err));
+  });
+};
+
+window.copyLiveCodeSessionMarkdown = function(sessionId) {
+  if (!sessionId || !livecodeProjectPath) return;
+  fetch("/livecode/session/export", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ project_path: livecodeProjectPath, session_id: sessionId, workspace: _livecodeCurrentWorkspacePayload() }),
+  }).then(function(r) { return r.json(); }).then(function(data) {
+    if (!data || !data.success || !String(data.markdown || "").trim()) {
+      _livecodeShowIdeToast("Nothing to copy from this chat yet.");
+      return;
+    }
+    _livecodeCopyToClipboard(data.markdown, "Copied the chat as Markdown");
+  }).catch(function(err) {
+    _livecodeShowIdeToast("Couldn't copy the chat: " + (err.message || err));
+  });
+};
 
 function _livecodeCreateSessionMenuRow(session) {
   const sid = session.session_id || "";

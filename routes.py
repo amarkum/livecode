@@ -30,6 +30,7 @@ def register_livecode_routes(app, socketio, rt):
         append_turn_summary,
         delete_session,
         fork_session,
+        session_markdown,
         list_sessions,
         load_session,
         load_transcript,
@@ -395,8 +396,23 @@ def register_livecode_routes(app, socketio, rt):
         workspace_payload = data.get("workspace") if isinstance(data.get("workspace"), dict) else None
         try:
             state_path = _livecode_state_path(project_path, workspace_payload)
-            session = fork_session(state_path, session_id, new_session_id)
+            session = fork_session(state_path, session_id, new_session_id, title=str(data.get("title") or ""))
             return jsonify({"success": True, "session_id": new_session_id, "message_count": len(session.get("messages") or [])})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 400
+
+    @app.route("/livecode/session/export", methods=["POST"])
+    def livecode_export_session():
+        # {project_path, session_id, workspace?} -> {success, markdown}
+        data = request.get_json(silent=True) or {}
+        project_path = (data.get("project_path") or "").strip()
+        session_id = (data.get("session_id") or "").strip()
+        if not project_path or not session_id:
+            return jsonify({"error": "project_path and session_id required"}), 400
+        workspace_payload = data.get("workspace") if isinstance(data.get("workspace"), dict) else None
+        try:
+            state_path = _livecode_state_path(project_path, workspace_payload)
+            return jsonify({"success": True, "markdown": session_markdown(state_path, session_id)})
         except Exception as e:
             return jsonify({"error": str(e)}), 400
 
