@@ -21417,32 +21417,6 @@ body.pink-theme .livecode-toast { background: #ffffff; color: #1f2937; box-shado
 	align-self: flex-start;
 }
 
-#ide-editor-inner .livecode-lsp-cmd {
-	display: block;
-	overflow: hidden;
-	padding: 4px 8px;
-	border-radius: 5px;
-	background: rgb(var(--lc-fg) / 0.05);
-	color: var(--lc-text-3);
-	font-family: var(--lc-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-	font-size: 11px;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-}
-
-#ide-editor-inner .livecode-lsp-copyline {
-	display: flex;
-	align-items: center;
-	gap: 6px;
-	min-width: 0;
-}
-
-#ide-editor-inner .livecode-lsp-copyline .livecode-lsp-cmd {
-	flex: 1;
-	min-width: 0;
-}
-
-#ide-editor-inner .livecode-lsp-copy,
 #ide-editor-inner .livecode-lsp-more {
 	flex: 0 0 auto;
 	padding: 2px 6px;
@@ -21455,7 +21429,6 @@ body.pink-theme .livecode-toast { background: #ffffff; color: #1f2937; box-shado
 	cursor: pointer;
 }
 
-#ide-editor-inner .livecode-lsp-copy:hover,
 #ide-editor-inner .livecode-lsp-more:hover {
 	background: var(--lc-hover);
 }
@@ -21489,6 +21462,12 @@ body.pink-theme .livecode-toast { background: #ffffff; color: #1f2937; box-shado
 	align-items: center;
 	justify-content: space-between;
 	gap: 6px;
+}
+
+#ide-editor-inner .livecode-lsp-details summary {
+	color: var(--lc-text-3);
+	font-size: 12px;
+	cursor: pointer;
 }
 
 #ide-editor-inner .livecode-lsp-job .livecode-lsp-log {

@@ -72,19 +72,19 @@ LANGUAGES: list[dict[str, Any]] = [
         {"name": "kotlin-language-server", "argv": ["kotlin-language-server"], "install": "brew install kotlin-language-server"},
     ]},
     {"id": "scala", "label": "Scala", "monaco": ["scala"], "extensions": [".scala", ".sc", ".sbt"], "servers": [
-        {"name": "metals", "argv": ["metals"], "install": "coursier install metals"},
+        {"name": "metals", "argv": ["metals"], "install": "brew install metals", "installs": ["brew install metals", "coursier install metals"]},
     ]},
     {"id": "go", "label": "Go", "monaco": ["go"], "extensions": [".go"], "servers": [
-        {"name": "gopls", "argv": ["gopls"], "install": "go install golang.org/x/tools/gopls@latest"},
+        {"name": "gopls", "argv": ["gopls"], "install": "brew install gopls", "installs": ["brew install gopls", "go install golang.org/x/tools/gopls@latest"]},
     ]},
     {"id": "rust", "label": "Rust", "monaco": ["rust"], "extensions": [".rs"], "servers": [
-        {"name": "rust-analyzer", "argv": ["rust-analyzer"], "install": "rustup component add rust-analyzer"},
+        {"name": "rust-analyzer", "argv": ["rust-analyzer"], "install": "brew install rust-analyzer", "installs": ["brew install rust-analyzer", "rustup component add rust-analyzer"]},
     ]},
     {"id": "cpp", "label": "C / C++ / Objective-C", "monaco": ["c", "cpp", "objective-c"],
      "extensions": [".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx", ".ino", ".m", ".mm"],
      "language_ids": {".c": "c", ".h": "c", ".m": "objective-c", ".mm": "objective-cpp"},
      "default_language_id": "cpp",
-     "servers": [{"name": "clangd", "argv": ["clangd", "--background-index"], "install": "brew install llvm (or apt install clangd)"}]},
+     "servers": [{"name": "clangd", "argv": ["clangd", "--background-index"], "install": "brew install llvm"}]},
     {"id": "csharp", "label": "C#", "monaco": ["csharp"], "extensions": [".cs", ".csx"], "servers": [
         {"name": "csharp-ls", "argv": ["csharp-ls"], "install": "dotnet tool install --global csharp-ls"},
         {"name": "OmniSharp", "argv": ["OmniSharp", "-lsp"], "install": "brew install omnisharp/omnisharp-roslyn/omnisharp-mono"},
@@ -93,15 +93,15 @@ LANGUAGES: list[dict[str, Any]] = [
         {"name": "sourcekit-lsp", "argv": ["sourcekit-lsp"], "install": "Comes with Xcode or the Swift toolchain"},
     ]},
     {"id": "ruby", "label": "Ruby", "monaco": ["ruby"], "extensions": [".rb", ".rake", ".gemspec", ".ru"], "servers": [
-        {"name": "ruby-lsp", "argv": ["ruby-lsp"], "install": "gem install ruby-lsp"},
-        {"name": "solargraph", "argv": ["solargraph", "stdio"], "install": "gem install solargraph"},
+        {"name": "ruby-lsp", "argv": ["ruby-lsp"], "install": "brew install ruby-lsp", "installs": ["brew install ruby-lsp", "gem install ruby-lsp"]},
+        {"name": "solargraph", "argv": ["solargraph", "stdio"], "install": "brew install solargraph", "installs": ["brew install solargraph", "gem install solargraph"]},
     ]},
     {"id": "php", "label": "PHP", "monaco": ["php"], "extensions": [".php", ".phtml"], "servers": [
         {"name": "intelephense", "argv": ["intelephense", "--stdio"], "install": "npm install -g intelephense"},
-        {"name": "phpactor", "argv": ["phpactor", "language-server"], "install": "brew install phpactor"},
+        {"name": "phpactor", "argv": ["phpactor", "language-server"], "install": "See phpactor.readthedocs.io"},
     ]},
     {"id": "dart", "label": "Dart / Flutter", "monaco": ["dart"], "extensions": [".dart"], "servers": [
-        {"name": "dart", "argv": ["dart", "language-server", "--protocol=lsp"], "install": "brew install dart (or install Flutter)"},
+        {"name": "dart", "argv": ["dart", "language-server", "--protocol=lsp"], "install": "brew install dart-lang/dart/dart (or install Flutter)"},
     ]},
     {"id": "lua", "label": "Lua", "monaco": ["lua"], "extensions": [".lua"], "servers": [
         {"name": "lua-language-server", "argv": ["lua-language-server"], "install": "brew install lua-language-server"},
@@ -111,7 +111,7 @@ LANGUAGES: list[dict[str, Any]] = [
         {"name": "lexical", "argv": ["lexical"], "install": "See github.com/lexical-lsp/lexical"},
     ]},
     {"id": "haskell", "label": "Haskell", "monaco": [], "extensions": [".hs", ".lhs"], "servers": [
-        {"name": "haskell-language-server", "argv": ["haskell-language-server-wrapper", "--lsp"], "install": "ghcup install hls"},
+        {"name": "haskell-language-server", "argv": ["haskell-language-server-wrapper", "--lsp"], "install": "brew install haskell-language-server", "installs": ["brew install haskell-language-server", "ghcup install hls"]},
     ]},
     {"id": "zig", "label": "Zig", "monaco": [], "extensions": [".zig"], "servers": [
         {"name": "zls", "argv": ["zls"], "install": "brew install zls"},
@@ -395,17 +395,27 @@ _INSTALLERS = {
     "pip": "Python's pip", "pipx": "pipx", "npm": "Node.js (npm)", "brew": "Homebrew", "go": "Go",
     "rustup": "rustup", "gem": "Ruby (gem)", "dotnet": ".NET SDK", "coursier": "Coursier", "ghcup": "GHCup",
 }
+# A missing package manager that Homebrew can install first, so Install still works in one click.
+_PREREQS = {
+    "npm": ["brew", "install", "node"],
+    "go": ["brew", "install", "go"],
+    "pipx": ["brew", "install", "pipx"],
+    "coursier": ["brew", "install", "coursier"],
+    "ghcup": ["brew", "install", "ghcup"],
+}
 INSTALL_TIMEOUT_S = 1800
 _LOG_LINES = 400
 _jobs: dict[str, dict[str, Any]] = {}
 _jobs_lock = threading.Lock()
 
 
-def setup_command(server: dict[str, Any]) -> list[str] | None:
-    """The argv that installs a server, from its install hint, or None when it cannot be automated."""
-    hint = str(server.get("install") or "").split("(")[0].strip()
+def _install_hints(server: dict[str, Any]) -> list[str]:
+    return list(server.get("installs") or [server.get("install") or ""])
+
+
+def _hint_argv(hint: str) -> list[str] | None:
     try:
-        argv = shlex.split(hint)
+        argv = shlex.split(str(hint or "").split("(")[0].strip())
     except ValueError:
         return None
     if not argv or argv[0] not in _INSTALLERS:
@@ -416,13 +426,39 @@ def setup_command(server: dict[str, Any]) -> list[str] | None:
     return argv
 
 
+def _tool_present(tool: str) -> bool:
+    return os.sep in tool or bool(find_program(tool)) or (tool == "coursier" and bool(find_program("cs")))
+
+
+def setup_steps(server: dict[str, Any]) -> tuple[list[list[str]], str]:
+    """The commands that install a server, in order, and what is missing when none can run here.
+
+    The first install option whose package manager is present wins; otherwise one whose package
+    manager Homebrew can install first. ([], "") means it cannot be automated at all."""
+    options = [argv for argv in (_hint_argv(h) for h in _install_hints(server)) if argv]
+    if not options:
+        return [], ""
+    for argv in options:
+        if _tool_present(argv[0]):
+            return [argv], ""
+    if find_program("brew"):
+        for argv in options:
+            if argv[0] in _PREREQS:
+                return [list(_PREREQS[argv[0]]), argv], ""
+    return [], _INSTALLERS.get(options[0][0], options[0][0])
+
+
+def setup_command(server: dict[str, Any]) -> list[str] | None:
+    """The last (main) install command for a server, or None when it cannot be automated."""
+    steps, _ = setup_steps(server)
+    return steps[-1] if steps else None
+
+
 def setup_info(server: dict[str, Any]) -> dict[str, Any]:
-    argv = setup_command(server)
-    if not argv:
+    steps, needs = setup_steps(server)
+    if not steps and not needs:
         return {"setup": None}
-    tool = argv[0]
-    needs = "" if os.sep in tool or find_program(tool) or (tool == "coursier" and find_program("cs")) else _INSTALLERS.get(tool, tool)
-    return {"setup": " ".join(shlex.quote(a) for a in argv), "setup_needs": needs}
+    return {"setup": " && ".join(" ".join(shlex.quote(a) for a in argv) for argv in steps) or None, "setup_needs": needs}
 
 
 def _pylsp_without_linters(found: list[dict[str, Any]]) -> bool:
@@ -440,66 +476,74 @@ def start_install(lang_id: str, server_name: str = "", lint_plugins: bool = Fals
     if lint_plugins:
         if lang["id"] != "python":
             raise LspSettingsError("Linting plugins are for Python.")
-        server, argv = {"name": "python-lsp-server[all]"}, list(_LINT_SETUP)
+        server, steps = {"name": "python-lsp-server[all]"}, [list(_LINT_SETUP)]
     else:
-        candidates = [sv for sv in lang["servers"] if setup_command(sv)]
+        candidates = [sv for sv in lang["servers"] if setup_steps(sv)[0] or setup_steps(sv)[1]]
         if server_name:
-            candidates = [sv for sv in candidates if sv["name"] == server_name]
+            candidates = [sv for sv in candidates if sv["name"] == server_name] or candidates
         if not candidates:
-            raise LspSettingsError(f"No {lang['label']} server can be installed automatically; follow its install note instead.")
-        # Prefer a server whose package manager is already on this machine.
-        ready = [sv for sv in candidates if not setup_info(sv).get("setup_needs")]
+            raise LspSettingsError(f"{lang['label']} can't be installed automatically: {lang['servers'][0].get('install', '')}")
+        # Prefer a server that installs with one command, then one that needs a package manager first.
+        ready = [sv for sv in candidates if len(setup_steps(sv)[0]) == 1]
         server = (ready or candidates)[0]
-        argv = setup_command(server) or []
-        needs = setup_info(server).get("setup_needs")
-        if needs:
-            raise LspSettingsError(f"Installing {server['name']} needs {needs}, which was not found on this machine.")
-    if argv[0] == "coursier" and not find_program("coursier"):
-        argv[0] = "cs"
+        steps, needs = setup_steps(server)
+        if not steps:
+            raise LspSettingsError(f"Installing {lang['label']} needs {needs}, which isn't on this machine.")
+    steps = [list(argv) for argv in steps]
+    for argv in steps:
+        if argv[0] == "coursier" and not find_program("coursier"):
+            argv[0] = "cs"
+    if not lint_plugins and not _enabled(_read(), lang):
+        # Installing a language is asking to use it.
+        update({"languages": {lang["id"]: {"enabled": True}}})
     with _jobs_lock:
         for job in _jobs.values():
             if job["language"] == lang["id"] and job["status"] == "running":
                 return _job_view(job)
         job = {
             "id": uuid.uuid4().hex[:12], "language": lang["id"], "label": lang["label"], "server": server["name"],
-            "command": " ".join(shlex.quote(a) for a in argv), "status": "running", "returncode": None,
+            "command": " && ".join(" ".join(shlex.quote(a) for a in argv) for argv in steps), "status": "running", "returncode": None,
             "started": time.time(), "finished": None, "log": deque(maxlen=_LOG_LINES),
         }
         _jobs[job["id"]] = job
-    threading.Thread(target=_run_install, args=(job, argv), name=f"lsp-install-{lang['id']}", daemon=True).start()
+    threading.Thread(target=_run_install, args=(job, steps), name=f"lsp-install-{lang['id']}", daemon=True).start()
     return _job_view(job)
 
 
-def _run_install(job: dict[str, Any], argv: list[str]) -> None:
+def _run_install(job: dict[str, Any], steps: list[list[str]]) -> None:
     env = os.environ.copy()
-    env["PATH"] = _search_path()
     env.setdefault("HOMEBREW_NO_AUTO_UPDATE", "1")
     env.setdefault("NONINTERACTIVE", "1")
-    job["log"].append(f"$ {job['command']}")
-    try:
-        proc = subprocess.Popen(
-            [find_program(argv[0]) or argv[0], *argv[1:]],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
-            cwd=os.path.expanduser("~"), start_new_session=True,
-        )
-    except OSError as exc:
-        job["log"].append(f"Could not start {argv[0]}: {exc.strerror or exc}")
-        job.update(status="failed", returncode=-1, finished=time.time())
-        return
     deadline = time.time() + INSTALL_TIMEOUT_S
-    timer = threading.Timer(INSTALL_TIMEOUT_S, proc.kill)
-    timer.daemon = True
-    timer.start()
-    try:
-        for raw in iter(proc.stdout.readline, b""):
-            line = raw.decode("utf-8", "replace").rstrip()
-            if line:
-                job["log"].append(line[:500])
-        code = proc.wait()
-    finally:
-        timer.cancel()
-    if time.time() >= deadline:
-        job["log"].append(f"Stopped after {INSTALL_TIMEOUT_S // 60} minutes.")
+    code = 0
+    for argv in steps:
+        env["PATH"] = _search_path()
+        job["log"].append("$ " + " ".join(shlex.quote(a) for a in argv))
+        try:
+            proc = subprocess.Popen(
+                [find_program(argv[0]) or argv[0], *argv[1:]],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
+                cwd=os.path.expanduser("~"), start_new_session=True,
+            )
+        except OSError as exc:
+            job["log"].append(f"Could not start {argv[0]}: {exc.strerror or exc}")
+            job.update(status="failed", returncode=-1, finished=time.time())
+            return
+        timer = threading.Timer(max(1.0, deadline - time.time()), proc.kill)
+        timer.daemon = True
+        timer.start()
+        try:
+            for raw in iter(proc.stdout.readline, b""):
+                line = raw.decode("utf-8", "replace").rstrip()
+                if line:
+                    job["log"].append(line[:500])
+            code = proc.wait()
+        finally:
+            timer.cancel()
+        if time.time() >= deadline:
+            job["log"].append(f"Stopped after {INSTALL_TIMEOUT_S // 60} minutes.")
+        if code != 0:
+            break
     ok = code == 0 and (job["server"] == "python-lsp-server[all]" or bool(resolve(job["language"]).get("argv")))
     if code == 0 and not ok:
         job["log"].append("The installer finished, but the server was not found on LiveCode's search path. "

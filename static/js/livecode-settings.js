@@ -904,15 +904,14 @@
         lspActionButton(brand, "Add linting plugins", ' data-lang="python" data-lint="1"');
     }
 
+    // Not installed: Install sits where the on/off switch goes once it is.
     let action = "";
+    let headAction = "";
     if (!installed && !(job && job.status === "running")) {
       if (setupServer && !setupServer.setup_needs) {
-        action = lspActionButton(brand, "Install " + setupServer.name, ' data-lang="' + attr(lang.id) + '" data-server="' + attr(setupServer.name) + '"') +
-          '<code class="livecode-lsp-cmd" title="' + attr(setupServer.setup) + '">' + esc(setupServer.setup) + "</code>";
+        headAction = lspActionButton(brand, "Install", ' data-lang="' + attr(lang.id) + '" data-server="' + attr(setupServer.name) + '"');
       } else if (setupServer) {
-        action = '<p class="livecode-lsp-note">Needs <strong>' + esc(setupServer.setup_needs) + "</strong> first, then:</p>" +
-          '<div class="livecode-lsp-copyline"><code class="livecode-lsp-cmd">' + esc(setupServer.setup) + "</code>" +
-          '<button type="button" class="lc-btn livecode-lsp-copy" data-settings-action="lsp-copy" data-value="' + attr(setupServer.setup) + '" title="Copy">Copy</button></div>';
+        action = '<p class="livecode-lsp-note">Needs ' + esc(setupServer.setup_needs) + " on this machine first.</p>";
       } else {
         const hint = lang.servers[0] && lang.servers[0].install;
         if (hint) action = '<p class="livecode-lsp-note">' + esc(hint) + "</p>";
@@ -928,15 +927,15 @@
         '" placeholder="' + attr(placeholder ? "Auto: " + placeholder : "Server command") + '" spellcheck="false" autocomplete="off" aria-label="' + attr(lang.label + " server command") + '"' + (masterOn ? "" : " disabled") + ">" +
         (others ? '<p class="livecode-lsp-note">' + esc(others) + "</p>" : "") : "");
 
-    return '<div class="livecode-lsp-card' + (lang.enabled ? "" : " is-off") + (lang.ready && lang.enabled ? " is-ready" : "") + '" style="--lsp-brand:' + brand.color + '" data-lsp-card="' + attr(lang.id) + '">' +
+    return '<div class="livecode-lsp-card' + (lang.enabled || !installed ? "" : " is-off") + (lang.ready && lang.enabled ? " is-ready" : "") + '" style="--lsp-brand:' + brand.color + '" data-lsp-card="' + attr(lang.id) + '">' +
       '<div class="livecode-lsp-head"><span class="livecode-lsp-logo"><img src="' + brand.icon + '" alt="" width="22" height="22" loading="lazy"></span>' +
         '<div class="livecode-lsp-title"><div class="livecode-lsp-name">' + esc(lang.label) + "</div>" +
         '<div class="livecode-lsp-exts">' + esc(lang.extensions.slice(0, 6).join(" ")) + (lang.extensions.length > 6 ? " …" : "") + "</div></div>" +
-        switchHtml('data-lsp-enabled="' + attr(lang.id) + '"', lang.enabled, lang.label + " language server", !masterOn) + "</div>" +
-      '<div class="livecode-lsp-status">' + pill + "</div>" +
+        (installed ? switchHtml('data-lsp-enabled="' + attr(lang.id) + '"', lang.enabled, lang.label + " language server", !masterOn) : headAction) + "</div>" +
+      (installed || (job && job.status === "running") ? '<div class="livecode-lsp-status">' + pill + "</div>" : "") +
       body + (action ? '<div class="livecode-lsp-action">' + action + "</div>" : "") +
       (job ? lspJobHtml(job) : "") +
-      '<div class="livecode-lsp-foot">' + cmd + "</div></div>";
+      (installed ? '<div class="livecode-lsp-foot">' + cmd + "</div>" : "") + "</div>";
   }
 
   function lspActionButton(brand, label, attrs) {
@@ -945,13 +944,12 @@
 
   const lspJobs = {};
 
+  // While installing, the status line says so; the installer's output only shows when it fails.
   function lspJobHtml(job) {
-    const state = job.status === "running" ? lspPill("busy", "Installing " + job.server)
-      : job.status === "ok" ? lspPill("ok", "Installed " + job.server) : lspPill("warn", "Install failed");
-    const tail = (job.log || []).slice(job.status === "running" ? -6 : -12).join("\n");
-    return '<div class="livecode-lsp-job"><div class="livecode-lsp-job-head">' + state +
-      (job.status !== "running" ? '<button type="button" class="lc-btn livecode-lsp-more" data-settings-action="lsp-job-dismiss" data-lang="' + attr(job.language) + '">Dismiss</button>' : "") +
-      '</div><pre class="livecode-lsp-log">' + esc(tail) + "</pre></div>";
+    if (job.status !== "failed") return "";
+    return '<div class="livecode-lsp-job"><div class="livecode-lsp-job-head">' + lspPill("warn", "Install failed") +
+      '<button type="button" class="lc-btn livecode-lsp-more" data-settings-action="lsp-job-dismiss" data-lang="' + attr(job.language) + '">Dismiss</button></div>' +
+      '<details class="livecode-lsp-details"><summary>Details</summary><pre class="livecode-lsp-log">' + esc((job.log || []).slice(-20).join("\n")) + "</pre></details></div>";
   }
 
   function pollLspJob(langId) {
@@ -1025,7 +1023,7 @@
     if (!plan.length) { toast("Nothing to install: every enabled language with an available installer has a server."); return; }
     _livecodeModalConfirm({
       title: "Install " + plan.length + " language server" + (plan.length === 1 ? "" : "s") + "?",
-      message: "One after another, on this machine:\n" + plan.map(function(p) { return "• " + p.label + ": " + p.setup; }).join("\n"),
+      message: plan.map(function(p) { return "• " + p.label; }).join("\n"),
       confirmText: "Install all",
     }).then(function(ok) {
       if (!ok) return;
@@ -1059,7 +1057,6 @@
     const blocked = lsp.languages.filter(function(l) {
       return l.enabled && !l.found.length && !l.command && !l.servers.some(function(sv) { return sv.setup && !sv.setup_needs; });
     });
-    const allCmd = plan.map(function(p) { return p.setup; }).join(" && ");
     let hero = '<div class="livecode-lsp-hero"><div class="livecode-lsp-hero-main">' +
       '<div class="livecode-lsp-stat"><strong>' + ready + " of " + lsp.languages.length + "</strong> languages ready</div>" +
       '<div class="livecode-lsp-hero-text">';
@@ -1072,10 +1069,9 @@
     } else {
       hero += "<div><strong>Everything installable is installed</strong></div>";
     }
-    if (blocked.length) hero += '<div class="livecode-lsp-note">' + blocked.length + " need a package manager first: " + blocked.map(function(l) { return esc(l.label); }).join(", ") + ".</div>";
+    if (blocked.length) hero += '<div class="livecode-lsp-note">Installed outside LiveCode: ' + blocked.map(function(l) { return esc(l.label); }).join(", ") + ".</div>";
     hero += "</div></div>" +
       '<div class="livecode-lsp-hero-actions">' +
-        (allCmd && !lspQueue ? '<button type="button" class="lc-btn livecode-settings-btn" data-settings-action="lsp-copy" data-value="' + attr(allCmd) + '" title="' + attr(allCmd) + '">Copy command</button>' : "") +
         (lspQueue ? "" : _livecodeSettingsButton("Install all", "lsp-install-all", plan.length ? "" : " disabled", true)) +
         '<span class="livecode-lsp-master">' + switchHtml("data-lsp-master", lsp.enabled, "Use language servers") + "<span>Enabled</span></span>" +
       "</div></div>";
@@ -1097,7 +1093,6 @@
     if (action === "lsp-install-all") { startLspInstallAll(); return true; }
     if (action === "lsp-toggle-cmd") { const id = btn.getAttribute("data-lang") || ""; lspCmdOpen[id] = !lspCmdOpen[id]; rerender(["languages"]); return true; }
     if (action === "lsp-job-dismiss") { delete lspJobs[btn.getAttribute("data-lang") || ""]; rerender(["languages"]); return true; }
-    if (action === "lsp-copy") { _livecodeCopyToClipboard(btn.getAttribute("data-value") || "", "Copied install command"); return true; }
     return false;
   }
 
