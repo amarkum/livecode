@@ -1233,6 +1233,7 @@ window.showRenameModal = function(currentTitle, onConfirm) {
 window.closeChatMenus = function() {
   const menus = document.querySelectorAll(".chat-history-menu");
   menus.forEach(menu => menu.remove());
+  document.querySelectorAll('.chat-history-item-more[aria-expanded="true"]').forEach(btn => btn.setAttribute("aria-expanded", "false"));
 };
 
 window.chatAttachmentsLoadingCount = 0;

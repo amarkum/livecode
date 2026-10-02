@@ -1025,6 +1025,7 @@ function _livecodeCreateSessionMenuRow(session) {
     const menu = _livecodeBuildSessionMoreMenu(sid, titleText);
     menu.classList.add("is-portaled");
     document.body.appendChild(menu);
+    moreBtn.setAttribute("aria-expanded", "true");
     _livecodePositionSessionItemMenu(menu, moreBtn);
     _livecodeBindSessionItemMenuReposition(menu, moreBtn);
   };
