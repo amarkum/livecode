@@ -1149,6 +1149,10 @@ window.rehydrateLivecodeChatMarkdown = function(root) {
     if (el.classList.contains("livecode-permission-msg") || el.classList.contains("lazie-permission-msg")) return;
     if (el.classList.contains("livecode-error-msg") || el.classList.contains("lazie-error-msg")) return;
     if (el.classList.contains("livecode-agent-steps")) return;
+    // Tool cards (commands, diffs) live in assistant bubbles too; their output can look like markdown,
+    // and re-rendering it would flatten the card into text.
+    if (el.closest(".livecode-term-row, .livecode-diff-row") ||
+        el.querySelector(".livecode-term-card, .livecode-diff-block, .ui-edit-tool-call, .ui-tool-call-card")) return;
     const stored = el.dataset && el.dataset.rawMd ? String(el.dataset.rawMd) : "";
     if (stored.trim()) {
       window.mountLivecodeChatMarkdown(el, stored);

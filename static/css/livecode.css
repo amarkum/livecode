@@ -16196,10 +16196,9 @@ body.dark-theme .livecode-dialog-overlay {
 }
 #ide-editor-inner #livecode-agent-panel #livecode-chat-messages[data-density="detailed"] .ui-shell-tool-call__icon-swap .ui-icon { transition: transform var(--livecode-duration-normal) var(--livecode-easing-in-out); }
 #ide-editor-inner #livecode-agent-panel #livecode-chat-messages[data-density="detailed"] .ui-shell-tool-call__icon-hover { display: none; }
-#ide-editor-inner #livecode-agent-panel #livecode-chat-messages[data-density="detailed"] .livecode-term-header:hover .ui-shell-tool-call__icon-default,
-#ide-editor-inner #livecode-agent-panel #livecode-chat-messages[data-density="detailed"] .ui-shell-tool-call.is-expanded .ui-shell-tool-call__icon-default { display: none; }
-#ide-editor-inner #livecode-agent-panel #livecode-chat-messages[data-density="detailed"] .livecode-term-header:hover .ui-shell-tool-call__icon-hover,
-#ide-editor-inner #livecode-agent-panel #livecode-chat-messages[data-density="detailed"] .ui-shell-tool-call.is-expanded .ui-shell-tool-call__icon-hover { display: inline-flex; }
+/* Like Cursor: the card keeps its >_ icon open or closed; the chevron only stands in under the pointer. */
+#ide-editor-inner #livecode-agent-panel #livecode-chat-messages[data-density="detailed"] .livecode-term-header:hover .ui-shell-tool-call__icon-default { display: none; }
+#ide-editor-inner #livecode-agent-panel #livecode-chat-messages[data-density="detailed"] .livecode-term-header:hover .ui-shell-tool-call__icon-hover { display: inline-flex; }
 #ide-editor-inner #livecode-agent-panel #livecode-chat-messages[data-density="detailed"] .ui-shell-tool-call.is-expanded .ui-shell-tool-call__icon-hover { transform: rotate(90deg); }
 #ide-editor-inner #livecode-agent-panel #livecode-chat-messages[data-density="detailed"] .ui-shell-tool-call__description-row {
 	display: flex;
@@ -21777,4 +21776,26 @@ body.pink-theme .livecode-chat-session-item-menu .chat-history-menu-item:hover {
 body.white-theme .livecode-chat-session-item-menu .chat-history-menu-item.danger:hover,
 body.pink-theme .livecode-chat-session-item-menu .chat-history-menu-item.danger:hover {
 	color: #dc2626;
+}
+
+/* ---- "Worked for 2m 17s": a finished turn's steps, folded above its final answer ---- */
+
+#ide-editor-section #ide-editor-inner #livecode-agent-panel #livecode-chat-messages > .chat-row.lc-work-member.is-work-collapsed {
+	display: none !important;
+}
+
+#ide-editor-inner #livecode-agent-panel #livecode-chat-messages > .chat-row.lc-worked-row {
+	padding-inline: var(--conversation-text-inset);
+	background: transparent;
+}
+
+/* Narration from while it worked reads quieter than the answer. */
+#ide-editor-inner #livecode-agent-panel #livecode-chat-messages > .chat-row.lc-work-member.livecode-assistant-row .chat-msg {
+	color: var(--livecode-text-secondary, rgb(var(--lc-fg) / 0.6));
+}
+
+/* The fold's chevron always shows, like Cursor's "Worked for … ⌄". */
+#ide-editor-inner #livecode-agent-panel #livecode-chat-messages .lc-worked .ui-collapsible-chevron {
+	opacity: 1;
+	color: var(--livecode-icon-secondary, currentColor);
 }
