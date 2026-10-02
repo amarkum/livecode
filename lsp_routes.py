@@ -44,6 +44,28 @@ def register_livecode_lsp_routes(app, socketio, rt):
             return jsonify({"error": f"Could not save the setting: {e.strerror or e}"}), 500
         return jsonify({"success": True, **status, "bridge": bridge})
 
+    @app.route("/livecode/lsp/install", methods=["POST"])
+    def livecode_lsp_install():
+        data = request.get_json(silent=True) or {}
+        try:
+            job = lsp_servers.start_install(
+                str(data.get("language") or ""),
+                str(data.get("server") or ""),
+                lint_plugins=bool(data.get("lint_plugins")),
+            )
+        except lsp_servers.LspSettingsError as e:
+            return jsonify({"error": str(e)}), 400
+        if logger:
+            logger.info("LiveCode LSP: installing %s with %s", job["server"], job["command"])
+        return jsonify({"success": True, "job": job})
+
+    @app.route("/livecode/lsp/install/<job_id>", methods=["GET"])
+    def livecode_lsp_install_status(job_id):
+        job = lsp_servers.install_status(job_id)
+        if job is None:
+            return jsonify({"error": "No such install job."}), 404
+        return jsonify({"success": True, "job": job})
+
     @app.route("/livecode/lsp/config", methods=["GET"])
     def livecode_lsp_config():
         return jsonify({"success": True, **lsp_servers.client_config(), "bridge": bridge})

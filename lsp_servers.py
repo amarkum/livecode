@@ -16,7 +16,11 @@ import os
 import shlex
 import shutil
 import sys
+import subprocess
 import threading
+import time
+import uuid
+from collections import deque
 from typing import Any
 
 CONFIG_PATH = os.path.expanduser("~/.livecode/lsp.json")
@@ -27,6 +31,8 @@ COMMAND_MAX_CHARS = 1000
 _EXTRA_BIN_DIRS = (
     "/opt/homebrew/bin",
     "/usr/local/bin",
+    "/opt/homebrew/opt/llvm/bin",
+    "/usr/local/opt/llvm/bin",
     "~/.local/bin",
     "~/bin",
     "~/go/bin",
@@ -308,7 +314,8 @@ def status() -> dict[str, Any]:
             "builtin": bool(lang.get("builtin")),
             "enabled": _enabled(data, lang),
             "command": command,
-            "servers": [{"name": s["name"], "command": " ".join(s["argv"]), "install": s.get("install", "")} for s in lang["servers"]],
+            "servers": [{"name": s["name"], "command": " ".join(s["argv"]), "install": s.get("install", ""), **setup_info(s)} for s in lang["servers"]],
+            "lint_plugins_missing": lang["id"] == "python" and _pylsp_without_linters(found),
             "found": found,
             "active": active.get("server", ""),
             "active_source": active.get("source", ""),
@@ -379,3 +386,132 @@ def update(body: dict[str, Any]) -> dict[str, Any]:
                     data["languages"].pop(lang["id"], None)
         _write(data)
     return status()
+
+
+# ---------------------------------------------------------------- one-click setup
+
+# Package managers an install hint may start with; anything else (prose, links) is shown, not run.
+_INSTALLERS = {
+    "pip": "Python's pip", "pipx": "pipx", "npm": "Node.js (npm)", "brew": "Homebrew", "go": "Go",
+    "rustup": "rustup", "gem": "Ruby (gem)", "dotnet": ".NET SDK", "coursier": "Coursier", "ghcup": "GHCup",
+}
+INSTALL_TIMEOUT_S = 1800
+_LOG_LINES = 400
+_jobs: dict[str, dict[str, Any]] = {}
+_jobs_lock = threading.Lock()
+
+
+def setup_command(server: dict[str, Any]) -> list[str] | None:
+    """The argv that installs a server, from its install hint, or None when it cannot be automated."""
+    hint = str(server.get("install") or "").split("(")[0].strip()
+    try:
+        argv = shlex.split(hint)
+    except ValueError:
+        return None
+    if not argv or argv[0] not in _INSTALLERS:
+        return None
+    if argv[0] == "pip":
+        # Into the interpreter LiveCode runs on, so {python} -m pylsp finds it.
+        return [sys.executable, "-m", "pip", "install", "--upgrade", *argv[2:]] if argv[1:2] == ["install"] else None
+    return argv
+
+
+def setup_info(server: dict[str, Any]) -> dict[str, Any]:
+    argv = setup_command(server)
+    if not argv:
+        return {"setup": None}
+    tool = argv[0]
+    needs = "" if os.sep in tool or find_program(tool) or (tool == "coursier" and find_program("cs")) else _INSTALLERS.get(tool, tool)
+    return {"setup": " ".join(shlex.quote(a) for a in argv), "setup_needs": needs}
+
+
+def _pylsp_without_linters(found: list[dict[str, Any]]) -> bool:
+    # pylsp runs without pyflakes/pycodestyle but then never reports errors.
+    return any(f["name"] == "pylsp" for f in found) and not _module_available("pyflakes")
+
+
+_LINT_SETUP = [sys.executable, "-m", "pip", "install", "--upgrade", "python-lsp-server[all]"]
+
+
+def start_install(lang_id: str, server_name: str = "", lint_plugins: bool = False) -> dict[str, Any]:
+    lang = language(lang_id)
+    if lang is None:
+        raise LspSettingsError(f"Unknown language: {lang_id}")
+    if lint_plugins:
+        if lang["id"] != "python":
+            raise LspSettingsError("Linting plugins are for Python.")
+        server, argv = {"name": "python-lsp-server[all]"}, list(_LINT_SETUP)
+    else:
+        candidates = [sv for sv in lang["servers"] if setup_command(sv)]
+        if server_name:
+            candidates = [sv for sv in candidates if sv["name"] == server_name]
+        if not candidates:
+            raise LspSettingsError(f"No {lang['label']} server can be installed automatically; follow its install note instead.")
+        # Prefer a server whose package manager is already on this machine.
+        ready = [sv for sv in candidates if not setup_info(sv).get("setup_needs")]
+        server = (ready or candidates)[0]
+        argv = setup_command(server) or []
+        needs = setup_info(server).get("setup_needs")
+        if needs:
+            raise LspSettingsError(f"Installing {server['name']} needs {needs}, which was not found on this machine.")
+    if argv[0] == "coursier" and not find_program("coursier"):
+        argv[0] = "cs"
+    with _jobs_lock:
+        for job in _jobs.values():
+            if job["language"] == lang["id"] and job["status"] == "running":
+                return _job_view(job)
+        job = {
+            "id": uuid.uuid4().hex[:12], "language": lang["id"], "label": lang["label"], "server": server["name"],
+            "command": " ".join(shlex.quote(a) for a in argv), "status": "running", "returncode": None,
+            "started": time.time(), "finished": None, "log": deque(maxlen=_LOG_LINES),
+        }
+        _jobs[job["id"]] = job
+    threading.Thread(target=_run_install, args=(job, argv), name=f"lsp-install-{lang['id']}", daemon=True).start()
+    return _job_view(job)
+
+
+def _run_install(job: dict[str, Any], argv: list[str]) -> None:
+    env = os.environ.copy()
+    env["PATH"] = _search_path()
+    env.setdefault("HOMEBREW_NO_AUTO_UPDATE", "1")
+    env.setdefault("NONINTERACTIVE", "1")
+    job["log"].append(f"$ {job['command']}")
+    try:
+        proc = subprocess.Popen(
+            [find_program(argv[0]) or argv[0], *argv[1:]],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
+            cwd=os.path.expanduser("~"), start_new_session=True,
+        )
+    except OSError as exc:
+        job["log"].append(f"Could not start {argv[0]}: {exc.strerror or exc}")
+        job.update(status="failed", returncode=-1, finished=time.time())
+        return
+    deadline = time.time() + INSTALL_TIMEOUT_S
+    timer = threading.Timer(INSTALL_TIMEOUT_S, proc.kill)
+    timer.daemon = True
+    timer.start()
+    try:
+        for raw in iter(proc.stdout.readline, b""):
+            line = raw.decode("utf-8", "replace").rstrip()
+            if line:
+                job["log"].append(line[:500])
+        code = proc.wait()
+    finally:
+        timer.cancel()
+    if time.time() >= deadline:
+        job["log"].append(f"Stopped after {INSTALL_TIMEOUT_S // 60} minutes.")
+    ok = code == 0 and (job["server"] == "python-lsp-server[all]" or bool(resolve(job["language"]).get("argv")))
+    if code == 0 and not ok:
+        job["log"].append("The installer finished, but the server was not found on LiveCode's search path. "
+                          "Set its full path as the command in Settings > Languages.")
+    job.update(status="ok" if ok else "failed", returncode=code, finished=time.time())
+
+
+def _job_view(job: dict[str, Any]) -> dict[str, Any]:
+    return {k: (list(v) if isinstance(v, deque) else v) for k, v in job.items()}
+
+
+def install_status(job_id: str) -> dict[str, Any] | None:
+    with _jobs_lock:
+        job = _jobs.get(str(job_id or ""))
+        return _job_view(job) if job else None

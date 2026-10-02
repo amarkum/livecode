@@ -21173,3 +21173,26 @@ body.pink-theme .livecode-toast { background: #ffffff; color: #1f2937; box-shado
 	margin-top: 14px;
 	font-size: 12px;
 }
+
+#ide-editor-inner .livecode-lsp-setup {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+	margin-top: 8px;
+}
+
+#ide-editor-inner .livecode-lsp-log {
+	max-height: 180px;
+	margin: 8px 0 0;
+	padding: 8px 10px;
+	overflow: auto;
+	border-radius: 6px;
+	background: rgb(var(--lc-fg) / 0.05);
+	color: var(--lc-text-2);
+	font-family: var(--lc-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+	font-size: 11.5px;
+	line-height: 1.45;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
