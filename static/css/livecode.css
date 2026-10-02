@@ -21164,3 +21164,12 @@ body.lc-reduce-motion *::after {
 }
 body.white-theme .livecode-toast,
 body.pink-theme .livecode-toast { background: #ffffff; color: #1f2937; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18); }
+
+#ide-editor-inner .livecode-lsp-row .livecode-settings-row-text {
+	flex-basis: 260px;
+}
+
+#ide-editor-inner .livecode-settings-foot {
+	margin-top: 14px;
+	font-size: 12px;
+}

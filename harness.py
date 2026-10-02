@@ -3302,12 +3302,10 @@ def run_livecode_turn(
 
                 def _lsp_errors_for_edit(file_path: str, result: dict) -> list[dict] | None:
                     verify_path = str(result.get("relative_path") or file_path or "")
-                    if not verify_path.lower().endswith((".py", ".pyi")):
-                        return None
                     try:
                         from livecode import lsp_client
 
-                        if not lsp_client.is_available():
+                        if not lsp_client.is_available(verify_path):
                             return None
                         workspace_root = str(result.get("workspace_root") or "")
                         if workspace_root and result.get("relative_path"):

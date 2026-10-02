@@ -576,14 +576,14 @@ LIVECODE_TOOLS = [
         "function": {
             "name": "lsp_definition",
             "description": (
-                "Jump to the real definition of the symbol at a position in a Python file, using the "
-                "language server. Prefer this over find_symbol for .py files — it resolves imports, "
+                "Jump to the real definition of the symbol at a position in a source file, using the "
+                "language server. Prefer this over find_symbol when a language server is set up — it resolves imports, "
                 "methods, and the standard library accurately."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string", "description": "Repo-relative path to a .py file"},
+                    "file_path": {"type": "string", "description": "Repo-relative path to a source file whose language has a server (Python, Java, Go, Rust, C/C++, TypeScript, …)"},
                     "line": {"type": "integer", "description": "1-based line number of the symbol"},
                     "character": {"type": "integer", "description": "1-based column of the symbol"},
                 },
@@ -596,13 +596,13 @@ LIVECODE_TOOLS = [
         "function": {
             "name": "lsp_references",
             "description": (
-                "Find everywhere the Python symbol at a position is used, using the language server. "
-                "More accurate than find_references (which is a text scan) for .py files."
+                "Find everywhere the symbol at a position is used, using the language server. "
+                "More accurate than find_references (which is a text scan)."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string", "description": "Repo-relative path to a .py file"},
+                    "file_path": {"type": "string", "description": "Repo-relative path to a source file whose language has a server (Python, Java, Go, Rust, C/C++, TypeScript, …)"},
                     "line": {"type": "integer", "description": "1-based line number of the symbol"},
                     "character": {"type": "integer", "description": "1-based column of the symbol"},
                 },
@@ -614,11 +614,11 @@ LIVECODE_TOOLS = [
         "type": "function",
         "function": {
             "name": "lsp_hover",
-            "description": "Get the type, signature, and docstring for the Python symbol at a position, using the language server.",
+            "description": "Get the type, signature, and docstring for the symbol at a position, using the language server.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string", "description": "Repo-relative path to a .py file"},
+                    "file_path": {"type": "string", "description": "Repo-relative path to a source file whose language has a server (Python, Java, Go, Rust, C/C++, TypeScript, …)"},
                     "line": {"type": "integer", "description": "1-based line number of the symbol"},
                     "character": {"type": "integer", "description": "1-based column of the symbol"},
                 },
@@ -631,13 +631,13 @@ LIVECODE_TOOLS = [
         "function": {
             "name": "lsp_diagnostics",
             "description": (
-                "Get the language server's diagnostics (errors and warnings) for a Python file. Use it "
+                "Get the language server's diagnostics (errors and warnings) for a source file. Use it "
                 "to check a file compiles cleanly after you edit it."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string", "description": "Repo-relative path to a .py file"},
+                    "file_path": {"type": "string", "description": "Repo-relative path to a source file whose language has a server (Python, Java, Go, Rust, C/C++, TypeScript, …)"},
                 },
                 "required": ["file_path"],
             },
@@ -647,11 +647,11 @@ LIVECODE_TOOLS = [
         "type": "function",
         "function": {
             "name": "lsp_document_symbols",
-            "description": "Get the Python language server's outline for a file: classes, functions, methods, and variables with ranges.",
+            "description": "Get the language server's outline for a file: classes, functions, methods, and variables with ranges.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string", "description": "Repo-relative path to a .py file"},
+                    "file_path": {"type": "string", "description": "Repo-relative path to a source file whose language has a server (Python, Java, Go, Rust, C/C++, TypeScript, …)"},
                 },
                 "required": ["file_path"],
             },
@@ -661,11 +661,11 @@ LIVECODE_TOOLS = [
         "type": "function",
         "function": {
             "name": "lsp_completion",
-            "description": "Get read-only Python completion suggestions at a position using the language server.",
+            "description": "Get read-only completion suggestions at a position using the language server.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string", "description": "Repo-relative path to a .py file"},
+                    "file_path": {"type": "string", "description": "Repo-relative path to a source file whose language has a server (Python, Java, Go, Rust, C/C++, TypeScript, …)"},
                     "line": {"type": "integer", "description": "1-based line number"},
                     "character": {"type": "integer", "description": "1-based column"},
                     "max_results": {"type": "integer", "description": "Maximum suggestions to return (default 40, max 80)"},
@@ -678,11 +678,11 @@ LIVECODE_TOOLS = [
         "type": "function",
         "function": {
             "name": "lsp_rename_preview",
-            "description": "Preview the Python language server workspace edits for renaming a symbol. This never writes files.",
+            "description": "Preview the language server workspace edits for renaming a symbol. This never writes files.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string", "description": "Repo-relative path to a .py file"},
+                    "file_path": {"type": "string", "description": "Repo-relative path to a source file whose language has a server (Python, Java, Go, Rust, C/C++, TypeScript, …)"},
                     "line": {"type": "integer", "description": "1-based line number of the symbol"},
                     "character": {"type": "integer", "description": "1-based column of the symbol"},
                     "new_name": {"type": "string", "description": "Candidate new symbol name"},
@@ -2962,7 +2962,7 @@ def _livecode_lsp_query(project_path: str, name: str, args: dict, workspace=None
                 "severity": sev.get(d.get("severity"), "info"),
                 "line": int((d.get("range") or {}).get("start", {}).get("line", 0)) + 1,
                 "message": str(d.get("message") or "")[:400],
-                "source": d.get("source") or "pylsp",
+                "source": d.get("source") or "lsp",
             }
             for d in diags
         ]

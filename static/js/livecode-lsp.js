@@ -3,11 +3,14 @@
 
     var REQUEST_TIMEOUT_MS = 15000;
     var MAX_RECONNECT = 5;
-    var PY_EXT = /\.py[iw]?$/i;
 
-    var _providersInstalled = false;
+    // Languages with a runnable server, from /livecode/lsp/config (Settings > Languages).
+    var langs = [];
+    var configLoaded = null;
+    var currentProject = null;
+    var clients = Object.create(null);
+    var _providersFor = Object.create(null);
     var _openCodeEditorPatched = false;
-    var activeClient = null;
     var _preloadedUris = new Set();
     var _preloadSeq = 0;
 
@@ -51,9 +54,40 @@
       return null;
     }
 
-    function setStatus(state, text, detail) {
+    function extOf(path) {
+      var name = String(path || "").toLowerCase().split(/[\\/]/).pop() || "";
+      if (name === "dockerfile" || name.indexOf("dockerfile.") === 0) return ".dockerfile";
+      var dot = name.lastIndexOf(".");
+      return dot >= 0 ? name.slice(dot) : "";
+    }
+    function langForPath(path) {
+      var ext = extOf(path);
+      for (var i = 0; i < langs.length; i++) if (langs[i].extensions.indexOf(ext) !== -1) return langs[i];
+      return null;
+    }
+    function langForModel(model) {
+      if (!model) return null;
+      var byPath = langForPath(model.uri && (model.uri.fsPath || model.uri.path));
+      if (byPath) return byPath;
+      var id = model.getLanguageId && model.getLanguageId();
+      for (var i = 0; i < langs.length; i++) if (langs[i].monaco.indexOf(id) !== -1) return langs[i];
+      return null;
+    }
+    function loadConfig() {
+      if (!configLoaded) {
+        configLoaded = fetch("/livecode/lsp/config")
+          .then(function (r) { return r.json(); })
+          .then(function (data) { langs = (data && data.languages) || []; window.WBLspBridge = data && data.bridge; return langs; })
+          .catch(function () { langs = []; return langs; });
+      }
+      return configLoaded;
+    }
+
+    var statuses = Object.create(null);
+    function setStatus(state, text, detail, langId) {
       try {
-        window.WBLspStatus = { state: state || "idle", text: text || "Python LSP: idle", detail: detail || "" };
+        if (langId) statuses[langId] = { state: state || "idle", text: text || "", detail: detail || "" };
+        window.WBLspStatus = { state: state || "idle", text: text || "LSP: idle", detail: detail || "", languages: statuses };
         if (typeof window.filesUpdateOpenTabsList === "function") window.filesUpdateOpenTabsList();
         var el = ensureStatusEl();
         if (!el) return;
@@ -63,7 +97,10 @@
       } catch (_) {}
     }
 
-    function LspClient(projectPath) {
+    function LspClient(projectPath, conf) {
+      this.conf = conf;
+      this.label = conf.label + " LSP";
+      this.owner = "lsp-" + conf.id;
       this.projectPath = projectPath;
       this.rootUri = mUri(projectPath).toString();
       this.ws = null;
@@ -83,20 +120,21 @@
       if (this.disposed) return;
       var self = this;
       var base = (location.origin || location.protocol + "//" + location.host).replace(/^http/, "ws");
-      var wsUrl = base + "/livecode/lsp/python?project=" + encodeURIComponent(this.projectPath);
+      var wsUrl = base + "/livecode/lsp/" + encodeURIComponent(this.conf.id) + "?project=" + encodeURIComponent(this.projectPath);
       var ws;
-      setStatus("connecting", "Python LSP: connecting");
+      var label = this.label, lid = this.conf.id;
+      setStatus("connecting", label + ": connecting", "", lid);
       try {
         ws = new WebSocket(wsUrl);
       } catch (e) {
-        setStatus("unavailable", "Python LSP: unavailable", e && e.message ? e.message : "WebSocket failed");
+        setStatus("unavailable", label + ": unavailable", e && e.message ? e.message : "WebSocket failed", lid);
         return;
       }
       this.ws = ws;
       ws.onopen = function () {
         self.reconnects = 0;
         self.everOpened = true;
-        setStatus("connecting", "Python LSP: starting");
+        setStatus("connecting", label + ": starting", "", lid);
         self._initialize();
       };
       ws.onmessage = function (ev) {
@@ -116,16 +154,16 @@
         // (e.g. flask-sock is not installed): one retry, not a reconnect loop.
         var limit = self.everOpened ? MAX_RECONNECT : 1;
         if (self.reconnects++ < limit) {
-          setStatus("reconnecting", "Python LSP: reconnecting", reason);
+          setStatus("reconnecting", label + ": reconnecting", reason, lid);
           setTimeout(function () {
             self._connect();
           }, Math.min(500 * self.reconnects, 4000));
         } else {
-          setStatus("unavailable", "Python LSP: unavailable", reason);
+          setStatus("unavailable", label + ": unavailable", reason, lid);
         }
       };
       ws.onerror = function () {
-        setStatus("unavailable", "Python LSP: unavailable", "WebSocket error");
+        setStatus("unavailable", label + ": unavailable", "WebSocket error", lid);
         try {
           ws.close();
         } catch (e) {}
@@ -197,7 +235,7 @@
       })
         .then(function () {
           self.ready = true;
-          setStatus("ready", "Python LSP: ready");
+          setStatus("ready", self.label + ": ready", self.conf.server || "", self.conf.id);
           self.notify("initialized", {});
           var q = self.queue;
           self.queue = [];
@@ -206,7 +244,7 @@
           });
         })
         .catch(function (e) {
-          setStatus("unavailable", "Python LSP: unavailable", e && e.message ? e.message : "Initialize failed");
+          setStatus("unavailable", self.label + ": unavailable", e && e.message ? e.message : "Initialize failed", self.conf.id);
         });
     };
 
@@ -249,7 +287,7 @@
         return {
           severity: s,
           message: d.message || "",
-          source: d.source || "pylsp",
+          source: d.source || this.conf.server || this.conf.id,
           code: d.code != null ? String(d.code) : undefined,
           startLineNumber: r.startLineNumber,
           startColumn: r.startColumn,
@@ -258,7 +296,7 @@
         };
       });
       try {
-        window.monaco.editor.setModelMarkers(model, "pylsp", markers);
+        window.monaco.editor.setModelMarkers(model, this.owner, markers);
       } catch (e) {}
     };
 
@@ -269,7 +307,7 @@
       this.open[uri] = true;
       this.versions[uri] = 1;
       this.notify("textDocument/didOpen", {
-        textDocument: { uri: uri, languageId: "python", version: 1, text: model.getValue() },
+        textDocument: { uri: uri, languageId: this.conf.language_ids[extOf(path)] || this.conf.language_id, version: 1, text: model.getValue() },
       });
       var self = this;
       var d = model.onDidChangeContent(function () {
@@ -320,15 +358,32 @@
       try {
         if (this.ws) this.ws.close();
       } catch (e) {}
+      var owner = this.owner;
       try {
         window.monaco.editor.getModels().forEach(function (m) {
-          window.monaco.editor.setModelMarkers(m, "pylsp", []);
+          window.monaco.editor.setModelMarkers(m, owner, []);
         });
       } catch (e) {}
     };
 
-    function client() {
-      return activeClient && activeClient.ready ? activeClient : null;
+    // The ready client for a model's language, if any.
+    function client(model) {
+      var conf = langForModel(model || (window.ideEditor && window.ideEditor.getModel()));
+      var c = conf ? clients[conf.id] : null;
+      return c && c.ready ? c : null;
+    }
+
+    function clientFor(conf) {
+      if (!conf || !currentProject) return null;
+      if (!clients[conf.id]) clients[conf.id] = new LspClient(currentProject, conf);
+      return clients[conf.id];
+    }
+
+    function disposeClients() {
+      Object.keys(clients).forEach(function (id) {
+        try { clients[id].dispose(); } catch (e) {}
+      });
+      clients = Object.create(null);
     }
 
     function lspDocParams(model, position) {
@@ -360,14 +415,22 @@
     }
 
     function installProviders() {
-      if (_providersInstalled || !window.monaco || !window.monaco.languages) return;
-      _providersInstalled = true;
+      if (!window.monaco || !window.monaco.languages) return;
+      langs.forEach(function (conf) {
+        conf.monaco.forEach(function (id) {
+          if (_providersFor[id]) return;
+          _providersFor[id] = true;
+          installProvidersFor(id);
+        });
+      });
+    }
+
+    function installProvidersFor(SEL) {
       var L = window.monaco.languages;
-      var SEL = "python";
 
       L.registerHoverProvider(SEL, {
         provideHover: function (model, position) {
-          var c = client();
+          var c = client(model);
           if (!c) return null;
           return c.request("textDocument/hover", lspDocParams(model, position)).then(function (r) {
             if (!r || !r.contents) return null;
@@ -382,7 +445,7 @@
 
       L.registerDefinitionProvider(SEL, {
         provideDefinition: function (model, position) {
-          var c = client();
+          var c = client(model);
           if (!c) return null;
           return c
             .request("textDocument/definition", lspDocParams(model, position))
@@ -394,7 +457,7 @@
 
       L.registerReferenceProvider(SEL, {
         provideReferences: function (model, position, context) {
-          var c = client();
+          var c = client(model);
           if (!c) return null;
           var params = lspDocParams(model, position);
           params.context = { includeDeclaration: !!(context && context.includeDeclaration) };
@@ -406,7 +469,7 @@
 
       L.registerDocumentSymbolProvider(SEL, {
         provideDocumentSymbols: function (model) {
-          var c = client();
+          var c = client(model);
           if (!c) return null;
           return c
             .request("textDocument/documentSymbol", { textDocument: { uri: model.uri.toString() } })
@@ -446,7 +509,7 @@
       L.registerCompletionItemProvider(SEL, {
         triggerCharacters: [".", "(", "[", '"', "'", " "],
         provideCompletionItems: function (model, position) {
-          var c = client();
+          var c = client(model);
           if (!c) return { suggestions: [] };
           var word = model.getWordUntilPosition(position);
           var defaultRange = new window.monaco.Range(
@@ -494,7 +557,7 @@
         signatureHelpTriggerCharacters: ["(", ","],
         signatureHelpRetriggerCharacters: [")"],
         provideSignatureHelp: function (model, position) {
-          var c = client();
+          var c = client(model);
           if (!c) return null;
           return c.request("textDocument/signatureHelp", lspDocParams(model, position)).then(function (r) {
             if (!r || !r.signatures || !r.signatures.length) return null;
@@ -525,7 +588,7 @@
 
       L.registerRenameProvider(SEL, {
         provideRenameEdits: function (model, position, newName) {
-          var c = client();
+          var c = client(model);
           if (!c) return null;
           var params = lspDocParams(model, position);
           params.newName = newName;
@@ -536,7 +599,7 @@
           });
         },
         resolveRenameLocation: function (model, position) {
-          var c = client();
+          var c = client(model);
           if (!c) return null;
           return c
             .request("textDocument/prepareRename", lspDocParams(model, position))
@@ -667,8 +730,8 @@
     }
 
     function runDefinition(position) {
-      var c = client();
       var model = window.ideEditor && window.ideEditor.getModel();
+      var c = client(model);
       if (!c || !model) return;
       var pos = position || window.ideEditor.getPosition();
       c.request("textDocument/definition", {
@@ -690,8 +753,8 @@
     }
 
     function runReferences(position) {
-      var c = client();
       var model = window.ideEditor && window.ideEditor.getModel();
+      var c = client(model);
       if (!c || !model) return;
       var pos = position || window.ideEditor.getPosition();
       var word = model.getWordAtPosition(pos);
@@ -778,47 +841,70 @@
       _preloadedUris.clear();
     }
 
+    function attachEditor() {
+      if (window.ideEditor) { patchOpenCodeEditor(window.ideEditor); attachNavigation(window.ideEditor); }
+    }
+
     window.WBLsp = {
       onProjectOpen: function (nextPath, prevPath) {
         if (!window.monaco) return;
-        installProviders();
-        if (window.ideEditor) { patchOpenCodeEditor(window.ideEditor); attachNavigation(window.ideEditor); }
-        if (activeClient) {
-          activeClient.dispose();
-          activeClient = null;
-        }
+        disposeClients();
         if (prevPath && prevPath !== nextPath) disposePreloaded();
+        currentProject = nextPath || null;
         if (!nextPath) return;
-        activeClient = new LspClient(nextPath);
+        loadConfig().then(function () {
+          installProviders();
+          attachEditor();
+          // Files already open (restored tabs) get their server now.
+          try {
+            window.monaco.editor.getModels().forEach(function (m) {
+              var path = m.uri && m.uri.scheme === "file" ? m.uri.fsPath || m.uri.path : "";
+              var conf = path && langForPath(path);
+              if (conf && m.isAttachedToEditor()) clientFor(conf).openDoc(path, m);
+            });
+          } catch (e) {}
+        });
       },
 
       onFileOpened: function (filePath, model) {
-        if (!filePath || !PY_EXT.test(filePath) || !model) return;
-        installProviders();
-        if (window.ideEditor) { patchOpenCodeEditor(window.ideEditor); attachNavigation(window.ideEditor); }
-        if (activeClient) activeClient.openDoc(filePath, model);
+        if (!filePath || !model) return;
+        loadConfig().then(function () {
+          var conf = langForPath(filePath);
+          if (!conf || !currentProject) return;
+          installProviders();
+          attachEditor();
+          var c = clientFor(conf);
+          if (c) c.openDoc(filePath, model);
+        });
       },
 
       onFileClosed: function (filePath) {
-        if (activeClient && filePath) activeClient.closeDoc(filePath);
+        var conf = filePath && langForPath(filePath);
+        if (conf && clients[conf.id]) clients[conf.id].closeDoc(filePath);
+      },
+
+      // Settings > Languages changed: drop running servers and pick the new set up.
+      reload: function () {
+        configLoaded = null;
+        var project = currentProject;
+        disposeClients();
+        if (project) window.WBLsp.onProjectOpen(project, project);
       },
 
       disposeAll: function () {
-        if (activeClient) {
-          activeClient.dispose();
-          activeClient = null;
-        }
+        disposeClients();
         disposePreloaded();
       },
 
       _debug: function () {
         return {
-          providers: _providersInstalled,
+          providers: Object.keys(_providersFor),
           patched: _openCodeEditorPatched,
           nav: _navAttached,
-          client: activeClient
-            ? { ready: activeClient.ready, open: Object.keys(activeClient.open), project: activeClient.projectPath }
-            : null,
+          languages: langs.map(function (l) { return l.id + ":" + l.server; }),
+          clients: Object.keys(clients).map(function (id) {
+            return { lang: id, ready: clients[id].ready, open: Object.keys(clients[id].open), project: clients[id].projectPath };
+          }),
           preloaded: _preloadedUris.size,
         };
       },

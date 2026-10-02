@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 import threading
 import time
 from collections import deque
@@ -43,7 +42,6 @@ def _frame_lsp_message(text: str) -> bytes:
 
 _REQUEST_TIMEOUT_S = 12.0
 _IDLE_SHUTDOWN_S = 300.0
-_PY_EXTS = (".py", ".pyi", ".pyw")
 
 _procs: dict[str, "_PylspProc"] = {}
 _procs_lock = threading.Lock()
@@ -105,8 +103,15 @@ class LspUnavailable(RuntimeError):
 
 
 class _PylspProc:
-    def __init__(self, project_root: str) -> None:
+    """One language server process for a project root. Despite the name it runs any server
+    lsp_servers resolves; Python keeps its PYTHONPATH and jedi extra-path configuration."""
+
+    def __init__(self, project_root: str, lang_id: str = "python") -> None:
+        from livecode import lsp_servers
+
         self.root = os.path.abspath(project_root)
+        self.lang_id = lang_id
+        self.lang = lsp_servers.language(lang_id) or lsp_servers.language("python")
         self.last_used = time.time()
         self._lock = threading.Lock()
         self._send_lock = threading.Lock()
@@ -117,19 +122,25 @@ class _PylspProc:
         self._diagnostics: dict[str, list[dict]] = {}
         self._diag_event = threading.Condition()
         self._stderr_lines: deque[str] = deque(maxlen=20)
-        self._import_paths = _python_import_paths(self.root)
+        self._import_paths = _python_import_paths(self.root) if lang_id == "python" else []
         self._alive = True
+        resolved = lsp_servers.resolve(lang_id, self.root)
+        if not resolved.get("argv"):
+            raise LspUnavailable(str(resolved.get("error") or f"no {lang_id} language server"))
+        self.server_name = str(resolved.get("server") or lang_id)
+        env = os.environ.copy() if lang_id != "python" else _pylsp_env(self.root)
+        env["PATH"] = lsp_servers._search_path()
         try:
             self._proc = subprocess.Popen(
-                [sys.executable, "-m", "pylsp"],
+                resolved["argv"],
                 cwd=self.root,
-                env=_pylsp_env(self.root),
+                env=env,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
         except (OSError, ValueError) as exc:
-            raise LspUnavailable(f"failed to start pylsp: {exc}") from exc
+            raise LspUnavailable(f"failed to start {self.server_name}: {exc}") from exc
         self._reader = threading.Thread(
             target=self._read_loop, name=f"pylsp-read-{self._proc.pid}", daemon=True
         )
@@ -141,7 +152,7 @@ class _PylspProc:
 
     def _send(self, obj: dict) -> None:
         if not self._alive or self._proc.poll() is not None:
-            raise LspUnavailable("pylsp exited")
+            raise LspUnavailable(f"{self.server_name} exited")
         frame = _frame_lsp_message(json.dumps(obj))
         try:
             with self._send_lock:
@@ -152,6 +163,9 @@ class _PylspProc:
             raise LspUnavailable(str(exc)) from exc
 
     def _request(self, method: str, params: dict, timeout: float = _REQUEST_TIMEOUT_S) -> Any:
+        if method == "initialize":
+            # jdtls, rust-analyzer and metals take a while to index before they answer.
+            timeout = max(timeout, 60.0)
         with self._lock:
             rid = self._next_id
             self._next_id += 1
@@ -184,7 +198,7 @@ class _PylspProc:
             self._alive = False
             with self._lock:
                 for slot in self._pending.values():
-                    slot["error"] = slot["error"] or "pylsp closed"
+                    slot["error"] = slot["error"] or f"{self.server_name} closed"
                     slot["event"].set()
                 self._pending.clear()
 
@@ -208,7 +222,7 @@ class _PylspProc:
         if mid is not None:
             result: Any = None
             if method == "workspace/configuration":
-                config = {"plugins": {"jedi": {"extra_paths": self._import_paths}}}
+                config = {"plugins": {"jedi": {"extra_paths": self._import_paths}}} if self.lang_id == "python" else {}
                 result = [config for _ in (msg.get("params", {}).get("items") or [])]
             try:
                 self._send({"jsonrpc": "2.0", "id": mid, "result": result})
@@ -279,6 +293,11 @@ class _PylspProc:
             except Exception:
                 pass
 
+    def _language_id(self, abs_path: str) -> str:
+        from livecode import lsp_servers
+
+        return lsp_servers.language_id_for_path(self.lang, abs_path)
+
     def _ensure_open(self, abs_path: str) -> str:
         uri = _uri_for(abs_path)
         try:
@@ -301,7 +320,7 @@ class _PylspProc:
                 self._docs[uri] = {"version": 1, "stamp": stamp}
                 self._notify(
                     "textDocument/didOpen",
-                    {"textDocument": {"uri": uri, "languageId": "python", "version": 1, "text": text}},
+                    {"textDocument": {"uri": uri, "languageId": self._language_id(abs_path), "version": 1, "text": text}},
                 )
             else:
                 rec["version"] += 1
@@ -389,11 +408,12 @@ def _reaper() -> None:
                         pass
 
 
-def _get_proc(project_root: str) -> _PylspProc:
+def _get_proc(project_root: str, lang_id: str = "python") -> _PylspProc:
     global _reaper_started
     root = os.path.abspath(os.path.expanduser(project_root))
+    key = f"{lang_id}:{root}"
     with _procs_lock:
-        proc = _procs.get(root)
+        proc = _procs.get(key)
         if proc is not None and proc._alive and proc._proc.poll() is None:
             proc.last_used = time.time()
             return proc
@@ -402,38 +422,49 @@ def _get_proc(project_root: str) -> _PylspProc:
                 proc.close()
             except Exception:
                 pass
-            _procs.pop(root, None)
-        proc = _PylspProc(root)
-        _procs[root] = proc
+            _procs.pop(key, None)
+        proc = _PylspProc(root, lang_id)
+        _procs[key] = proc
         if not _reaper_started:
             threading.Thread(target=_reaper, name="pylsp-reaper", daemon=True).start()
             _reaper_started = True
         return proc
 
 
+def _lang_for(abs_path: str) -> str:
+    from livecode import lsp_servers
+
+    lang = lsp_servers.language_for_path(abs_path)
+    return lang["id"] if lang else ""
+
+
 def _guard(abs_path: str) -> dict | None:
-    if not str(abs_path).lower().endswith(_PY_EXTS):
-        return {"error": "LSP supports Python files only", "error_kind": "invalid_input"}
+    if not _lang_for(abs_path):
+        return {"error": "No language server covers this file type (see Settings > Languages)", "error_kind": "invalid_input"}
     if not os.path.isfile(abs_path):
         return {"error": f"File not found: {abs_path}", "error_kind": "invalid_input"}
     return None
 
 
-def _format_unavailable(exc: Exception, detail: str = "") -> dict:
-    message = str(exc).strip() or "pylsp unavailable"
+def _format_unavailable(exc: Exception, detail: str = "", lang_id: str = "python") -> dict:
+    from livecode import lsp_servers
+
+    lang = lsp_servers.language(lang_id) or {"label": lang_id}
+    message = str(exc).strip() or "language server unavailable"
     if "No module named pylsp" in detail or "No module named 'pylsp'" in detail:
         message = "python-lsp-server is not installed in the active Python environment"
     if detail and detail not in message:
         message = f"{message}\n{detail}"
-    return {"error": f"Python language server unavailable: {message}", "error_kind": "unavailable"}
+    return {"error": f"{lang['label']} language server unavailable: {message}", "error_kind": "unavailable"}
 
 
-def _drop_proc(project_root: str, proc: _PylspProc | None = None) -> None:
+def _drop_proc(project_root: str, proc: _PylspProc | None = None, lang_id: str = "python") -> None:
     root = os.path.abspath(os.path.expanduser(project_root))
+    key = f"{lang_id}:{root}"
     with _procs_lock:
-        cached = _procs.get(root)
+        cached = _procs.get(key)
         if proc is None or cached is proc:
-            _procs.pop(root, None)
+            _procs.pop(key, None)
     target = proc or cached
     if target is not None:
         try:
@@ -446,23 +477,25 @@ def _run(project_root: str, abs_path: str, fn_name: str, *args) -> Any:
     bad = _guard(abs_path)
     if bad:
         return bad
+    lang_id = _lang_for(abs_path)
     last_exc: Exception | None = None
     last_detail = ""
     for attempt in range(2):
         proc: _PylspProc | None = None
         try:
-            proc = _get_proc(project_root)
+            proc = _get_proc(project_root, lang_id)
             return getattr(proc, fn_name)(abs_path, *args)
         except LspUnavailable as exc:
             last_exc = exc
             last_detail = proc.error_detail() if proc is not None else ""
-            _drop_proc(project_root, proc)
-            if attempt == 0:
+            _drop_proc(project_root, proc, lang_id)
+            # "Not installed" or "turned off" will not change on a second try.
+            if attempt == 0 and proc is not None:
                 continue
-            return _format_unavailable(exc, last_detail)
+            return _format_unavailable(exc, last_detail, lang_id)
         except Exception as exc:
             return {"error": f"LSP query failed: {exc}", "error_kind": "unavailable"}
-    return _format_unavailable(last_exc or LspUnavailable("pylsp unavailable"), last_detail)
+    return _format_unavailable(last_exc or LspUnavailable("language server unavailable"), last_detail, lang_id)
 
 
 def definition(project_root: str, abs_path: str, line: int, char: int) -> Any:
@@ -493,12 +526,12 @@ def diagnostics(project_root: str, abs_path: str, wait_s: float = 3.0) -> Any:
     return _run(project_root, abs_path, "diagnostics", float(wait_s))
 
 
-def is_available() -> bool:
-    try:
-        __import__("pylsp")
-        return True
-    except Exception:
-        return False
+def is_available(abs_path: str = "") -> bool:
+    """Whether a language server is ready for this file (Python when no path is given)."""
+    from livecode import lsp_servers
+
+    lang_id = _lang_for(abs_path) if abs_path else "python"
+    return bool(lang_id) and bool(lsp_servers.resolve(lang_id).get("argv"))
 
 
 def shutdown_all() -> None:

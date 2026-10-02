@@ -837,7 +837,97 @@
     }
   }
 
+  // ---------------------------------------------------------------- languages (LSP)
+
+  let lsp = null;
+  let lspLoading = false;
+
+  function loadLsp() {
+    if (lspLoading) return;
+    lspLoading = true;
+    fetch("/livecode/lsp/settings")
+      .then(function(r) { return r.json(); })
+      .then(function(data) { lsp = data && data.success ? data : { error: (data && data.error) || "Could not read language settings." }; })
+      .catch(function(err) { lsp = { error: err.message || String(err) }; })
+      .finally(function() { lspLoading = false; rerender(["languages"]); });
+  }
+
+  function saveLsp(body, message) {
+    return postJson("/livecode/lsp/settings", body)
+      .then(function(data) {
+        lsp = data;
+        rerender(["languages"]);
+        if (window.WBLsp && typeof window.WBLsp.reload === "function") window.WBLsp.reload();
+        if (message) toast(message);
+      })
+      .catch(function(err) { toast(err.message || String(err)); rerender(["languages"]); });
+  }
+
+  function lspRowHtml(lang, masterOn) {
+    let status;
+    if (!lang.enabled) status = '<span class="livecode-settings-status">Off</span>';
+    else if (lang.ready) status = '<span class="livecode-settings-status is-ok">' + esc(lang.active) + "</span>" + (lang.active_source === "custom" ? " custom command" : "");
+    else if (lang.problem) status = '<span class="livecode-settings-status is-warn">Not running</span> ' + esc(lang.problem);
+    else status = '<span class="livecode-settings-status is-warn">Not installed</span>';
+    const install = lang.servers[0] && lang.servers[0].install;
+    const others = lang.found.length > 1 ? " Also found: " + lang.found.slice(1).map(function(f) { return esc(f.name); }).join(", ") + "." : "";
+    const desc = status + ' <span class="livecode-settings-default">' + esc(lang.extensions.join(" ")) + "</span>" +
+      (lang.builtin ? '<div class="livecode-settings-row-desc">The editor already has built-in ' + esc(lang.label) + " support; turn this on for a full language server instead.</div>" : "") +
+      (!lang.found.length && !lang.command && install ? '<div class="livecode-settings-row-desc">Install: <code>' + esc(install) + "</code> " +
+        '<button type="button" class="lc-btn livecode-settings-link" data-settings-action="lsp-copy" data-value="' + attr(install) + '">Copy</button></div>' : "") +
+      (others ? '<div class="livecode-settings-row-desc">' + others + "</div>" : "");
+    const placeholder = (lang.found[0] && lang.servers.filter(function(sv) { return sv.name === lang.found[0].name; })[0] || lang.servers[0] || {}).command || "";
+    return '<div class="livecode-settings-row livecode-lsp-row"><div class="livecode-settings-row-text">' +
+      '<div class="livecode-settings-row-title">' + esc(lang.label) + "</div>" +
+      '<div class="livecode-settings-row-desc">' + desc + "</div>" +
+      '<div class="livecode-cdp-inline"><input type="text" class="livecode-settings-text is-wide" data-lsp-command="' + attr(lang.id) + '" value="' + attr(lang.command) +
+        '" placeholder="' + attr(placeholder ? "Auto: " + placeholder : "Server command") + '" spellcheck="false" autocomplete="off" aria-label="' + attr(lang.label + " server command") + '"' + (masterOn ? "" : " disabled") + "></div>" +
+      "</div>" + switchHtml('data-lsp-enabled="' + attr(lang.id) + '"', lang.enabled, lang.label + " language server", !masterOn) + "</div>";
+  }
+
+  window._livecodeSettingsLanguagesHtml = function() {
+    if (!lsp) loadLsp();
+    let html = headRow("Languages", "Language servers give the editor and the agent completions, hover docs, go to definition, references, rename and live errors. LiveCode finds an installed server for each language; type a command to use a different one. Commands may use {python}, {project} and {cache}.",
+      _livecodeSettingsButton("Rescan", "lsp-rescan"));
+    if (!lsp) return html + group("", [_livecodeSettingsRowHtml("Language servers", "Loading…", "")]);
+    if (lsp.error) return html + group("", [_livecodeSettingsRowHtml("Language servers", esc(lsp.error), _livecodeSettingsButton("Retry", "lsp-rescan"))]);
+    const bridge = lsp.bridge || {};
+    const ready = lsp.languages.filter(function(l) { return l.enabled && l.ready; }).length;
+    html += group("", [
+      _livecodeSettingsRowHtml("Use language servers", ready + " of " + lsp.languages.length + " languages have a server running or ready." +
+        (bridge.available === false ? ' <span class="livecode-settings-status is-warn">Editor bridge off</span> ' + esc(bridge.reason || "") + " The agent's tools still use the servers." : ""),
+        switchHtml("data-lsp-master", lsp.enabled, "Use language servers")),
+    ]);
+    const readyLangs = lsp.languages.filter(function(l) { return l.found.length || l.command; });
+    const missing = lsp.languages.filter(function(l) { return !l.found.length && !l.command; });
+    if (readyLangs.length) html += group("Installed", readyLangs.map(function(l) { return lspRowHtml(l, lsp.enabled); }));
+    if (missing.length) html += group("Not installed", missing.map(function(l) { return lspRowHtml(l, lsp.enabled); }));
+    html += '<p class="livecode-settings-lead livecode-settings-foot">Saved in ' + _livecodeSettingsPathHtml(lsp.path || "") + "</p>";
+    return html;
+  };
+
+  function handleLspAction(action, btn) {
+    if (action === "lsp-rescan") { lsp = null; loadLsp(); if (window.WBLsp && window.WBLsp.reload) window.WBLsp.reload(); return true; }
+    if (action === "lsp-copy") { _livecodeCopyToClipboard(btn.getAttribute("data-value") || "", "Copied install command"); return true; }
+    return false;
+  }
+
+  function handleLspChange(input) {
+    if (input.hasAttribute("data-lsp-master")) { saveLsp({ enabled: !!input.checked }); return true; }
+    const enabledFor = input.getAttribute("data-lsp-enabled");
+    if (enabledFor) { saveLsp({ languages: { [enabledFor]: { enabled: !!input.checked } } }); return true; }
+    const commandFor = input.getAttribute("data-lsp-command");
+    if (commandFor) {
+      const current = ((lsp && lsp.languages) || []).filter(function(l) { return l.id === commandFor; })[0];
+      const value = String(input.value || "").trim();
+      if (!current || value !== current.command) saveLsp({ languages: { [commandFor]: { command: value } } }, value ? "Server command saved" : "Using the detected server");
+      return true;
+    }
+    return false;
+  }
+
   window._livecodeHandleSettingsActionExt = function(action, btn) {
+    if (handleLspAction(action, btn)) return true;
     const key = btn.getAttribute("data-key") || "";
     const value = btn.getAttribute("data-value");
     switch (action) {
@@ -957,6 +1047,7 @@
 
   // Returns true when it handled the change.
   window._livecodeHandleSettingsChangeExt = function(input) {
+    if (handleLspChange(input)) return true;
     const agentKey = input.getAttribute("data-agent-setting");
     if (agentKey) {
       const spec = agentSpec(agentKey);

@@ -98,6 +98,7 @@ Most settings are in the app, under **Settings**, with a search box at the top:
 - **Memory**: recall and saving options, plus MEMORY.md, session logs, consolidation and clearing for the open project.
 - **Browser**: headless, in a window, or attached to your Chrome over CDP (test, detect or launch one), browser program, proxy, pixel density, design checks.
 - **Terminal**: font size, cursor, blinking and scrollback.
+- **Languages**: language servers for Python, TypeScript/JavaScript, Java, Kotlin, Scala, Go, Rust, C/C++, C#, Swift, Ruby, PHP, Dart, Lua, Elixir, Haskell, Zig, Shell, YAML, Terraform, Dockerfile, SQL, HTML, CSS, JSON and Markdown. Installed servers are found automatically; each language can be turned off or given its own command. They power editor completions, hover, go to definition, rename and live errors, and the agent's `lsp_*` tools.
 - **Models**, **Rules**, **MCP**, **Indexing**.
 
 They are saved on your machine:
