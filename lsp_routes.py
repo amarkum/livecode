@@ -73,7 +73,7 @@ def register_livecode_lsp_routes(app, socketio, rt):
     try:
         from flask_sock import Sock
     except Exception as exc:
-        bridge["reason"] = "The editor's language-server bridge needs flask-sock on the LiveCode server: pip install flask-sock"
+        bridge["reason"] = "The editor's language-server bridge needs flask-sock on the LiveCode server: pip install flask-sock."
         if logger:
             logger.warning("LiveCode LSP bridge disabled (flask-sock missing): %s", exc)
         return

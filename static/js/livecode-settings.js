@@ -940,8 +940,7 @@
   }
 
   function lspActionButton(brand, label, attrs) {
-    return '<button type="button" class="lc-btn livecode-lsp-install" data-settings-action="lsp-install"' + attrs + '>' +
-      '<img src="' + brand.icon + '" alt="" width="14" height="14">' + esc(label) + "</button>";
+    return '<button type="button" class="lc-btn livecode-settings-btn livecode-lsp-install" data-settings-action="lsp-install"' + attrs + ">" + esc(label) + "</button>";
   }
 
   const lspJobs = {};
@@ -1062,15 +1061,14 @@
     });
     const allCmd = plan.map(function(p) { return p.setup; }).join(" && ");
     let hero = '<div class="livecode-lsp-hero"><div class="livecode-lsp-hero-main">' +
-      '<div class="livecode-lsp-stat"><strong>' + ready + "</strong><span>of " + lsp.languages.length + " languages ready</span></div>" +
+      '<div class="livecode-lsp-stat"><strong>' + ready + " of " + lsp.languages.length + "</strong> languages ready</div>" +
       '<div class="livecode-lsp-hero-text">';
     if (lspQueue) {
       const doneCount = lspQueue.total - lspQueue.items.length;
       hero += "<div><strong>Installing " + doneCount + " of " + lspQueue.total + "</strong> · " + esc(lspQueue.current) + "…</div>" +
         '<div class="livecode-lsp-progress"><span style="width:' + Math.round(100 * Math.max(0, doneCount - 1) / lspQueue.total) + '%"></span></div>';
     } else if (plan.length) {
-      hero += "<div><strong>" + plan.length + " ready to install</strong></div><div class=\"livecode-lsp-logos\">" +
-        plan.map(function(p) { const l = lsp.languages.filter(function(x) { return x.id === p.lang; })[0]; return l ? '<img src="' + lspBrand(l).icon + '" alt="" title="' + attr(p.label) + '" width="18" height="18">' : ""; }).join("") + "</div>";
+      hero += "<div>" + plan.length + " ready to install</div>";
     } else {
       hero += "<div><strong>Everything installable is installed</strong></div>";
     }
