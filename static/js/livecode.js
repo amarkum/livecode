@@ -6499,18 +6499,6 @@ function _livecodeRenderFinderRows(items, selectedPath, currentPath) {
   tbody.innerHTML = rowsHtml;
 }
 
-// The footer checkbox and Settings > General "Show hidden files" are the same setting.
-function _livecodeSyncFinderHiddenToggle() {
-  const chk = document.getElementById("livecode-finder-show-hidden");
-  if (chk) chk.checked = !!_livecodeSettingsGet("showHiddenFiles");
-}
-
-window.livecodeBrowserToggleHidden = function(checked) {
-  _livecodeSettingsSet("showHiddenFiles", !!checked);
-  const search = document.getElementById("livecode-finder-search");
-  window.livecodeBrowserFilterList(search ? search.value : "");
-};
-
 window.livecodeBrowserFilterList = function(query) {
   const q = String(query || "").trim().toLowerCase();
   let base = _livecodeBrowserItems;
@@ -6542,7 +6530,6 @@ window.openLiveCodeProjectBrowser = function() {
   if (sel) { sel.textContent = ""; sel.style.display = "none"; }
   let start = "~";
   try { start = localStorage.getItem("livecodeBrowserLastPath") || livecodeProjectPath || "~"; } catch (e) {}
-  _livecodeSyncFinderHiddenToggle();
   _livecodeRenderFinderFavorites();
   _livecodeMaybeSetHomePath(start);
   _livecodeBrowserPath = start;
@@ -6567,7 +6554,6 @@ window.openLiveCodeFileBrowser = function(onSelect, startPath, extensions) {
   if (sel) { sel.textContent = ""; sel.style.display = "none"; }
   let start = startPath || "~";
   try { if (!startPath) start = localStorage.getItem("livecodeBrowserLastPath") || "~"; } catch (e) {}
-  _livecodeSyncFinderHiddenToggle();
   _livecodeRenderFinderFavorites();
   _livecodeMaybeSetHomePath(start);
   _livecodeBrowserPath = start;
@@ -6592,7 +6578,6 @@ window.openLiveCodeFolderBrowser = function(onSelect, startPath) {
   if (sel) { sel.textContent = ""; sel.style.display = "none"; }
   let start = startPath || "~";
   try { if (!startPath) start = localStorage.getItem("livecodeBrowserLastPath") || "~"; } catch (e) {}
-  _livecodeSyncFinderHiddenToggle();
   _livecodeRenderFinderFavorites();
   _livecodeMaybeSetHomePath(start);
   _livecodeBrowserPath = start;
@@ -19410,9 +19395,9 @@ function _livecodeBindSettingsOnce(view) {
     if (setting) {
       _livecodeSettingsSet(setting, !!input.checked);
       if (setting === "showHiddenFiles") {
-        _livecodeSyncFinderHiddenToggle();
+        // Settings > General is the one place for it; an open folder browser follows at once.
         const search = document.getElementById("livecode-finder-search");
-        if (typeof window.livecodeBrowserFilterList === "function" && document.getElementById("livecode-finder-show-hidden")) window.livecodeBrowserFilterList(search ? search.value : "");
+        if (typeof window.livecodeBrowserFilterList === "function" && search) window.livecodeBrowserFilterList(search.value);
       }
       if (setting === "autoRunQueue") {
         _livecodeRenderQueueBar();

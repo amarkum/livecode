@@ -7170,20 +7170,6 @@ html body #livecode-chat-messages .chat-msg p {
 .livecode-finder-fav-row:hover .livecode-finder-fav-remove {
 	opacity: 1;
 }
-.livecode-finder-hidden-toggle {
-	display: flex;
-	align-items: center;
-	gap: 6px;
-	font-size: 11px;
-	opacity: 0.8;
-	cursor: pointer;
-	user-select: none;
-}
-.livecode-finder-hidden-toggle input {
-	cursor: pointer;
-	margin: 0;
-	flex-shrink: 0;
-}
 .livecode-finder-row.is-parent td {
 	opacity: 0.85;
 	font-style: italic;
@@ -7353,7 +7339,7 @@ html body #livecode-chat-messages .chat-msg p {
 .livecode-finder-footer {
 	display: flex;
 	align-items: center;
-	justify-content: space-between;
+	justify-content: flex-end;
 	padding: 8px 10px;
 	border-top: 1px solid rgba(71, 85, 105, 0.18);
 	flex-shrink: 0;
