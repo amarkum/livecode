@@ -21675,3 +21675,81 @@ body.pink-theme .livecode-toast { background: #ffffff; color: #1f2937; box-shado
 #ide-editor-inner .livecode-index-note:last-child {
 	margin-bottom: 0;
 }
+
+/* ---- Chat history: the ⋯ menu on a session row (Rename / Delete), attached to <body> ---- */
+
+.chat-history-menu.livecode-chat-session-item-menu {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	min-width: 148px;
+	padding: 4px;
+	border: 1px solid rgba(148, 163, 184, 0.2);
+	border-radius: 8px;
+	background: #1f2937;
+	color: #e5e7eb;
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+	font-family: inherit;
+	font-size: 13px;
+}
+body.white-theme .chat-history-menu.livecode-chat-session-item-menu {
+	border-color: rgba(71, 85, 105, 0.18);
+	background: #ffffff;
+	color: #1f2937;
+	box-shadow: 0 8px 24px rgba(15, 23, 42, 0.14);
+}
+body.pink-theme .chat-history-menu.livecode-chat-session-item-menu {
+	border-color: rgba(190, 24, 93, 0.2);
+	background: #fdf2f8;
+	color: #831843;
+	box-shadow: 0 8px 24px rgba(131, 24, 67, 0.16);
+}
+body.black-theme .chat-history-menu.livecode-chat-session-item-menu {
+	border-color: rgba(255, 255, 255, 0.1);
+	background: #1e1e1e;
+	color: #d4d4d4;
+	box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+}
+.livecode-chat-session-item-menu .chat-history-menu-item {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	height: 28px;
+	margin: 0;
+	padding: 0 10px;
+	border: 0;
+	border-radius: 5px;
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+	-webkit-appearance: none;
+	appearance: none;
+}
+.livecode-chat-session-item-menu .chat-history-menu-item svg {
+	flex: 0 0 auto;
+	width: 14px;
+	height: 14px;
+	opacity: 0.75;
+}
+.livecode-chat-session-item-menu .chat-history-menu-item:hover,
+.livecode-chat-session-item-menu .chat-history-menu-item:focus-visible {
+	outline: none;
+	background: rgba(148, 163, 184, 0.16);
+}
+body.white-theme .livecode-chat-session-item-menu .chat-history-menu-item:hover,
+body.pink-theme .livecode-chat-session-item-menu .chat-history-menu-item:hover {
+	background: rgba(71, 85, 105, 0.1);
+}
+.livecode-chat-session-item-menu .chat-history-menu-item.danger {
+	color: #f87171;
+}
+body.white-theme .livecode-chat-session-item-menu .chat-history-menu-item.danger,
+body.pink-theme .livecode-chat-session-item-menu .chat-history-menu-item.danger {
+	color: #dc2626;
+}
+.livecode-chat-session-item-menu .chat-history-menu-item.danger:hover {
+	background: rgba(239, 68, 68, 0.12);
+}
