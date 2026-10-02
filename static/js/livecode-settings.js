@@ -20,7 +20,7 @@
     editorWordWrap: "on",
     editorMinimap: false,
     editorTabSize: "4",
-    editorRenderWhitespace: "boundary",
+    editorRenderWhitespace: "none",
     editorCursorStyle: "line",
     editorCursorBlinking: "solid",
     editorLigatures: false,

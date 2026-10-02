@@ -2445,7 +2445,7 @@ function initializeIDEEditor() {
       fontFamily: window.LIVECODE_MONACO_FONT || "'LivecodeMono', 'Prima Sans Mono W01 Roman', 'PrimaSansMonoW01-Roman', Consolas, 'Liberation Mono', 'Courier New', ui-monospace, SFMono-Regular, Menlo, Monaco, monospace",
       tabSize: 4,
       insertSpaces: true,
-      renderWhitespace: "boundary",
+      renderWhitespace: "none",
       cursorBlinking: "solid",
       cursorStyle: "line",
       smoothScrolling: true,
