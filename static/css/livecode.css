@@ -21201,3 +21201,367 @@ body.pink-theme .livecode-toast { background: #ffffff; color: #1f2937; box-shado
 .ide-modal-message {
 	white-space: pre-line;
 }
+
+/* ---- Settings > Languages: hero summary and one card per language ---- */
+
+#ide-editor-inner .livecode-lsp-hero {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: 14px 20px;
+	padding: 16px 18px;
+	border-radius: 10px;
+	background: linear-gradient(135deg, rgb(var(--lc-fg) / 0.06), rgb(var(--lc-fg) / 0.02));
+	box-shadow: inset 0 0 0 1px var(--lc-stroke-3);
+}
+
+#ide-editor-inner .livecode-lsp-hero-main {
+	display: flex;
+	flex: 1 1 320px;
+	align-items: center;
+	gap: 18px;
+	min-width: 0;
+}
+
+#ide-editor-inner .livecode-lsp-stat {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	min-width: 76px;
+	padding-right: 18px;
+	border-right: 1px solid var(--lc-stroke-3);
+	color: var(--lc-text-3);
+	font-size: 11px;
+	text-align: center;
+}
+
+#ide-editor-inner .livecode-lsp-stat strong {
+	color: var(--lc-text-1);
+	font-size: 26px;
+	font-weight: 650;
+	line-height: 1.1;
+}
+
+#ide-editor-inner .livecode-lsp-hero-text {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	min-width: 0;
+	color: var(--lc-text-2);
+	font-size: 12.5px;
+}
+
+#ide-editor-inner .livecode-lsp-hero-text strong {
+	color: var(--lc-text-1);
+	font-weight: 600;
+}
+
+#ide-editor-inner .livecode-lsp-logos {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+}
+
+#ide-editor-inner .livecode-lsp-logos img {
+	padding: 3px;
+	border-radius: 6px;
+	background: rgb(var(--lc-fg) / 0.06);
+}
+
+#ide-editor-inner .livecode-lsp-progress {
+	overflow: hidden;
+	width: 100%;
+	max-width: 280px;
+	height: 4px;
+	border-radius: 99px;
+	background: rgb(var(--lc-fg) / 0.1);
+}
+
+#ide-editor-inner .livecode-lsp-progress span {
+	display: block;
+	height: 100%;
+	border-radius: inherit;
+	background: var(--lc-link, #3b82f6);
+	transition: width 0.4s ease;
+}
+
+#ide-editor-inner .livecode-lsp-hero-actions {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+}
+
+#ide-editor-inner .livecode-lsp-master {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	margin-left: 6px;
+	color: var(--lc-text-3);
+	font-size: 12px;
+}
+
+#ide-editor-inner .livecode-lsp-bridge {
+	margin: 10px 2px 0;
+}
+
+#ide-editor-inner .livecode-lsp-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+	gap: 12px;
+}
+
+#ide-editor-inner .livecode-lsp-card {
+	position: relative;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	min-width: 0;
+	padding: 14px;
+	border-radius: 10px;
+	background: rgb(var(--lc-fg) / 0.035);
+	box-shadow: inset 0 0 0 1px var(--lc-stroke-3);
+	transition: box-shadow 0.15s ease, background 0.15s ease;
+}
+
+#ide-editor-inner .livecode-lsp-card:hover {
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--lsp-brand) 45%, transparent);
+}
+
+#ide-editor-inner .livecode-lsp-card.is-ready::before {
+	content: "";
+	position: absolute;
+	top: 12px;
+	bottom: 12px;
+	left: 0;
+	width: 3px;
+	border-radius: 0 3px 3px 0;
+	background: var(--lsp-brand);
+}
+
+#ide-editor-inner .livecode-lsp-card.is-off {
+	opacity: 0.62;
+}
+
+#ide-editor-inner .livecode-lsp-card.is-off:hover {
+	opacity: 0.9;
+}
+
+#ide-editor-inner .livecode-lsp-head {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+#ide-editor-inner .livecode-lsp-logo {
+	display: inline-flex;
+	flex: 0 0 auto;
+	align-items: center;
+	justify-content: center;
+	width: 36px;
+	height: 36px;
+	border-radius: 9px;
+	background: color-mix(in srgb, var(--lsp-brand) 16%, transparent);
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--lsp-brand) 28%, transparent);
+}
+
+#ide-editor-inner .livecode-lsp-title {
+	flex: 1;
+	min-width: 0;
+}
+
+#ide-editor-inner .livecode-lsp-name {
+	overflow: hidden;
+	color: var(--lc-text-1);
+	font-size: 13.5px;
+	font-weight: 600;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+#ide-editor-inner .livecode-lsp-exts {
+	overflow: hidden;
+	margin-top: 1px;
+	color: var(--lc-text-3);
+	font-family: var(--lc-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+	font-size: 11px;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+#ide-editor-inner .livecode-lsp-pill {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	max-width: 100%;
+	padding: 2px 8px;
+	overflow: hidden;
+	border-radius: 99px;
+	font-size: 11.5px;
+	line-height: 18px;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+#ide-editor-inner .livecode-lsp-pill::before {
+	content: "";
+	flex: 0 0 auto;
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: currentColor;
+}
+
+#ide-editor-inner .livecode-lsp-pill.is-ok { background: rgb(63 185 80 / 0.14); color: #3fb950; }
+#ide-editor-inner .livecode-lsp-pill.is-warn { background: rgb(210 153 34 / 0.15); color: #d29922; }
+#ide-editor-inner .livecode-lsp-pill.is-missing { background: rgb(var(--lc-fg) / 0.07); color: var(--lc-text-3); }
+#ide-editor-inner .livecode-lsp-pill.is-off { background: rgb(var(--lc-fg) / 0.05); color: var(--lc-text-3); }
+#ide-editor-inner .livecode-lsp-pill.is-busy { background: color-mix(in srgb, var(--lsp-brand, #3b82f6) 18%, transparent); color: var(--lc-text-1); }
+#ide-editor-inner .livecode-lsp-pill.is-busy::before { animation: livecode-lsp-pulse 1s ease-in-out infinite; }
+
+@keyframes livecode-lsp-pulse {
+	50% { opacity: 0.25; }
+}
+
+#ide-editor-inner .livecode-lsp-note {
+	margin: 0;
+	color: var(--lc-text-3);
+	font-size: 12px;
+	line-height: 1.45;
+}
+
+#ide-editor-inner .livecode-lsp-note.is-warn {
+	color: #d29922;
+}
+
+#ide-editor-inner .livecode-lsp-note strong {
+	color: var(--lc-text-2);
+}
+
+#ide-editor-inner .livecode-lsp-action {
+	display: flex;
+	flex-direction: column;
+	align-items: stretch;
+	gap: 6px;
+}
+
+#ide-editor-inner .livecode-settings-view .livecode-lsp-install {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 7px;
+	height: 30px;
+	padding: 0 12px;
+	border: 0;
+	border-radius: 7px;
+	background: var(--lsp-brand);
+	color: #fff;
+	font: inherit;
+	font-size: 12.5px;
+	font-weight: 600;
+	cursor: pointer;
+	box-shadow: 0 1px 2px rgb(0 0 0 / 0.25), inset 0 1px 0 rgb(255 255 255 / 0.15);
+	transition: filter 0.15s ease, transform 0.05s ease;
+}
+
+#ide-editor-inner .livecode-settings-view .livecode-lsp-install:hover {
+	filter: brightness(1.1);
+}
+
+#ide-editor-inner .livecode-settings-view .livecode-lsp-install:active {
+	transform: translateY(1px);
+}
+
+#ide-editor-inner .livecode-settings-view .livecode-lsp-install:disabled {
+	cursor: default;
+	opacity: 0.6;
+}
+
+#ide-editor-inner .livecode-lsp-install img {
+	padding: 1px;
+	border-radius: 3px;
+	background: rgb(255 255 255 / 0.9);
+}
+
+#ide-editor-inner .livecode-lsp-cmd {
+	display: block;
+	overflow: hidden;
+	padding: 4px 8px;
+	border-radius: 5px;
+	background: rgb(var(--lc-fg) / 0.05);
+	color: var(--lc-text-3);
+	font-family: var(--lc-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+	font-size: 11px;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+#ide-editor-inner .livecode-lsp-copyline {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+}
+
+#ide-editor-inner .livecode-lsp-copyline .livecode-lsp-cmd {
+	flex: 1;
+	min-width: 0;
+}
+
+#ide-editor-inner .livecode-lsp-copy,
+#ide-editor-inner .livecode-lsp-more {
+	flex: 0 0 auto;
+	padding: 2px 6px;
+	border: 0;
+	border-radius: 4px;
+	background: transparent;
+	color: var(--lc-link);
+	font: inherit;
+	font-size: 11.5px;
+	cursor: pointer;
+}
+
+#ide-editor-inner .livecode-lsp-copy:hover,
+#ide-editor-inner .livecode-lsp-more:hover {
+	background: var(--lc-hover);
+}
+
+#ide-editor-inner .livecode-lsp-foot {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 6px;
+	margin-top: auto;
+	padding-top: 8px;
+	border-top: 1px solid var(--lc-stroke-3);
+}
+
+#ide-editor-inner .livecode-lsp-foot .livecode-lsp-more {
+	margin-left: -6px;
+	color: var(--lc-text-3);
+}
+
+#ide-editor-inner .livecode-settings-view .livecode-lsp-input {
+	width: 100%;
+	font-family: var(--lc-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+	font-size: 11.5px;
+}
+
+#ide-editor-inner .livecode-lsp-job {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+#ide-editor-inner .livecode-lsp-job-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px;
+}
+
+#ide-editor-inner .livecode-lsp-job .livecode-lsp-log {
+	margin: 0;
+	max-height: 140px;
+}
