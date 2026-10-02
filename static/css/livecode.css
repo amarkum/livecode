@@ -16312,7 +16312,7 @@ body.dark-theme .livecode-dialog-overlay {
 	height: 35px !important;
 	gap: 2px;
 	padding: 0 8px !important;
-	border-bottom: 0 !important;
+	border-bottom: 1px solid var(--lc-stroke-3, rgba(255, 255, 255, 0.08)) !important;
 	background: var(--vscode-panel-background, var(--livecode-bg-sidebar)) !important;
 	font-family: var(--vscode-font-family);
 	scrollbar-width: none;
@@ -16373,8 +16373,10 @@ body.dark-theme .livecode-dialog-overlay {
 	color: var(--livecode-icon-primary) !important;
 }
 #ide-editor-inner #ide-terminal-panel #ide-terminal-tab-add .ui-icon { --icon-size: 16px; }
+/* The padding around the terminal is the terminal's own colour (the one xterm draws with), so it reads
+   as one surface under the tab row rather than a box inside the panel. */
 #ide-editor-inner #ide-terminal-panel #ide-terminal-container {
-	background: var(--vscode-terminal-background, var(--vscode-panel-background)) !important;
+	background: var(--ide-terminal-bg, var(--vscode-terminal-background)) !important;
 }
 
 #ide-editor-inner #ide-project-tabs {
@@ -21347,16 +21349,6 @@ body.pink-theme .livecode-toast { background: #ffffff; color: #1f2937; box-shado
 	white-space: nowrap;
 }
 
-#ide-editor-inner .livecode-lsp-exts {
-	overflow: hidden;
-	margin-top: 1px;
-	color: var(--lc-text-3);
-	font-family: var(--lc-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-	font-size: 11px;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-}
-
 #ide-editor-inner .livecode-lsp-pill {
 	display: inline-flex;
 	align-items: center;
@@ -21431,24 +21423,6 @@ body.pink-theme .livecode-toast { background: #ffffff; color: #1f2937; box-shado
 
 #ide-editor-inner .livecode-lsp-more:hover {
 	background: var(--lc-hover);
-}
-
-#ide-editor-inner .livecode-lsp-foot {
-	display: flex;
-	flex-direction: column;
-	align-items: flex-start;
-	gap: 6px;
-}
-
-#ide-editor-inner .livecode-lsp-foot .livecode-lsp-more {
-	margin-left: -6px;
-	color: var(--lc-text-3);
-}
-
-#ide-editor-inner .livecode-settings-view .livecode-lsp-input {
-	width: 100%;
-	font-family: var(--lc-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-	font-size: 11.5px;
 }
 
 #ide-editor-inner .livecode-lsp-job {
