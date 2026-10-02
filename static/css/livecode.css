@@ -21764,28 +21764,6 @@ body.pink-theme .livecode-chat-session-item-menu .chat-history-menu-item.danger:
 	color: #dc2626;
 }
 
-/* ---- "Worked for 2m 17s": a finished turn's steps, folded above its final answer ---- */
-
-#ide-editor-section #ide-editor-inner #livecode-agent-panel #livecode-chat-messages > .chat-row.lc-work-member.is-work-collapsed {
-	display: none !important;
-}
-
-#ide-editor-inner #livecode-agent-panel #livecode-chat-messages > .chat-row.lc-worked-row {
-	padding-inline: var(--conversation-text-inset);
-	background: transparent;
-}
-
-/* Narration from while it worked reads quieter than the answer. */
-#ide-editor-inner #livecode-agent-panel #livecode-chat-messages > .chat-row.lc-work-member.livecode-assistant-row .chat-msg {
-	color: var(--livecode-text-secondary, rgb(var(--lc-fg) / 0.6));
-}
-
-/* The fold's chevron always shows, like Cursor's "Worked for … ⌄". */
-#ide-editor-inner #livecode-agent-panel #livecode-chat-messages .lc-worked .ui-collapsible-chevron {
-	opacity: 1;
-	color: var(--livecode-icon-secondary, currentColor);
-}
-
 /* ---- End of a turn: copy, branch, and when it finished (hover for the date and how long it worked) ---- */
 
 #ide-editor-inner #livecode-agent-panel #livecode-chat-messages > .chat-row.lc-turn-footer {

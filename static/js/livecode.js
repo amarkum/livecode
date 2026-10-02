@@ -9440,7 +9440,7 @@ function _livecodeTurnSteps(rows) {
   const steps = [];
   rows.forEach(function(row) {
     const cl = row.classList;
-    if (cl.contains("lc-group-row") || cl.contains("lc-worked-row") || cl.contains("lc-turn-footer") || cl.contains("livecode-status-row")) return;
+    if (cl.contains("lc-group-row") || cl.contains("lc-turn-footer") || cl.contains("livecode-status-row")) return;
     if (cl.contains("livecode-agent-steps-row")) {
       const lines = row.querySelectorAll(".livecode-activity-wrap-outer");
       if (!lines.length) return;
@@ -9707,10 +9707,10 @@ function _livecodeRegroupTranscript(output, opts) {
     else row.removeAttribute("data-group-key");
     row.classList.toggle("lc-empty-row", row.classList.contains("livecode-agent-steps-row") && !row.querySelector(".livecode-activity-wrap-outer"));
   });
-  _livecodeFoldFinishedTurns(output, opts);
+  _livecodeAddTurnFooters(output, opts);
 }
 
-// ---- "Worked for 2m 17s": a finished turn's steps fold away above its final answer.
+// ---- Under a finished turn's answer: copy, branch, and when it finished.
 
 function _livecodeWorkedForLabel(ms) {
   const n = Number(ms);
@@ -9731,19 +9731,10 @@ function _livecodeMarkTurnsFinished(output) {
   _livecodeRegroupTranscript(output);
 }
 
-function _livecodeIsWorkRow(row) {
-  const cl = row.classList;
-  if (cl.contains("lc-empty-row") || cl.contains("livecode-status-row")) return false;
-  if (cl.contains("livecode-term-row") || cl.contains("livecode-diff-row") || cl.contains("livecode-assistant-row") || cl.contains("lc-group-row")) return true;
-  if (cl.contains("livecode-agent-steps-row")) {
-    return Array.from(row.querySelectorAll(".livecode-activity-wrap-outer")).some(function(outer) {
-      return _livecodeLineStep(outer).kind !== "thinking";
-    });
-  }
-  return false;
-}
-
-function _livecodeFoldFinishedTurns(output, opts) {
+function _livecodeAddTurnFooters(output, opts) {
+  // Chats saved while finished turns were folded under "Worked for …" still have those headers.
+  output.querySelectorAll(":scope > .chat-row.lc-worked-row").forEach(function(r) { r.remove(); });
+  output.querySelectorAll(":scope > .chat-row.lc-work-member").forEach(function(r) { r.classList.remove("lc-work-member", "is-work-collapsed"); });
   const rows = Array.from(output.children).filter(function(el) { return el.classList && el.classList.contains("chat-row"); });
   const turns = [];
   let cur = null;
@@ -9758,20 +9749,14 @@ function _livecodeFoldFinishedTurns(output, opts) {
   const todo = opts && opts.lastTurnOnly ? turns.slice(-1) : turns;
   todo.forEach(function(t) {
     const user = t.user;
-    let header = t.rows.filter(function(r) { return r.classList.contains("lc-worked-row"); })[0] || null;
     let footer = t.rows.filter(function(r) { return r.classList.contains("lc-turn-footer"); })[0] || null;
-    const body = t.rows.filter(function(r) { return !r.classList.contains("lc-worked-row") && !r.classList.contains("lc-turn-footer"); });
+    const body = t.rows.filter(function(r) { return !r.classList.contains("lc-turn-footer"); });
     // Only the newest turn can still be running; one with a turn after it has finished.
     const running = t === turns[turns.length - 1] && user.hasAttribute("data-turn-started") && !user.hasAttribute("data-turn-ms");
     let finalIdx = -1;
     for (let i = body.length - 1; i >= 0; i--) {
       if (body[i].classList.contains("livecode-assistant-row")) { finalIdx = i; break; }
     }
-    const work = finalIdx > 0 ? body.slice(0, finalIdx) : [];
-    const clear = function(r) {
-      r.classList.remove("lc-work-member", "is-work-collapsed");
-      r.removeAttribute("data-work-key");
-    };
     // The footer under a finished answer: copy, branch, and when it finished.
     if (!running && finalIdx >= 0) {
       if (!footer) {
@@ -9788,44 +9773,6 @@ function _livecodeFoldFinishedTurns(output, opts) {
     } else if (footer) {
       footer.remove();
     }
-    if (running || !work.some(_livecodeIsWorkRow)) {
-      if (header) header.remove();
-      body.forEach(clear);
-      return;
-    }
-    let key = user.getAttribute("data-turn-key");
-    if (!key) {
-      key = _livecodeNextStepId();
-      user.setAttribute("data-turn-key", key);
-    }
-    if (!header) {
-      header = document.createElement("div");
-      header.className = "chat-row lc-worked-row";
-      header.setAttribute("data-work-key", key);
-    }
-    // Open only if this header was opened for this turn; a header that came from another turn starts closed.
-    if (header.getAttribute("data-work-key") !== key) {
-      header.setAttribute("data-work-key", key);
-      header.removeAttribute("data-open");
-      header._curHtml = "";
-    }
-    const open = header.getAttribute("data-open") === "1";
-    const html = '<div class="ui-collapsible lc-worked" data-tone="muted">' +
-      '<div class="ui-collapsible-header lc-worked-toggle" data-expandable role="button" tabindex="0" aria-expanded="' + (open ? "true" : "false") + '"' + (open ? " data-panel-open" : "") + ">" +
-      '<span class="ui-collapsible-action">' + _livecodeEscapeHtml(_livecodeWorkedForLabel(user.getAttribute("data-turn-ms"))) + "</span>" +
-      _livecodeIcon("chevron-right", { className: "ui-collapsible-chevron" }) +
-      "</div></div>";
-    if (header._curHtml !== html) {
-      header.innerHTML = html;
-      header._curHtml = html;
-    }
-    if (header.nextElementSibling !== work[0]) work[0].before(header);
-    work.forEach(function(r) {
-      r.classList.add("lc-work-member");
-      r.classList.toggle("is-work-collapsed", !open);
-      r.setAttribute("data-work-key", key);
-    });
-    body.slice(finalIdx).forEach(clear);
   });
 }
 
@@ -9944,37 +9891,6 @@ setInterval(function() {
     if (textNode && textNode.nodeType === 3 && textNode.nodeValue !== label) textNode.nodeValue = label;
   });
 }, 30000);
-
-function _livecodeToggleWorked(toggle) {
-  const row = toggle.closest(".lc-worked-row");
-  const output = row && row.parentNode;
-  if (!row || !output) return;
-  const open = row.getAttribute("data-open") !== "1";
-  row.setAttribute("data-open", open ? "1" : "0");
-  toggle.setAttribute("aria-expanded", open ? "true" : "false");
-  toggle.toggleAttribute("data-panel-open", open);
-  row._curHtml = row.innerHTML;
-  const key = row.getAttribute("data-work-key");
-  output.querySelectorAll('.chat-row.lc-work-member[data-work-key="' + key + '"]').forEach(function(member) {
-    member.classList.toggle("is-work-collapsed", !open);
-  });
-}
-
-(function _livecodeBindWorkedOnce() {
-  document.addEventListener("click", function(e) {
-    const toggle = e.target && e.target.closest ? e.target.closest("#livecode-chat-messages .lc-worked-toggle") : null;
-    if (!toggle) return;
-    e.preventDefault();
-    _livecodeToggleWorked(toggle);
-  });
-  document.addEventListener("keydown", function(e) {
-    if (e.key !== "Enter" && e.key !== " ") return;
-    const toggle = e.target && e.target.closest ? e.target.closest("#livecode-chat-messages .lc-worked-toggle") : null;
-    if (!toggle) return;
-    e.preventDefault();
-    _livecodeToggleWorked(toggle);
-  });
-})();
 
 function _livecodeToggleStepGroup(header) {
   const row = header.closest(".lc-group-row");
