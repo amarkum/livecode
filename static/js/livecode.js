@@ -230,12 +230,17 @@ let livecodeIndexReady = false;
 let livecodeIndexFileCount = 0;
 let livecodeIndexSymbolCount = 0;
 let livecodeIndexTruncated = false;
+let livecodeIndexDetails = null;
+let livecodeIndexFolders = [];
 
 function _livecodeApplyIndexResult(data) {
   livecodeIndexReady = true;
   livecodeIndexFileCount = data.file_count || 0;
   livecodeIndexSymbolCount = data.symbol_count || 0;
   livecodeIndexTruncated = !!data.truncated;
+  livecodeIndexDetails = data.details || null;
+  livecodeIndexFolders = Array.isArray(data.folders) ? data.folders : [];
+  if (_livecodeSettingsVisible("indexing")) _livecodeRenderSettingsPage();
 }
 
 const LIVECODE_LAST_PROJECT_KEY = "livecode_last_project";
@@ -5472,6 +5477,8 @@ function _livecodeClearActiveProject() {
   livecodeIndexReady = false;
   livecodeIndexFileCount = 0;
   livecodeIndexSymbolCount = 0;
+  livecodeIndexDetails = null;
+  livecodeIndexFolders = [];
   livecodeIndexTruncated = false;
 
   livecodeChatTabs = [];
@@ -5625,6 +5632,8 @@ window.setLiveCodeProject = function(path) {
   livecodeIndexReady = false;
   livecodeIndexFileCount = 0;
   livecodeIndexSymbolCount = 0;
+  livecodeIndexDetails = null;
+  livecodeIndexFolders = [];
   livecodeIndexTruncated = false;
   if (normPrev !== normNext || !livecodeChatTabs.length) _livecodeLoadTabsForProject(path);
   const activeTab = _livecodeGetActiveChatTab();
@@ -6698,6 +6707,10 @@ function _livecodeSnapshotTab(tab) {
     costUsd: tab.costUsd || 0,
     contextUsed: tab.contextUsed || 0,
     contextLimit: tab.contextLimit || 0,
+    contextBreakdown: tab.contextBreakdown || null,
+    contextCompactAt: tab.contextCompactAt || 0,
+    contextModel: tab.contextModel || "",
+    contextCached: tab.contextCached || 0,
   };
 }
 
@@ -6836,6 +6849,10 @@ function _livecodeLoadTabsForProject(path) {
         costUsd: t.costUsd || 0,
         contextUsed: t.contextUsed || 0,
         contextLimit: t.contextLimit || 0,
+        contextBreakdown: t.contextBreakdown || null,
+        contextCompactAt: t.contextCompactAt || 0,
+        contextModel: t.contextModel || "",
+        contextCached: t.contextCached || 0,
       };
     });
     livecodeActiveChatTabId = saved.activeTabId || livecodeChatTabs[0].id;
@@ -7293,8 +7310,111 @@ function _livecodeUpdateContextRing(tab) {
   const label = limit > 0
     ? "Context: " + Math.round(frac * 100) + "% used (" + used.toLocaleString() + " / " + limit.toLocaleString() + " tokens)"
     : "Context: 0% used (updates after the first message)";
-  ring.title = label;
+  ring.removeAttribute("title");  // the hover card says it, with the breakdown
   ring.setAttribute("aria-label", label);
+  ring.tabIndex = 0;
+  _livecodeBindContextCard(ring);
+  if (_livecodeContextCard && _livecodeContextCard.classList.contains("is-open")) _livecodeRenderContextCard(tab);
+}
+
+// ---- Context ring hover card: how full the context window is, and what fills it.
+
+const _LIVECODE_CONTEXT_PARTS = [
+  { key: "conversation", label: "Conversation", color: "#5b8def" },
+  { key: "tool_results", label: "Tool results", color: "#e0884a" },
+  { key: "system", label: "System prompt & rules", color: "#4fb286" },
+  { key: "tools", label: "Tool definitions", color: "#a78bfa" },
+  { key: "images", label: "Images", color: "#d9728f" },
+];
+let _livecodeContextCard = null;
+let _livecodeContextCardHideTimer = null;
+
+function _livecodeFormatTokens(n) {
+  n = Math.max(0, Number(n) || 0);
+  if (n >= 1e6) return (n / 1e6).toFixed(n % 1e6 === 0 ? 0 : 1).replace(/\.0$/, "") + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e5 ? 0 : 1).replace(/\.0$/, "") + "k";
+  return String(Math.round(n));
+}
+
+function _livecodeContextCardHtml(tab) {
+  const used = Number(tab && tab.contextUsed) || 0;
+  const limit = Number(tab && tab.contextLimit) || 0;
+  const esc = _livecodeEscapeHtml;
+  if (!limit) {
+    return '<div class="livecode-ctx-card-head"><span>Context window</span></div>' +
+      '<div class="livecode-ctx-card-bar"></div>' +
+      '<p class="livecode-ctx-card-note">Shows how full the model\'s context is after the first reply.</p>';
+  }
+  const pct = function(n) { return Math.max(0, Math.min(100, (n / limit) * 100)); };
+  const parts = tab.contextBreakdown || {};
+  const known = _LIVECODE_CONTEXT_PARTS.filter(function(p) { return Number(parts[p.key]) > 0; });
+  const rows = known.length ? known : [{ key: "_used", label: "Used", color: "#5b8def" }];
+  const valueOf = function(p) { return p.key === "_used" ? used : Number(parts[p.key]) || 0; };
+  let bar = "";
+  rows.forEach(function(p) { bar += '<span style="width:' + pct(valueOf(p)).toFixed(2) + "%;background:" + p.color + '"></span>'; });
+  const compactAt = Number(tab.contextCompactAt) || 0;
+  const marker = compactAt > 0 && compactAt < 1 ? '<i class="livecode-ctx-card-mark" style="left:' + (compactAt * 100).toFixed(1) + '%" title="Auto-compacts here"></i>' : "";
+  let list = "";
+  rows.forEach(function(p) {
+    const v = valueOf(p);
+    list += '<div class="livecode-ctx-card-row"><span class="livecode-ctx-card-dot" style="background:' + p.color + '"></span>' +
+      '<span class="livecode-ctx-card-label">' + esc(p.label) + "</span>" +
+      '<span class="livecode-ctx-card-num">' + _livecodeFormatTokens(v) + "</span>" +
+      '<span class="livecode-ctx-card-pct">' + (used ? Math.round((v / used) * 100) : 0) + "%</span></div>";
+  });
+  list += '<div class="livecode-ctx-card-row is-free"><span class="livecode-ctx-card-dot"></span><span class="livecode-ctx-card-label">Free</span>' +
+    '<span class="livecode-ctx-card-num">' + _livecodeFormatTokens(Math.max(0, limit - used)) + "</span><span class=\"livecode-ctx-card-pct\"></span></div>";
+  const foot = [];
+  if (compactAt > 0) foot.push("Auto-compacts at " + Math.round(compactAt * 100) + "%");
+  if (Number(tab.contextCached) > 0) foot.push(_livecodeFormatTokens(tab.contextCached) + " cached");
+  if (tab.contextModel) foot.push(String(tab.contextModel).replace(/^[a-z]+:/, ""));
+  return '<div class="livecode-ctx-card-head"><span>Context window</span><span class="livecode-ctx-card-total">' +
+      _livecodeFormatTokens(used) + " / " + _livecodeFormatTokens(limit) + " (" + Math.round(pct(used)) + "%)</span></div>" +
+    '<div class="livecode-ctx-card-bar">' + bar + marker + "</div>" +
+    '<div class="livecode-ctx-card-rows">' + list + "</div>" +
+    (foot.length ? '<div class="livecode-ctx-card-foot">' + esc(foot.join(" · ")) + "</div>" : "");
+}
+
+function _livecodeRenderContextCard(tab) {
+  if (_livecodeContextCard) _livecodeContextCard.innerHTML = _livecodeContextCardHtml(tab);
+}
+
+function _livecodePlaceContextCard(ring) {
+  const card = _livecodeContextCard;
+  const r = ring.getBoundingClientRect();
+  const w = card.offsetWidth;
+  const h = card.offsetHeight;
+  const left = Math.max(8, Math.min(window.innerWidth - w - 8, r.right - w));
+  const top = r.top - h - 8 >= 8 ? r.top - h - 8 : r.bottom + 8;
+  card.style.left = Math.round(left) + "px";
+  card.style.top = Math.round(top) + "px";
+}
+
+function _livecodeBindContextCard(ring) {
+  if (ring._contextCardBound) return;
+  ring._contextCardBound = true;
+  const show = function() {
+    clearTimeout(_livecodeContextCardHideTimer);
+    if (!_livecodeContextCard) {
+      _livecodeContextCard = document.createElement("div");
+      _livecodeContextCard.className = "livecode-ctx-card";
+      _livecodeContextCard.setAttribute("role", "tooltip");
+      (document.getElementById("livecode-agent-panel") || document.body).appendChild(_livecodeContextCard);
+    }
+    _livecodeRenderContextCard(_livecodeGetActiveChatTab());
+    _livecodeContextCard.classList.add("is-open");
+    _livecodePlaceContextCard(ring);
+  };
+  const hide = function() {
+    clearTimeout(_livecodeContextCardHideTimer);
+    _livecodeContextCardHideTimer = setTimeout(function() {
+      if (_livecodeContextCard) _livecodeContextCard.classList.remove("is-open");
+    }, 80);
+  };
+  ring.addEventListener("mouseenter", show);
+  ring.addEventListener("focus", show);
+  ring.addEventListener("mouseleave", hide);
+  ring.addEventListener("blur", hide);
 }
 
 function _livecodeUpdateChatCostDisplay(tab, options) {
@@ -12103,6 +12223,10 @@ function handleLiveCodeProgress(data) {
     if (promptTokens > 0 && contextLimit > 0) {
       targetTab.contextUsed = promptTokens;
       targetTab.contextLimit = contextLimit;
+      targetTab.contextBreakdown = data.context_breakdown && typeof data.context_breakdown === "object" ? data.context_breakdown : null;
+      targetTab.contextCompactAt = Number(data.compact_at || 0);
+      targetTab.contextModel = String(data.context_model || "");
+      targetTab.contextCached = Number(data.cached_tokens || 0);
       if (isActiveTab) _livecodeUpdateContextRing(targetTab);
     }
     const usageCost = Number(data.cost_usd || 0);
@@ -18493,19 +18617,90 @@ function _livecodeLoadSettingsRules() {
   });
 }
 
-function _livecodeSettingsIndexingHtml() {
-  let html = '<h2 class="livecode-settings-h">Indexing</h2><p class="livecode-settings-lead">The codebase index powers file search, symbol lookup, and the project layout the agent sees.</p><div class="livecode-settings-group">';
-  const count = function(n, noun) { return n.toLocaleString() + " " + noun + (n === 1 ? "" : "s"); };
-  let status = !livecodeProjectPath ? "Open a project to index it." : (livecodeIndexReady ? count(livecodeIndexFileCount, "file") : "Indexing…");
-  if (livecodeProjectPath && livecodeIndexReady) {
-    status += livecodeIndexSymbolCount ? " · " + count(livecodeIndexSymbolCount, "symbol") : "";
-    if (livecodeIndexTruncated) status += " · large project: the file list stops at " + livecodeIndexFileCount.toLocaleString() + " files (search still covers everything)";
-  }
-  html += _livecodeSettingsRowHtml("Codebase index", status, livecodeProjectPath ? _livecodeSettingsButton("Re-index", "reindex") : "");
-  html += "</div>";
-  return html;
+const _LIVECODE_EXT_NAMES = {
+  ".py": "Python", ".pyi": "Python stubs", ".js": "JavaScript", ".mjs": "JavaScript", ".cjs": "JavaScript", ".jsx": "JSX",
+  ".ts": "TypeScript", ".tsx": "TSX", ".html": "HTML", ".css": "CSS", ".scss": "SCSS", ".json": "JSON", ".md": "Markdown",
+  ".yml": "YAML", ".yaml": "YAML", ".toml": "TOML", ".sh": "Shell", ".go": "Go", ".rs": "Rust", ".java": "Java",
+  ".kt": "Kotlin", ".swift": "Swift", ".rb": "Ruby", ".php": "PHP", ".c": "C", ".h": "C header", ".cpp": "C++",
+  ".cs": "C#", ".sql": "SQL", ".svg": "SVG", ".png": "PNG", ".jpg": "JPEG", ".txt": "Text", "(no ext)": "No extension",
+};
+
+function _livecodeFormatBytes(n) {
+  n = Number(n) || 0;
+  if (n >= 1024 * 1024 * 1024) return (n / 1024 / 1024 / 1024).toFixed(1).replace(/\.0$/, "") + " GB";
+  if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1).replace(/\.0$/, "") + " MB";
+  if (n >= 1024) return Math.round(n / 1024) + " KB";
+  return n + " B";
 }
 
+function _livecodeTimeAgo(epochSeconds) {
+  const t = Number(epochSeconds) || 0;
+  if (!t) return "";
+  const s = Math.max(0, Math.round(Date.now() / 1000 - t));
+  if (s < 45) return "just now";
+  if (s < 3600) return Math.round(s / 60) + " min ago";
+  if (s < 86400) return Math.round(s / 3600) + " h ago";
+  return Math.round(s / 86400) + " d ago";
+}
+
+// Label, a bar for its share of the largest, and the count.
+function _livecodeIndexBarsHtml(entries, labelOf, unit) {
+  const max = entries.reduce(function(m, e) { return Math.max(m, e[1]); }, 0) || 1;
+  return '<div class="livecode-index-bars">' + entries.map(function(e) {
+    return '<div class="livecode-index-bar-row"><span class="livecode-index-bar-label">' + labelOf(e[0]) + "</span>" +
+      '<span class="livecode-index-bar"><span style="width:' + Math.max(2, Math.round((e[1] / max) * 100)) + '%"></span></span>' +
+      '<span class="livecode-index-bar-num">' + Number(e[1]).toLocaleString() + (unit ? " " + unit : "") + "</span></div>";
+  }).join("") + "</div>";
+}
+
+function _livecodeSettingsIndexingHtml() {
+  const esc = _livecodeEscapeHtml;
+  let html = '<h2 class="livecode-settings-h">Indexing</h2><p class="livecode-settings-lead">The codebase index powers file search, symbol lookup, and the project layout the agent sees. It updates as files change.</p>';
+  const count = function(n, noun) { return Number(n).toLocaleString() + " " + noun + (n === 1 ? "" : "s"); };
+  if (!livecodeProjectPath) return html + '<div class="livecode-settings-group"><div class="livecode-settings-empty">Open a project to index it.</div></div>';
+  const d = livecodeIndexDetails;
+  const reindex = _livecodeSettingsButton(livecodeIndexReady ? "Re-index" : "Indexing…", "reindex", livecodeIndexReady ? "" : " disabled");
+
+  // Summary: the totals, and when it last ran.
+  let stats = '<div class="livecode-index-stats">' +
+    '<div><strong>' + (livecodeIndexReady ? Number(livecodeIndexFileCount).toLocaleString() : "…") + "</strong><span>files</span></div>" +
+    '<div><strong>' + (livecodeIndexReady ? Number(livecodeIndexSymbolCount).toLocaleString() : "…") + "</strong><span>symbols</span></div>" +
+    '<div><strong>' + (d ? _livecodeFormatBytes(d.total_bytes) : "…") + "</strong><span>indexed</span></div></div>";
+  let sub = !livecodeIndexReady ? "Indexing…" : d && d.indexed_at ? "Updated " + _livecodeTimeAgo(d.indexed_at) : "";
+  if (livecodeIndexTruncated && d) sub += (sub ? " · " : "") + "Large project: the file list stops at " + Number(d.max_files).toLocaleString() + " files; search still covers everything.";
+  html += '<div class="livecode-settings-group livecode-index-summary"><div class="livecode-index-summary-main">' + stats +
+    (sub ? '<div class="livecode-index-sub">' + esc(sub) + "</div>" : "") + "</div>" + reindex + "</div>";
+  if (!d) return html;
+
+  const extEntries = Array.isArray(d.ext_counts) ? d.ext_counts : [];
+  if (extEntries.length) {
+    html += '<h3 class="livecode-settings-subh">File types</h3><div class="livecode-settings-group livecode-index-group">' +
+      _livecodeIndexBarsHtml(extEntries, function(ext) {
+        const name = _LIVECODE_EXT_NAMES[ext];
+        return esc(name || ext) + (name && ext !== "(no ext)" ? ' <span class="livecode-index-ext">' + esc(ext) + "</span>" : "");
+      }, "") + "</div>";
+  }
+  const dirEntries = Array.isArray(d.dir_counts) ? d.dir_counts : [];
+  if (dirEntries.length) {
+    html += '<h3 class="livecode-settings-subh">Folders</h3><div class="livecode-settings-group livecode-index-group">' +
+      _livecodeIndexBarsHtml(dirEntries, function(dir) { return dir ? '<span class="livecode-index-mono">' + esc(dir) + "</span>" : "Project root"; }, "") + "</div>";
+  }
+  const symEntries = Array.isArray(d.symbol_languages) ? d.symbol_languages : [];
+  html += '<h3 class="livecode-settings-subh">Symbols</h3><div class="livecode-settings-group livecode-index-group">' +
+    '<p class="livecode-index-note">Functions, classes and methods in Python, JavaScript and TypeScript files, for go-to-symbol and find references.</p>' +
+    (symEntries.length ? _livecodeIndexBarsHtml(symEntries, function(ext) { return esc(_LIVECODE_EXT_NAMES[ext] || ext) + ' <span class="livecode-index-ext">' + esc(ext) + "</span>"; }, "") : "") + "</div>";
+
+  if (livecodeIndexFolders.length > 1) {
+    html += '<h3 class="livecode-settings-subh">Workspace folders</h3><div class="livecode-settings-group">' + livecodeIndexFolders.map(function(f) {
+      return _livecodeSettingsRowHtml(esc(f.name), _livecodeSettingsPathHtml(f.path) + count(f.file_count || 0, "file") + " · " + count(f.symbol_count || 0, "symbol") + (f.truncated ? " · capped" : ""), "");
+    }).join("") + "</div>";
+  }
+
+  html += '<h3 class="livecode-settings-subh">Not indexed</h3><div class="livecode-settings-group livecode-index-group"><p class="livecode-index-note">' +
+    "Anything your .gitignore excludes, hidden folders, " + esc((d.skip_dirs || []).filter(function(n) { return n.charAt(0) !== "."; }).join(", ")) +
+    ", compiled and archive files, and files over " + _livecodeFormatBytes(d.max_file_bytes) + ".</p></div>";
+  return html;
+}
 
 const LIVECODE_MCP_DISABLED_TOOLS_PREFIX = "livecode_mcp_disabled_tools_v1:";
 const _LIVECODE_MCP_CHIP_LIMIT = 24;

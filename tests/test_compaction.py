@@ -102,3 +102,24 @@ def test_a_small_session_is_left_alone(tmp_path):
     summariser = _Summariser()
     assert context.maybe_compact_session(state, "s2", model="m", call_summarize=summariser, context_window=200_000, threshold_ratio=0.85) is None
     assert summariser.calls == 0
+
+
+def test_context_breakdown_splits_the_prompt_and_scales_to_the_real_total():
+    from livecode.compaction.intra import estimate_context_breakdown, scale_breakdown
+
+    messages = [
+        {"role": "system", "content": "s" * 4000},
+        {"role": "user", "content": [{"type": "text", "text": "u" * 400}, {"type": "image_url", "image_url": {"url": "data:"}}]},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "1", "function": {"name": "read", "arguments": "{}"}}]},
+        {"role": "tool", "content": "t" * 8000},
+    ]
+    tools = [{"type": "function", "function": {"name": "read", "description": "d" * 400}}]
+    parts = estimate_context_breakdown(messages, tools)
+    assert parts["system"] == 1000
+    assert parts["tool_results"] == 2000
+    assert parts["images"] > 0 and parts["conversation"] > 0 and parts["tools"] > 0
+
+    scaled = scale_breakdown(parts, 9000)
+    assert sum(scaled.values()) == 9000
+    assert set(scaled) == set(parts)
+    assert scale_breakdown(parts, 0) == parts

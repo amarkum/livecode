@@ -48,6 +48,36 @@ def estimate_messages_tokens(messages: list[dict[str, Any]]) -> int:
     return chars // 4 + images
 
 
+def estimate_context_breakdown(messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None) -> dict[str, int]:
+    """What a request's prompt is made of, in estimated tokens: the system prompt, the tool definitions,
+    the conversation (user and assistant turns, tool calls included), tool results, and images."""
+    parts = {"system": 0, "tools": estimate_tools_tokens(tools), "conversation": 0, "tool_results": 0, "images": 0}
+    for msg in messages:
+        content = msg.get("content")
+        blocks = content if isinstance(content, list) else []
+        image_tokens = sum(
+            _image_tokens(b) for b in blocks
+            if isinstance(b, dict) and (b.get("type") in _IMAGE_BLOCK_TYPES or b.get("image_url") or b.get("source"))
+        )
+        text_tokens = estimate_messages_tokens([msg]) - image_tokens
+        parts["images"] += image_tokens
+        role = msg.get("role")
+        key = "system" if role == "system" else "tool_results" if role == "tool" else "conversation"
+        parts[key] += max(0, text_tokens)
+    return parts
+
+
+def scale_breakdown(parts: dict[str, int], actual_total: int) -> dict[str, int]:
+    """The estimate scaled so it adds up to the provider's real prompt token count."""
+    estimated = sum(parts.values())
+    if actual_total <= 0 or estimated <= 0:
+        return dict(parts)
+    scaled = {k: int(round(v * actual_total / estimated)) for k, v in parts.items()}
+    largest = max(scaled, key=lambda k: scaled[k])
+    scaled[largest] += actual_total - sum(scaled.values())
+    return scaled
+
+
 def estimate_tools_tokens(tools: list[dict[str, Any]] | None) -> int:
     """The prompt tokens the tool definitions take: they go in every request, so they come off the budget."""
     if not tools:

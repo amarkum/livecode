@@ -170,6 +170,31 @@ def register_livecode_routes(app, socketio, rt):
             LIVECODE_LOGGER.warning("LiveCode session title generation failed", exc_info=True)
             return _livecode_fallback_session_title(question)
 
+    def _index_details(index: dict, symbol_stats: dict) -> dict:
+        """For Settings > Indexing: size, freshness, what the files are, where they live, and what is skipped."""
+        from livecode import workspace as ws
+        from livecode.codebase_index import SYMBOL_EXTENSIONS
+
+        files = index.get("files") or []
+        dir_counts: dict[str, int] = {}
+        for f in files:
+            rel = str(f.get("rel") or "")
+            top = rel.split("/", 1)[0] + "/" if "/" in rel else ""
+            dir_counts[top] = dir_counts.get(top, 0) + 1
+        return {
+            "total_bytes": sum(int(f.get("size") or 0) for f in files),
+            "indexed_at": index.get("indexed_at") or 0,
+            "symbols_indexed_at": symbol_stats.get("indexed_at") or 0,
+            # [name, count] pairs, largest first (a JSON object would come back sorted by name).
+            "ext_counts": sorted((index.get("ext_counts") or {}).items(), key=lambda kv: -kv[1]),
+            "dir_counts": sorted(dir_counts.items(), key=lambda kv: -kv[1])[:8],
+            "symbol_languages": sorted((symbol_stats.get("languages") or {}).items(), key=lambda kv: -kv[1]),
+            "symbol_extensions": sorted(SYMBOL_EXTENSIONS),
+            "max_files": ws.MAX_FILES,
+            "max_file_bytes": ws.MAX_FILE_SIZE,
+            "skip_dirs": sorted(ws.SKIP_DIRS)[:12],
+        }
+
     @app.route("/livecode/index", methods=["POST"])
     def livecode_build_index():
         data = request.get_json(silent=True) or {}
@@ -208,6 +233,7 @@ def register_livecode_routes(app, socketio, rt):
                     for (folder, index), sym in zip(results, symbols)
                 ],
                 "missing": [{"name": folder.name, "path": folder.path} for folder in workspace.missing],
+                "details": _index_details(primary_index, symbols[0] if symbols else {}),
             })
         except ValueError as e:
             return jsonify({"error": str(e)}), 400

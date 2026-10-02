@@ -23,7 +23,7 @@ from livecode.activity_log import (
 from livecode import agent_settings
 from livecode.model_pricing import estimate_usage_cost_usd
 from livecode.compaction.full_replace import fit_messages_for_summarizer
-from livecode.compaction.intra import estimate_tools_tokens
+from livecode.compaction.intra import estimate_context_breakdown, estimate_tools_tokens, scale_breakdown
 from livecode.context import (
     build_turn_activity_summary,
     compact_stale_tool_messages,
@@ -2980,6 +2980,7 @@ def run_livecode_turn(
                     "needs_evidence" if needs_codebase_evidence(question, has_prior_turns=has_prior_turns) else None,
                 )
 
+            context_parts = estimate_context_breakdown(messages, iteration_tools)
             model_call_started = time.monotonic()
             if logger:
                 _ide_log_plain(
@@ -3149,6 +3150,10 @@ def run_livecode_turn(
                     completion_tokens=response.get("completion_tokens"),
                     cached_tokens=response.get("cached_tokens"),
                     context_tokens=working_context_tokens(iteration_model),
+                    # What the prompt is made of, for the context ring's details.
+                    context_breakdown=scale_breakdown(context_parts, int(response.get("prompt_tokens") or 0)),
+                    compact_at=in_turn_compact_ratio,
+                    context_model=iteration_model,
                 )
             if logger:
                 _ide_log_plain(
