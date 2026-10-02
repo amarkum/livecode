@@ -21196,3 +21196,8 @@ body.pink-theme .livecode-toast { background: #ffffff; color: #1f2937; box-shado
 	white-space: pre-wrap;
 	word-break: break-word;
 }
+
+/* Modal messages keep the line breaks they are written with (lists in confirm dialogs). */
+.ide-modal-message {
+	white-space: pre-line;
+}
