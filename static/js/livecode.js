@@ -7443,15 +7443,10 @@ function _livecodeContextCardHtml(tab) {
   });
   list += '<div class="livecode-ctx-card-row is-free"><span class="livecode-ctx-card-dot"></span><span class="livecode-ctx-card-label">Free</span>' +
     '<span class="livecode-ctx-card-num">' + _livecodeFormatTokens(Math.max(0, limit - used)) + "</span><span class=\"livecode-ctx-card-pct\"></span></div>";
-  const foot = [];
-  if (compactAt > 0) foot.push("Auto-compacts at " + Math.round(compactAt * 100) + "%");
-  if (Number(tab.contextCached) > 0) foot.push(_livecodeFormatTokens(tab.contextCached) + " cached");
-  if (tab.contextModel) foot.push(String(tab.contextModel).replace(/^[a-z]+:/, ""));
   return '<div class="livecode-ctx-card-head"><span>Context window</span><span class="livecode-ctx-card-total">' +
       _livecodeFormatTokens(used) + " / " + _livecodeFormatTokens(limit) + " (" + Math.round(pct(used)) + "%)</span></div>" +
     '<div class="livecode-ctx-card-bar">' + bar + marker + "</div>" +
-    '<div class="livecode-ctx-card-rows">' + list + "</div>" +
-    (foot.length ? '<div class="livecode-ctx-card-foot">' + esc(foot.join(" · ")) + "</div>" : "");
+    '<div class="livecode-ctx-card-rows">' + list + "</div>";
 }
 
 function _livecodeRenderContextCard(tab) {

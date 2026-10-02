@@ -21576,18 +21576,10 @@ body.pink-theme .livecode-toast { background: #ffffff; color: #1f2937; box-shado
 	color: var(--lc-text-3);
 }
 
-#livecode-agent-panel .livecode-ctx-card-foot,
 #livecode-agent-panel .livecode-ctx-card-note {
 	margin: 10px 0 0;
-	padding-top: 9px;
-	border-top: 1px solid var(--lc-stroke-3);
 	color: var(--lc-text-3);
 	font-size: 11.5px;
-}
-
-#livecode-agent-panel .livecode-ctx-card-note {
-	padding-top: 0;
-	border-top: 0;
 }
 
 /* ---- Settings > Indexing: totals, then bars for file types, folders and symbols ---- */
