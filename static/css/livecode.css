@@ -20413,10 +20413,11 @@ body.dark-theme #ide-editor-inner #livecode-agent-panel {
 	transition: background 0.15s, width 0.15s;
 }
 #ide-editor-section #ide-sidebar-divider:hover::after,
+#ide-editor-section #ide-sidebar-divider.active::after,
 #ide-editor-section #ide-agent-divider:hover::after,
 #ide-editor-section #ide-agent-divider.active::after {
 	width: 3px;
-	background: rgba(96, 165, 250, 0.8);
+	background: rgb(var(--lc-fg) / 0.35);
 }
 
 /* Mode selector (Agent / Plan / Ask): grey pill, icon + label centred, same in every mode. */
@@ -21283,8 +21284,8 @@ body.pink-theme .livecode-toast { background: #ffffff; color: #1f2937; box-shado
 	font-size: 12px;
 }
 
-#ide-editor-inner .livecode-lsp-bridge {
-	margin: 10px 2px 0;
+#ide-editor-inner .livecode-lsp-note.livecode-lsp-bridge {
+	margin: 12px 2px 4px;
 }
 
 #ide-editor-inner .livecode-lsp-grid {
