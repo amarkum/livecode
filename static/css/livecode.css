@@ -12100,13 +12100,6 @@ body.white-theme #ide-editor-inner #livecode-agent-panel .livecode-questions-bar
 	overflow-y: auto;
 }
 
-#ide-editor-inner .livecode-settings-nav-title {
-	padding: 0 10px 14px;
-	color: var(--lc-text-1);
-	font-size: 13px;
-	font-weight: 600;
-}
-
 #ide-editor-inner .livecode-settings-nav-item {
 	display: flex;
 	align-items: center;
@@ -12661,7 +12654,6 @@ body .livecode-dialog .livecode-settings-btn.is-primary:hover {
 		flex-basis: 52px;
 		padding: 14px 8px;
 	}
-	#ide-editor-inner .livecode-settings-nav-title,
 	#ide-editor-inner .livecode-settings-nav-item span {
 		display: none;
 	}

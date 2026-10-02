@@ -17993,7 +17993,7 @@ function _livecodeRenderSettings() {
     '<input type="search" data-settings-search placeholder="Search settings" value="' + _livecodeEscapeHtml(query).replace(/"/g, "&quot;") + '" aria-label="Search settings" spellcheck="false" autocomplete="off"></div>';
   const pageHtml = view.querySelector("#livecode-settings-page") ? view.querySelector("#livecode-settings-page").innerHTML : "";
   _livecodeMorph(view,
-    '<nav class="livecode-settings-nav" aria-label="Settings sections"><div class="livecode-settings-nav-title">Settings</div>' + search + nav + "</nav>" +
+    '<nav class="livecode-settings-nav" aria-label="Settings sections">' + search + nav + "</nav>" +
     '<div class="livecode-settings-main"><div class="livecode-settings-page" id="livecode-settings-page">' + pageHtml + "</div></div>");
   _livecodeRenderSettingsPage();
 }
