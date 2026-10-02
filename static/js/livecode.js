@@ -2153,9 +2153,44 @@ window.inferLangFromPath = function(path) {
   if (p.endsWith(".toml")) return "toml";
   if (p.endsWith(".ini")) return "ini";
   if (p.endsWith(".properties")) return "ini";
-  if (p.endsWith(".dockerfile")) return "text";
   if (p.endsWith(".txt")) return "text";
+  const name = p.split(/[\\/]/).pop() || "";
+  if (_LIVECODE_FILENAME_LANGS[name]) return _LIVECODE_FILENAME_LANGS[name];
+  if (/^dockerfile(\..*)?$/.test(name) || name.endsWith(".dockerfile")) return "dockerfile";
+  const dot = name.lastIndexOf(".");
+  if (dot >= 0 && _LIVECODE_EXT_LANGS[name.slice(dot + 1)]) return _LIVECODE_EXT_LANGS[name.slice(dot + 1)];
   return "text";
+};
+
+// Extensions and file names beyond the ones above, mapped straight to Monaco language ids.
+const _LIVECODE_EXT_LANGS = {
+  java: "java", kt: "kotlin", kts: "kotlin", scala: "scala", sc: "scala", groovy: "java", gradle: "java",
+  c: "c", h: "c", cpp: "cpp", cc: "cpp", cxx: "cpp", hpp: "cpp", hh: "cpp", hxx: "cpp", ino: "cpp",
+  cs: "csharp", csx: "csharp", fs: "fsharp", fsi: "fsharp", fsx: "fsharp", vb: "vb",
+  rs: "rust", swift: "swift", m: "objective-c", mm: "objective-c", dart: "dart",
+  rb: "ruby", rake: "ruby", gemspec: "ruby", php: "php", phtml: "php", pl: "perl", pm: "perl",
+  lua: "lua", r: "r", jl: "julia", ex: "elixir", exs: "elixir", clj: "clojure", cljs: "clojure", cljc: "clojure", edn: "clojure",
+  coffee: "coffeescript", ps1: "powershell", psm1: "powershell", psd1: "powershell", bat: "bat", cmd: "bat",
+  zsh: "shell", fish: "shell", ksh: "shell", env: "ini", cfg: "ini", conf: "ini", editorconfig: "ini", gitconfig: "ini",
+  scss: "scss", sass: "scss", less: "less", vue: "html", svelte: "html", astro: "html", xhtml: "html",
+  hbs: "handlebars", handlebars: "handlebars", mustache: "handlebars", pug: "pug", jade: "pug", twig: "twig", liquid: "liquid",
+  svg: "xml", xsd: "xml", xsl: "xml", plist: "xml", csproj: "xml", fsproj: "xml", vbproj: "xml", props: "xml", targets: "xml", resx: "xml",
+  jsonc: "json", json5: "json", geojson: "json", webmanifest: "json", ipynb: "json", har: "json",
+  graphql: "graphql", gql: "graphql", proto: "proto", tf: "hcl", tfvars: "hcl", hcl: "hcl", bicep: "bicep",
+  sol: "solidity", cairo: "cairo", mdx: "mdx", markdown: "markdown", rst: "restructuredtext", tex: "plaintext",
+  pas: "pascal", pp: "pascal", dpr: "pascal", ml: "fsharp", mli: "fsharp", erl: "plaintext", hs: "plaintext",
+  sv: "systemverilog", svh: "systemverilog", v: "verilog", vh: "verilog", tcl: "tcl", st: "st", abap: "abap",
+  apex: "apex", cls: "apex", trigger: "apex", azcli: "azcli", cypher: "cypher", flow: "flow9", lex: "lexon",
+  m3: "m3", pq: "powerquery", pqm: "powerquery", qs: "qsharp", rq: "sparql", sparql: "sparql", redis: "redis",
+  pgsql: "pgsql", mysql: "mysql", sb: "sb", scm: "scheme", ss: "scheme", rkt: "scheme", wgsl: "wgsl",
+  dockerignore: "ignore", gitignore: "plaintext", log: "plaintext", csv: "plaintext", tsv: "plaintext",
+};
+const _LIVECODE_FILENAME_LANGS = {
+  makefile: "shell", gnumakefile: "shell", "cmakelists.txt": "plaintext", gemfile: "ruby", rakefile: "ruby",
+  podfile: "ruby", vagrantfile: "ruby", brewfile: "ruby", jenkinsfile: "java", procfile: "shell",
+  ".bashrc": "shell", ".zshrc": "shell", ".profile": "shell", ".bash_profile": "shell", ".env": "ini",
+  ".npmrc": "ini", ".gitconfig": "ini", ".editorconfig": "ini", "go.mod": "go", "go.sum": "plaintext",
+  "cargo.lock": "ini", "poetry.lock": "ini", "pipfile": "ini", "pom.xml": "xml",
 };
 
 window.mapToMonacoLang = function(lang) {
@@ -2176,10 +2211,15 @@ window.mapToMonacoLang = function(lang) {
     sh: "shell",
     yaml: "yaml",
     yml: "yaml",
-    toml: "plaintext",
-    ini: "plaintext"
+    toml: "ini",
+    ini: "ini"
   };
-  return langMap[lang] || "plaintext";
+  if (langMap[lang]) return langMap[lang];
+  // inferLangFromPath also returns Monaco ids directly (java, rust, cpp, …).
+  try {
+    if (window.monaco && monaco.languages.getLanguages().some(function(l) { return l.id === lang; })) return lang;
+  } catch (e) {}
+  return lang && lang !== "text" && Object.values(_LIVECODE_EXT_LANGS).indexOf(lang) !== -1 ? lang : "plaintext";
 };
 
 let _livecodeMonacoThemes = null;
