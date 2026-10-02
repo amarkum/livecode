@@ -9455,7 +9455,7 @@ function _livecodeTurnSteps(rows) {
   const steps = [];
   rows.forEach(function(row) {
     const cl = row.classList;
-    if (cl.contains("lc-group-row") || cl.contains("lc-worked-row") || cl.contains("livecode-status-row")) return;
+    if (cl.contains("lc-group-row") || cl.contains("lc-worked-row") || cl.contains("lc-turn-footer") || cl.contains("livecode-status-row")) return;
     if (cl.contains("livecode-agent-steps-row")) {
       const lines = row.querySelectorAll(".livecode-activity-wrap-outer");
       if (!lines.length) return;
@@ -9774,7 +9774,8 @@ function _livecodeFoldFinishedTurns(output, opts) {
   todo.forEach(function(t) {
     const user = t.user;
     let header = t.rows.filter(function(r) { return r.classList.contains("lc-worked-row"); })[0] || null;
-    const body = t.rows.filter(function(r) { return !r.classList.contains("lc-worked-row"); });
+    let footer = t.rows.filter(function(r) { return r.classList.contains("lc-turn-footer"); })[0] || null;
+    const body = t.rows.filter(function(r) { return !r.classList.contains("lc-worked-row") && !r.classList.contains("lc-turn-footer"); });
     // Only the newest turn can still be running; one with a turn after it has finished.
     const running = t === turns[turns.length - 1] && user.hasAttribute("data-turn-started") && !user.hasAttribute("data-turn-ms");
     let finalIdx = -1;
@@ -9786,6 +9787,22 @@ function _livecodeFoldFinishedTurns(output, opts) {
       r.classList.remove("lc-work-member", "is-work-collapsed");
       r.removeAttribute("data-work-key");
     };
+    // The footer under a finished answer: copy, branch, and when it finished.
+    if (!running && finalIdx >= 0) {
+      if (!footer) {
+        footer = document.createElement("div");
+        footer.className = "chat-row lc-turn-footer";
+      }
+      const html = _livecodeTurnFooterHtml(user);
+      if (footer._curHtml !== html) {
+        footer.innerHTML = html;
+        footer._curHtml = html;
+      }
+      const last = body[body.length - 1];
+      if (last.nextElementSibling !== footer) last.after(footer);
+    } else if (footer) {
+      footer.remove();
+    }
     if (running || !work.some(_livecodeIsWorkRow)) {
       if (header) header.remove();
       body.forEach(clear);
@@ -9826,6 +9843,122 @@ function _livecodeFoldFinishedTurns(output, opts) {
     body.slice(finalIdx).forEach(clear);
   });
 }
+
+const _LIVECODE_TURN_FOOTER_ICONS = {
+  copy: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="13" height="13" rx="2"></rect><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"></path></svg>',
+  branch: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="18" r="2.5"></circle><circle cx="6" cy="6" r="2.5"></circle><circle cx="18" cy="6" r="2.5"></circle><path d="M18 8.5v1a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2v-1M12 11.5v4"></path></svg>',
+};
+
+function _livecodeTurnEndedAt(user) {
+  const started = Number(user.getAttribute("data-turn-started")) || 0;
+  const ms = Number(user.getAttribute("data-turn-ms")) || 0;
+  return started && ms ? started + ms : 0;
+}
+
+function _livecodeShortAgo(ts) {
+  const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (s < 45) return "now";
+  if (s < 3600) return Math.max(1, Math.round(s / 60)) + "m ago";
+  if (s < 86400) return Math.round(s / 3600) + "h ago";
+  return Math.round(s / 86400) + "d ago";
+}
+
+function _livecodeTurnFooterHtml(user) {
+  const ended = _livecodeTurnEndedAt(user);
+  let time = "";
+  if (ended) {
+    const when = new Date(ended).toLocaleString(undefined, { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" });
+    time = '<span class="lc-turn-time" tabindex="0" data-ended="' + ended + '">' + _livecodeShortAgo(ended) +
+      '<span class="lc-turn-tip" role="tooltip"><span>' + _livecodeEscapeHtml(when) + "</span>" +
+      '<span class="lc-turn-tip-sub">' + _livecodeEscapeHtml(_livecodeWorkedForLabel(user.getAttribute("data-turn-ms"))) + "</span></span></span>";
+  }
+  return '<div class="lc-turn-actions">' +
+    '<button type="button" class="lc-turn-btn" data-turn-action="copy" title="Copy" aria-label="Copy answer">' + _LIVECODE_TURN_FOOTER_ICONS.copy + "</button>" +
+    '<button type="button" class="lc-turn-btn" data-turn-action="branch" title="Branch into a new chat from here" aria-label="Branch into a new chat from here">' + _LIVECODE_TURN_FOOTER_ICONS.branch + "</button>" +
+    time + "</div>";
+}
+
+// The rows of the turn a footer closes, and its user message.
+function _livecodeFooterTurn(footer) {
+  let node = footer.previousElementSibling;
+  const rows = [];
+  while (node && !node.classList.contains("livecode-user-row")) {
+    rows.unshift(node);
+    node = node.previousElementSibling;
+  }
+  return { user: node, rows: rows };
+}
+
+function _livecodeCopyTurnAnswer(footer) {
+  const turn = _livecodeFooterTurn(footer);
+  const answers = turn.rows.filter(function(r) { return r.classList.contains("livecode-assistant-row"); });
+  const msg = answers.length ? answers[answers.length - 1].querySelector(".chat-msg") : null;
+  if (!msg) return;
+  const text = msg.dataset && msg.dataset.rawMd ? msg.dataset.rawMd : msg.innerText;
+  _livecodeCopyToClipboard(String(text || "").trim(), "Copied the answer");
+}
+
+// A new chat with this chat's history up to the end of this turn, opened in its own tab.
+function _livecodeBranchFromTurn(footer) {
+  const out = footer.parentNode;
+  const tab = _livecodeGetActiveChatTab();
+  const turn = _livecodeFooterTurn(footer);
+  if (!out || !tab || !tab.sessionId || !turn.user || !livecodeProjectPath) return;
+  if (tab.agentRunning) {
+    _livecodeShowIdeToast("Wait for the agent to finish before branching.");
+    return;
+  }
+  const userIndex = Array.from(out.querySelectorAll(":scope > .chat-row.livecode-user-row")).indexOf(turn.user);
+  if (userIndex < 0) return;
+  const scratch = document.createElement("div");
+  let node = out.firstElementChild;
+  while (node) {
+    scratch.appendChild(node.cloneNode(true));
+    if (node === footer) break;
+    node = node.nextElementSibling;
+  }
+  const newId = _livecodeNewChatSessionId();
+  fetch("/livecode/session/fork", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      project_path: livecodeProjectPath,
+      session_id: tab.sessionId,
+      new_session_id: newId,
+      title: "Branch of " + (tab.title || "chat"),
+      through_user_turn: userIndex,
+      transcript_html: scratch.innerHTML,
+      workspace: _livecodeCurrentWorkspacePayload(),
+    }),
+  }).then(function(r) { return r.json(); }).then(function(data) {
+    if (!data || !data.success) {
+      _livecodeShowIdeToast("Couldn't branch the chat: " + ((data && data.error) || "unknown error"));
+      return;
+    }
+    window.openLiveCodeSessionInNewTab(newId);
+  }).catch(function(err) {
+    _livecodeShowIdeToast("Couldn't branch the chat: " + (err.message || err));
+  });
+}
+
+document.addEventListener("click", function(e) {
+  const btn = e.target && e.target.closest ? e.target.closest("#livecode-chat-messages .lc-turn-btn") : null;
+  if (!btn) return;
+  e.preventDefault();
+  const footer = btn.closest(".lc-turn-footer");
+  if (!footer) return;
+  if (btn.getAttribute("data-turn-action") === "copy") _livecodeCopyTurnAnswer(footer);
+  else if (btn.getAttribute("data-turn-action") === "branch") _livecodeBranchFromTurn(footer);
+});
+
+// "14m ago" stays current.
+setInterval(function() {
+  document.querySelectorAll("#livecode-chat-messages .lc-turn-time[data-ended]").forEach(function(el) {
+    const label = _livecodeShortAgo(Number(el.getAttribute("data-ended")));
+    const textNode = el.firstChild;
+    if (textNode && textNode.nodeType === 3 && textNode.nodeValue !== label) textNode.nodeValue = label;
+  });
+}, 30000);
 
 function _livecodeToggleWorked(toggle) {
   const row = toggle.closest(".lc-worked-row");

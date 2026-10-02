@@ -113,3 +113,16 @@ def test_markdown_export_has_the_title_and_both_sides(project, app_client):
     assert md.startswith("# Blue button")
     assert "## You\n\nmake the button blue" in md
     assert "## Assistant\n\nDone." in md
+
+
+def test_a_branch_keeps_the_history_through_its_turn(project):
+    state = workspace_state_path(project)
+    session.append_messages(state, "s1", [
+        {"role": "user", "content": "first"}, {"role": "assistant", "content": "one"},
+        {"role": "user", "content": "second"}, {"role": "assistant", "content": "two"},
+    ])
+    session.fork_session(state, "s1", "b1", title="Branch", through_user_turn=0, transcript_html="<div>first turn</div>")
+    kept = session.load_session(state, "b1")["messages"]
+    assert [m["content"] for m in kept] == ["first", "one"]
+    assert session.load_transcript(state, "b1") == "<div>first turn</div>"
+    assert len(session.load_session(state, "s1")["messages"]) == 4

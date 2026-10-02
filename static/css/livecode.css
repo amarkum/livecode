@@ -21799,3 +21799,89 @@ body.pink-theme .livecode-chat-session-item-menu .chat-history-menu-item.danger:
 	opacity: 1;
 	color: var(--livecode-icon-secondary, currentColor);
 }
+
+/* ---- End of a turn: copy, branch, and when it finished (hover for the date and how long it worked) ---- */
+
+#ide-editor-inner #livecode-agent-panel #livecode-chat-messages > .chat-row.lc-turn-footer {
+	padding-inline: var(--conversation-text-inset);
+	background: transparent;
+}
+
+#ide-editor-inner #livecode-agent-panel #livecode-chat-messages .lc-turn-actions {
+	position: relative;
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	margin-left: -5px;
+	color: var(--livecode-text-tertiary, rgb(var(--lc-fg) / 0.5));
+	font-size: 12.5px;
+}
+
+#ide-editor-inner #livecode-agent-panel #livecode-chat-messages .lc-turn-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 24px;
+	height: 24px;
+	margin: 0;
+	padding: 0;
+	border: 0;
+	border-radius: 5px;
+	background: transparent;
+	color: inherit;
+	cursor: pointer;
+}
+
+#ide-editor-inner #livecode-agent-panel #livecode-chat-messages .lc-turn-btn:hover,
+#ide-editor-inner #livecode-agent-panel #livecode-chat-messages .lc-turn-btn:focus-visible {
+	outline: none;
+	color: var(--livecode-text-primary, rgb(var(--lc-fg)));
+}
+
+#ide-editor-inner #livecode-agent-panel #livecode-chat-messages .lc-turn-time {
+	margin-left: 6px;
+	cursor: default;
+	font-variant-numeric: tabular-nums;
+	outline: none;
+}
+
+#ide-editor-inner #livecode-agent-panel #livecode-chat-messages .lc-turn-tip {
+	position: absolute;
+	bottom: calc(100% + 6px);
+	left: 0;
+	z-index: 20;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	padding: 8px 12px;
+	border-radius: 8px;
+	background: var(--lc-menu-bg, #141414);
+	box-shadow: inset 0 0 0 1px var(--lc-stroke-2), 0 8px 24px rgb(0 0 0 / 0.28);
+	color: var(--lc-text-1);
+	font-size: 12.5px;
+	white-space: nowrap;
+	pointer-events: none;
+	opacity: 0;
+	visibility: hidden;
+	transform: translateY(3px);
+	transition: opacity 0.12s ease, transform 0.12s ease, visibility 0s linear 0.12s;
+}
+
+#ide-editor-inner #livecode-agent-panel #livecode-chat-messages .lc-turn-tip-sub {
+	color: var(--lc-text-3);
+}
+
+#ide-editor-inner #livecode-agent-panel #livecode-chat-messages .lc-turn-time:hover .lc-turn-tip,
+#ide-editor-inner #livecode-agent-panel #livecode-chat-messages .lc-turn-time:focus .lc-turn-tip {
+	opacity: 1;
+	visibility: visible;
+	transform: none;
+	transition: opacity 0.12s ease, transform 0.12s ease;
+}
+
+/* While its tooltip shows, the footer sits above the pinned user message (z-index 101). */
+#ide-editor-inner #livecode-agent-panel #livecode-chat-messages > .chat-row.lc-turn-footer:has(.lc-turn-time:hover),
+#ide-editor-inner #livecode-agent-panel #livecode-chat-messages > .chat-row.lc-turn-footer:has(.lc-turn-time:focus) {
+	position: relative;
+	z-index: 102;
+}

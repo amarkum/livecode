@@ -396,7 +396,14 @@ def register_livecode_routes(app, socketio, rt):
         workspace_payload = data.get("workspace") if isinstance(data.get("workspace"), dict) else None
         try:
             state_path = _livecode_state_path(project_path, workspace_payload)
-            session = fork_session(state_path, session_id, new_session_id, title=str(data.get("title") or ""))
+            through = data.get("through_user_turn")
+            html = data.get("transcript_html")
+            session = fork_session(
+                state_path, session_id, new_session_id,
+                title=str(data.get("title") or ""),
+                through_user_turn=int(through) if isinstance(through, (int, float)) else None,
+                transcript_html=html if isinstance(html, str) else None,
+            )
             return jsonify({"success": True, "session_id": new_session_id, "message_count": len(session.get("messages") or [])})
         except Exception as e:
             return jsonify({"error": str(e)}), 400

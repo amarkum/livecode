@@ -619,7 +619,17 @@ def rename_session(project_path: str, session_id: str, title: str) -> bool:
         json.dump(summary, f, indent=2)
     return True
 
-def fork_session(project_path: str, session_id: str, new_session_id: str, *, title: str = "") -> dict[str, Any]:
+def fork_session(
+    project_path: str,
+    session_id: str,
+    new_session_id: str,
+    *,
+    title: str = "",
+    through_user_turn: int | None = None,
+    transcript_html: str | None = None,
+) -> dict[str, Any]:
+    """Copy a chat. With through_user_turn (0-based), the copy keeps the history up to the end of that
+    turn, a branch from there; transcript_html is what the copy shows."""
     import shutil
     src = session_dir(project_path, session_id)
     dst = session_dir(project_path, new_session_id)
@@ -645,6 +655,13 @@ def fork_session(project_path: str, session_id: str, new_session_id: str, *, tit
         summary["title"] = title.strip()[:200]
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
+    if through_user_turn is not None and through_user_turn >= 0:
+        messages = _read_jsonl(_chat_history_path(project_path, new_session_id))
+        cut = message_index_for_user_turn(messages, through_user_turn + 1)
+        if cut is not None:
+            rewind_to_message(project_path, new_session_id, cut)
+    if transcript_html is not None:
+        save_transcript(project_path, new_session_id, transcript_html)
     return load_session(project_path, new_session_id)
 
 
