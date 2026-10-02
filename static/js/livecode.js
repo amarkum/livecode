@@ -18754,10 +18754,7 @@ function _livecodeSettingsIndexingHtml() {
   const extEntries = Array.isArray(d.ext_counts) ? d.ext_counts : [];
   if (extEntries.length) {
     html += '<h3 class="livecode-settings-subh">File types</h3><div class="livecode-settings-group livecode-index-group">' +
-      _livecodeIndexBarsHtml(extEntries, function(ext) {
-        const name = _LIVECODE_EXT_NAMES[ext];
-        return esc(name || ext) + (name && ext !== "(no ext)" ? ' <span class="livecode-index-ext">' + esc(ext) + "</span>" : "");
-      }, "") + "</div>";
+      _livecodeIndexBarsHtml(extEntries, function(ext) { return esc(_LIVECODE_EXT_NAMES[ext] || ext); }, "") + "</div>";
   }
   const dirEntries = Array.isArray(d.dir_counts) ? d.dir_counts : [];
   if (dirEntries.length) {
@@ -18767,7 +18764,7 @@ function _livecodeSettingsIndexingHtml() {
   const symEntries = Array.isArray(d.symbol_languages) ? d.symbol_languages : [];
   html += '<h3 class="livecode-settings-subh">Symbols</h3><div class="livecode-settings-group livecode-index-group">' +
     '<p class="livecode-index-note">Functions, classes and methods in Python, JavaScript and TypeScript files, for go-to-symbol and find references.</p>' +
-    (symEntries.length ? _livecodeIndexBarsHtml(symEntries, function(ext) { return esc(_LIVECODE_EXT_NAMES[ext] || ext) + ' <span class="livecode-index-ext">' + esc(ext) + "</span>"; }, "") : "") + "</div>";
+    (symEntries.length ? _livecodeIndexBarsHtml(symEntries, function(ext) { return esc(_LIVECODE_EXT_NAMES[ext] || ext); }, "") : "") + "</div>";
 
   if (livecodeIndexFolders.length > 1) {
     html += '<h3 class="livecode-settings-subh">Workspace folders</h3><div class="livecode-settings-group">' + livecodeIndexFolders.map(function(f) {

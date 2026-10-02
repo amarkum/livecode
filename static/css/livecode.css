@@ -21659,14 +21659,9 @@ body.pink-theme .livecode-toast { background: #ffffff; color: #1f2937; box-shado
 	white-space: nowrap;
 }
 
-#ide-editor-inner .livecode-index-ext,
 #ide-editor-inner .livecode-index-mono {
 	font-family: var(--lc-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
 	font-size: 11px;
-}
-
-#ide-editor-inner .livecode-index-ext {
-	color: var(--lc-text-3);
 }
 
 #ide-editor-inner .livecode-index-bar {
